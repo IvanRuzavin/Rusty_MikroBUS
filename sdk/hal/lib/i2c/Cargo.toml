@@ -1,0 +1,21 @@
+[package]
+name = "hal_i2c_master"
+version = "0.0.1"
+edition = "2025"
+author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
+
+[profile.release]
+opt-level = 'z'
+lto = true
+
+[profile.dev]
+opt-level = 0
+lto = false
+
+[dependencies]
+hal_ll = { path = "../../../hal_ll" }
+hal_target = { path = "../../interface"}
+
+[features]
+default = ["i2c"]
+i2c = ["hal_ll/i2c"]

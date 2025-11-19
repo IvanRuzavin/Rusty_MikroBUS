@@ -1,0 +1,15 @@
+warning: unused manifest key: package.author
+    Updating crates.io index
+error: failed to get `system` as a dependency of package `mikrosdk v0.1.1 (D:\work_mikroe\GIT\Embedded_Rust_Master_Application\sdk)`
+
+Caused by:
+  failed to load source for dependency `system`
+
+Caused by:
+  Unable to update D:\work_mikroe\GIT\Embedded_Rust_Master_Application\sdk\core\system
+
+Caused by:
+  failed to read `D:\work_mikroe\GIT\Embedded_Rust_Master_Application\sdk\core\system\Cargo.toml`
+
+Caused by:
+  Системе не удается найти указанный путь. (os error 3)

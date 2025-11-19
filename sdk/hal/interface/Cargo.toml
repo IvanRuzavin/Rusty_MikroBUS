@@ -1,0 +1,16 @@
+[package]
+name = "hal_target"
+version = "0.0.1"
+edition = "2025"
+author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
+
+[profile.release]
+opt-level = 'z'
+lto = true
+
+[profile.dev]
+opt-level = 0
+lto = false
+
+[dependencies]
+hal_ll = {path = "../../hal_ll"}
