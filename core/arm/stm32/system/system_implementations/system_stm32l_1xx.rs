@@ -49,10 +49,10 @@ use core::arch::asm;
 mod core_header;
 
 pub use mcu_header::{RCC_TypeDef, RCC_BASE};
-use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos, 
-    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk, 
-    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos, 
-    FLASH_ACR_PRFTEN_Pos, FLASH_ACR_ACC64_Pos, FLASH_ACR_LATENCY_Pos, 
+use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos,
+    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk,
+    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos,
+    FLASH_ACR_PRFTEN_Pos, FLASH_ACR_ACC64_Pos, FLASH_ACR_LATENCY_Pos,
     RCC_CR_HSIRDY_Pos, RCC_CR_HSEON_Pos, RCC_CR_HSERDY_Pos, RCC_CR_PLLON_Pos, RCC_CR_PLLRDY_Pos, RCC_CFGR_SWS_Msk};
 
 use common_header::*;
@@ -146,7 +146,7 @@ pub fn system_clock_set_default() {
 
         /*< Reset HSION, HSEON, CSSON and PLLON bits */
         reg_value_clear_mask(&(*rcc_ptr).CR as *const u32 as *mut u32, 0xEEFEFFFE);
-        
+
         /*< Reset HSEBYP bit */
         reg_value_clear_bit(&(*rcc_ptr).CR as *const u32  as *mut u32, RCC_CR_HSEBYP_Pos);
 
@@ -197,7 +197,7 @@ pub fn rcc_get_clocks_frequency(rcc_clocks: &mut RCC_ClocksTypeDef) {
 #[unsafe(no_mangle)]
 pub fn system_init() {
     unsafe{
-        
+
         let rcc_ptr : *mut RCC_TypeDef = RCC_BASE as *mut RCC_TypeDef;
         let flash_ptr : *mut FLASH_TypeDef = FLASH_R_BASE as *mut FLASH_TypeDef;
 
@@ -209,7 +209,7 @@ pub fn system_init() {
             } else {
                 reg_value_clear_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_LATENCY_Pos);
             }
-        } 
+        }
         else if VALUE_SVCORE == VC_1500 {
             if FOSC_KHZ_VALUE > 8000 {
                 reg_value_set_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_ACC64_Pos);
@@ -227,7 +227,7 @@ pub fn system_init() {
             } else {
                 reg_value_clear_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_LATENCY_Pos);
             }
-        } 
+        }
 
         system_clock_set_default();
 
@@ -238,7 +238,7 @@ pub fn system_init() {
             while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSIRDY_Pos) == 0 {
                 /* Wait for HSIRDY = 1 (HSI is ready) */
             }
-        }      
+        }
 
         if VALUE_RCC_CR & (1 << RCC_CR_HSEON_Pos) != 0 { /* if HSE enabled */
             while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSERDY_Pos) == 0 {
@@ -253,7 +253,7 @@ pub fn system_init() {
             }
         }
 
-        /* Wait till SYSCLK is stabilized (depending on selected clock) */    
+        /* Wait till SYSCLK is stabilized (depending on selected clock) */
         while (reg_value_get(&(*rcc_ptr).CFGR as *const u32 as *mut u32) & RCC_CFGR_SWS_Msk) != ((VALUE_RCC_CFGR << 2) & RCC_CFGR_SWS_Msk) {
         }
     }
@@ -275,7 +275,7 @@ pub fn Delay_Cyc(mut cycle_num : u32)
     unsafe
     {
         asm!(
-             
+
             "2:",
             "sub {0}, #1",
             "nop",
@@ -289,7 +289,7 @@ pub fn Delay_Cyc(mut cycle_num : u32)
 }
 
 #[inline(never)]
-pub fn Delay_us(time_us: u32) 
+pub fn Delay_us(time_us: u32)
 {
     /*
      * Delay for STM32L152RE - default NECTO setup
@@ -299,7 +299,7 @@ pub fn Delay_us(time_us: u32)
 
 
 #[inline(never)]
-pub fn Delay_ms(time_ms: u32) 
+pub fn Delay_ms(time_ms: u32)
 {
 
     /*
@@ -310,7 +310,7 @@ pub fn Delay_ms(time_ms: u32)
 }
 
 #[inline(never)]
-pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32) 
+pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32)
 {
 
 }

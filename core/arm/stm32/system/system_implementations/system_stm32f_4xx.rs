@@ -49,11 +49,11 @@ use core::arch::asm;
 mod core_header;
 
 pub use mcu_header::{RCC_TypeDef, RCC_BASE};
-use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos, 
-    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk, 
-    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos, 
-    FLASH_ACR_PRFTEN_Pos, 
-    FLASH_ACR_ICEN_Pos, FLASH_ACR_LATENCY_7WS, FLASH_ACR_LATENCY_6WS, FLASH_ACR_LATENCY_5WS, 
+use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos,
+    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk,
+    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos,
+    FLASH_ACR_PRFTEN_Pos,
+    FLASH_ACR_ICEN_Pos, FLASH_ACR_LATENCY_7WS, FLASH_ACR_LATENCY_6WS, FLASH_ACR_LATENCY_5WS,
     FLASH_ACR_LATENCY_4WS, FLASH_ACR_LATENCY_3WS, FLASH_ACR_LATENCY_2WS, FLASH_ACR_LATENCY_1WS, FLASH_ACR_LATENCY_Msk,
     RCC_CR_HSIRDY_Pos, RCC_CR_HSEON_Pos, RCC_CR_HSERDY_Pos, RCC_CR_PLLON_Pos, RCC_CR_PLLRDY_Pos, RCC_CFGR_SWS_Msk};
 
@@ -106,7 +106,7 @@ pub fn rcc_get_clocks_frequency(rcc_clocks: &mut RCC_ClocksTypeDef) {
         rcc_clocks.HCLK_Frequency = FOSC_KHZ_VALUE * 1000;
 
         /*------ Compute HCLK, PCLK1, and PCLK2 clocks frequencies ------*/
-        
+
         /* Get HCLK prescaler */
         tmp = reg_value_get(&(*rcc_ptr).CFGR as *const u32 as *mut u32) & RCC_CFGR_HPRE_Msk;
         tmp >>= RCC_CFGR_HPRE_Pos;
@@ -162,7 +162,7 @@ pub fn system_clock_set_default() {
 
         /* Reset HSEON, CSSON and PLLON bits */
         reg_value_clear_mask(&(*rcc_ptr).CR as *const u32 as *mut u32, 0xFEF6FFFF);
-        
+
         // Reset PLLSRC, PLLXTPRE, PLLMUL, and USBPRE/OTGFSPRE bits
         reg_value_clear_mask(&(*rcc_ptr).PLLCFGR as *const u32 as * mut u32, 0x24003010);
 
@@ -175,10 +175,10 @@ pub fn system_clock_set_default() {
 }
 
 #[unsafe(no_mangle)]
-pub fn system_init() 
+pub fn system_init()
 {
     unsafe{
-        
+
         let rcc_ptr : *mut RCC_TypeDef = RCC_BASE as *mut RCC_TypeDef;
         let flash_ptr : *mut FLASH_TypeDef = FLASH_R_BASE as *mut FLASH_TypeDef;
 
@@ -249,7 +249,7 @@ pub fn system_init()
                 reg_value_clear_mask(&(*flash_ptr).ACR as *const u32 as *mut u32, !FLASH_ACR_LATENCY_Msk);
             }
         }
-        
+
         reg_value_set_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_PRFTEN_Pos); /* Prefetch enable */
         reg_value_set_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_ICEN_Pos);   /* Instruction cache enable */
 
@@ -263,7 +263,7 @@ pub fn system_init()
             while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSIRDY_Pos) == 0 {
                 /* Wait for HSIRDY = 1 (HSI is ready) */
             }
-        }      
+        }
 
         if VALUE_RCC_CR & (1 << RCC_CR_HSEON_Pos) != 0 { /* if HSE enabled */
             while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSERDY_Pos) == 0 {
@@ -278,7 +278,7 @@ pub fn system_init()
             }
         }
 
-        /* Wait till SYSCLK is stabilized (depending on selected clock) */    
+        /* Wait till SYSCLK is stabilized (depending on selected clock) */
         while (reg_value_get(&(*rcc_ptr).CFGR as *const u32 as *mut u32) & RCC_CFGR_SWS_Msk) != ((VALUE_RCC_CFGR << 2) & RCC_CFGR_SWS_Msk) {
         }
 
@@ -297,7 +297,7 @@ fn get_clock_value(_clock : u32) -> u32
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".ramfunc")]
 pub fn Delay_Cyc(mut cycle_num : u32)
-{    
+{
     unsafe
     {
         asm!(
@@ -314,7 +314,7 @@ pub fn Delay_Cyc(mut cycle_num : u32)
 }
 
 #[inline(never)]
-pub fn Delay_us(time_us: u32) 
+pub fn Delay_us(time_us: u32)
 {
     /*
      * Delay for STM32F411RE - default NECTO setup
@@ -323,7 +323,7 @@ pub fn Delay_us(time_us: u32)
 }
 
 #[inline(never)]
-pub fn Delay_ms(time_ms: u32) 
+pub fn Delay_ms(time_ms: u32)
 {
 
     /*
@@ -334,7 +334,7 @@ pub fn Delay_ms(time_ms: u32)
 }
 
 #[inline(never)]
-pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32) 
+pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32)
 {
 
 }

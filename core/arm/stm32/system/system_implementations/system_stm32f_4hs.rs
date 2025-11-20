@@ -49,11 +49,11 @@ use core::arch::asm;
 mod core_header;
 
 pub use mcu_header::{RCC_TypeDef, RCC_BASE};
-use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos, PWR_TypeDef, PWR_BASE, 
-    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk, 
-    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos, RCC_APB1ENR_PWREN_Pos, 
-    PWR_CR_ODEN_Pos, PWR_CSR_ODRDY_Pos, PWR_CR_ODSWEN_Pos, PWR_CSR_ODSWRDY_Pos, FLASH_ACR_PRFTEN_Pos, 
-    FLASH_ACR_ICEN_Pos, FLASH_ACR_LATENCY_8WS, FLASH_ACR_LATENCY_7WS, FLASH_ACR_LATENCY_6WS, FLASH_ACR_LATENCY_5WS, 
+use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos, PWR_TypeDef, PWR_BASE,
+    FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk,
+    RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos, RCC_APB1ENR_PWREN_Pos,
+    PWR_CR_ODEN_Pos, PWR_CSR_ODRDY_Pos, PWR_CR_ODSWEN_Pos, PWR_CSR_ODSWRDY_Pos, FLASH_ACR_PRFTEN_Pos,
+    FLASH_ACR_ICEN_Pos, FLASH_ACR_LATENCY_8WS, FLASH_ACR_LATENCY_7WS, FLASH_ACR_LATENCY_6WS, FLASH_ACR_LATENCY_5WS,
     FLASH_ACR_LATENCY_4WS, FLASH_ACR_LATENCY_3WS, FLASH_ACR_LATENCY_2WS, FLASH_ACR_LATENCY_1WS, FLASH_ACR_LATENCY_Msk,
     RCC_CR_HSIRDY_Pos, RCC_CR_HSEON_Pos, RCC_CR_HSERDY_Pos, RCC_CR_PLLON_Pos, RCC_CR_PLLRDY_Pos, RCC_CFGR_SWS_Msk};
 
@@ -161,7 +161,7 @@ pub fn system_clock_set_default() {
         // Disable all interrupts and clear pending bits
         reg_value_clear(&(*rcc_ptr).CIR as *const u32 as *mut u32);
     }
-    
+
 }
 
 pub fn rcc_get_clocks_frequency(rcc_clocks: &mut RCC_ClocksTypeDef) {
@@ -220,7 +220,7 @@ pub fn enable_overdrive_mode() {
 
         // Enable overdrive switching
         reg_value_set_bit(&(*pwr_ptr).CR as *const u32 as *mut u32, PWR_CR_ODSWEN_Pos); //ODSWEN
-        
+
         // Wait for overdrive switch ready flag to be set
         while(reg_value_get_bit(&(*pwr_ptr).CSR as *const u32 as *mut u32, PWR_CSR_ODSWRDY_Pos) == 0) //ODSWRDY
         {   }
@@ -232,10 +232,10 @@ pub fn system_init() {
     system_clock_set_default();
 
     unsafe{
-        
+
         let rcc_ptr : *mut RCC_TypeDef = RCC_BASE as *mut RCC_TypeDef;
         let flash_ptr : *mut FLASH_TypeDef = FLASH_R_BASE as *mut FLASH_TypeDef;
-  
+
 
     reg_value_set_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_PRFTEN_Pos);    // PRFTEN Prefetch enable
     reg_value_set_bit(&(*flash_ptr).ACR as *const u32 as *mut u32, FLASH_ACR_ICEN_Pos);      // ICEN Instruction cache enable
@@ -324,7 +324,7 @@ pub fn system_init() {
         while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSIRDY_Pos) == 0 {
             /* Wait for HSIRDY = 1 (HSI is ready) */
         }
-    }      
+    }
 
     if VALUE_RCC_CR & (1 << RCC_CR_HSEON_Pos) != 0 { /* if HSE enabled */
         while reg_value_get_bit(&(*rcc_ptr).CR as *const u32 as *mut u32, RCC_CR_HSERDY_Pos) == 0 {
@@ -339,7 +339,7 @@ pub fn system_init() {
         }
     }
 
-    /* Wait till SYSCLK is stabilized (depending on selected clock) */    
+    /* Wait till SYSCLK is stabilized (depending on selected clock) */
     while (reg_value_get(&(*rcc_ptr).CFGR as *const u32 as *mut u32) & RCC_CFGR_SWS_Msk) != ((VALUE_RCC_CFGR << 2) & RCC_CFGR_SWS_Msk) {
     }
 
@@ -358,11 +358,11 @@ fn get_clock_value(_clock : u32) -> u32
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".ramfunc")]
 pub fn Delay_Cyc(mut cycle_num : u32)
-{    
+{
     unsafe
     {
         asm!(
-             
+
             "2:",
             "sub {0}, #1",
             "nop",
@@ -376,7 +376,7 @@ pub fn Delay_Cyc(mut cycle_num : u32)
 }
 
 #[inline(never)]
-pub fn Delay_us(time_us: u32) 
+pub fn Delay_us(time_us: u32)
 {
     /*
      * Delay for STM32F469II - default NECTO setup
@@ -386,7 +386,7 @@ pub fn Delay_us(time_us: u32)
 
 
 #[inline(never)]
-pub fn Delay_ms(time_ms: u32) 
+pub fn Delay_ms(time_ms: u32)
 {
     /*
      * Delay for STM32F469II - default NECTO setup
@@ -395,7 +395,7 @@ pub fn Delay_ms(time_ms: u32)
 }
 
 #[inline(never)]
-pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32) 
+pub fn Delay_Advanced_ms(time_ms: u32, current_fosc_kHz: u32)
 {
 
 }

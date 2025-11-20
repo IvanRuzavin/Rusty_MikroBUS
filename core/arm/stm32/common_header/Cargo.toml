@@ -12,6 +12,5 @@ lto = true
 opt-level = 0
 lto = false
 
-[dependencies]
-
-[features]
+[lib]
+path = "src/common_header.rs"

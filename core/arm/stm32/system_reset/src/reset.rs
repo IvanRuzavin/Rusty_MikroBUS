@@ -3,7 +3,6 @@
 #![allow(unused_attributes)]
 #![allow(unreachable_code)]
 
-
 use core::arch::global_asm;
 
 global_asm!(include_str!("startup_assembly.s"));
@@ -15,10 +14,11 @@ pub extern "C" fn Reset() -> ! {
         unsafe fn system_init();
     }
 
-    unsafe{
+    unsafe {
         system_init();
-        main(); 
+        main();
     }
-    
-    loop{} //this is a security as Reset must not return
+
+    // This is a security as Reset must not return.
+    loop {}
 }
