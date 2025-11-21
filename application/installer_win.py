@@ -43,15 +43,17 @@ def download_and_run(url: str, filename: str, instance_contents):
 
         # Run the installer
         if 'rustup' in url:
-            subprocess.Popen(['&', save_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
+            process = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', '&', save_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
             instance_contents['installer']['rust'] = 'installed'
         else:
-            subprocess.Popen([save_path], shell=True)
+            process = subprocess.Popen([save_path], shell=True)
             instance_contents['installer']['msvc'] = 'installed'
+        process.wait
         update_instance_uid(instance_contents)
 
-    except Exception as e:
-        QMessageBox.critical(None, 'Installer Error', f'Failed to handle {filename}: {e}')
+        return True
+    except:
+        return False
 
 def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
     try:
@@ -72,63 +74,117 @@ def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
         QMessageBox.critical(None, 'Extractor Error', f'Failed to extract archive: {e}')
 
 def install_stlink(instance_contents):
-    download_extract_to(ST_LINK_RAR_URL, INSTALLER_DIR)
-    subprocess.run(['explorer', INSTALLER_DIR])
-    instance_contents['installer']['stlink'] = 'installed'
-    update_instance_uid(instance_contents)
+    try:
+        download_extract_to(ST_LINK_RAR_URL, INSTALLER_DIR)
+        runner = os.path.join(INSTALLER_DIR, 'st_link_USB_driver', 'dpinst_amd64.exe')
+        # subprocess.run(['explorer', INSTALLER_DIR])
+        process = subprocess.Popen([runner], shell=True)
+        process.wait()
+        instance_contents['installer']['stlink'] = 'installed'
+        update_instance_uid(instance_contents)
+
+        return True
+    except:
+        return False
 
 def install_openocd_runner(instance_contents):
-    download_extract_to(OPENOCD_URL, RUNNER_DIR)
-    instance_contents['installer']['openocd'] = 'installed'
-    update_instance_uid(instance_contents)
+    try:
+        download_extract_to(OPENOCD_URL, RUNNER_DIR)
+        instance_contents['installer']['openocd'] = 'installed'
+        update_instance_uid(instance_contents)
+
+        return True
+    except:
+        return False
 
 def install_arm_runner(instance_contents):
-    download_extract_to(ARM_NONE_EABI_URL, RUNNER_DIR)
-    instance_contents['installer']['gcc'] = 'installed'
-    update_instance_uid(instance_contents)
+    try:
+        download_extract_to(ARM_NONE_EABI_URL, RUNNER_DIR)
+        instance_contents['installer']['gcc'] = 'installed'
+        update_instance_uid(instance_contents)
+
+        return True
+    except:
+        return False
 
 def install_probers(instance_contents):
-    subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', PROBE_RS_PS_COMMAND], creationflags=subprocess.CREATE_NEW_CONSOLE)
-    instance_contents['installer']['probers'] = 'installed'
-    update_instance_uid(instance_contents)
+    try:
+        process = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', PROBE_RS_PS_COMMAND], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        process.wait()
+        instance_contents['installer']['probers'] = 'installed'
+        update_instance_uid(instance_contents)
+
+        return True
+    except:
+        return False
 
 class StepCard(QWidget):
-    def __init__(self, title: str, subtitle: str, button_text: str, callback, icon_path=None):
+    def __init__(self, title, subtitle, button_text, callback, icon_path=None, installed=False):
         super().__init__()
-        self.setObjectName('card')
+        self.callback = callback
 
         layout = QHBoxLayout()
         layout.setSpacing(20)
 
-        # Icon
+        # --- ICON ---
         if icon_path:
             image = QPixmap(icon_path)
             icon_label = QLabel()
-            icon_label.setPixmap(image.scaled(150, 65))
+            icon_label.setPixmap(
+                image.scaled(150, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
             icon_label.setContentsMargins(75, 0, 0, 0)
             layout.addWidget(icon_label)
         else:
             layout.addSpacing(48)
 
-        # Text column
+        # --- TEXT COLUMN ---
         text_col = QVBoxLayout()
+
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet('font-size: 17px; font-weight: bold;')
+        title_lbl.setStyleSheet("font-size: 17px; font-weight: bold;")
+
         subtitle_lbl = QLabel(subtitle)
         subtitle_lbl.setWordWrap(True)
-        subtitle_lbl.setStyleSheet('font-size: 13px; color: #D0D0E0;')
+        subtitle_lbl.setStyleSheet("font-size: 13px; color: #D0D0E0;")
 
         text_col.addWidget(title_lbl)
         text_col.addWidget(subtitle_lbl)
         layout.addLayout(text_col)
 
-        # Button
-        btn = QPushButton(button_text)
-        btn.clicked.connect(callback)
-        btn.setMinimumWidth(160)
-        layout.addWidget(btn)
+        # --- BUTTON ---
+        self.btn = QPushButton(button_text)
+        self.btn.setMinimumWidth(160)
+        self.btn.clicked.connect(self.run_install)
+
+        layout.addWidget(self.btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         self.setLayout(layout)
+
+        # Apply installed state if needed
+        if installed:
+            self.set_installed_state()
+
+    def run_install(self):
+        # Call user-provided install function
+        success = self.callback()
+
+        # If callback reports success → disable & greenify button
+        if success:
+            self.set_installed_state()
+
+    def set_installed_state(self):
+        self.btn.setEnabled(False)
+        self.btn.setText("Installed")
+        self.btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #7DFF7D;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            """
+        )
 
 class InstallerWindow(QMainWindow):
     def __init__(self, instance_contents):
@@ -178,7 +234,12 @@ class InstallerWindow(QMainWindow):
                 'openocd': 'not_installed',
                 'gcc': 'not_installed'
             }
-            update_instance_uid(instance_contents)
+
+        if os.path.exists(os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1')):
+            instance_contents['installer']['gcc'] = 'installed'
+        if os.path.exists(os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7')):
+            instance_contents['installer']['openocd'] = 'installed'
+        update_instance_uid(instance_contents)
 
         self.setWindowTitle('Rust Toolchain Installer')
         self.resize(1000, 700)
@@ -204,7 +265,8 @@ class InstallerWindow(QMainWindow):
             subtitle='Required for compiling Rust on Windows.',
             button_text='Install',
             callback=lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/msvc.png')
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
+            installed = instance_contents['installer']['msvc'] == 'installed'
         ))
 
         layout.addWidget(StepCard(
@@ -212,39 +274,44 @@ class InstallerWindow(QMainWindow):
             subtitle='Installs rustup and Rust compiler.',
             button_text='Install',
             callback=lambda: download_and_run(RUST_URL, 'rustup-init.exe', instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/rust.png')
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/rust.png'),
+            installed = instance_contents['installer']['rust'] == 'installed'
         ))
 
         layout.addWidget(StepCard(
             title='Install ST-Link Drivers',
             subtitle='Required for debugging STM32 MCUs.',
             button_text='Install',
-            callback=install_stlink(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/stlink.png')
+            callback=lambda: install_stlink(instance_contents),
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/stlink.png'),
+            installed = instance_contents['installer']['stlink'] == 'installed'
         ))
 
         layout.addWidget(StepCard(
             title='Install Probe-rs Dependencies',
             subtitle='Executes the PowerShell command automatically.',
             button_text='Run',
-            callback=install_probers(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/powershell.png')
+            callback=lambda: install_probers(instance_contents),
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/powershell.png'),
+            installed = instance_contents['installer']['probers'] == 'installed'
         ))
 
         layout.addWidget(StepCard(
             title='Install OpenOCD Runner',
             subtitle='Provides debugger backend.',
             button_text='Install',
-            callback=install_openocd_runner(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/openocd.png')
+            callback=lambda: install_openocd_runner(instance_contents),
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/openocd.png'),
+            installed = instance_contents['installer']['openocd'] == 'installed'
         ))
 
         layout.addWidget(StepCard(
             title='Install ARM GCC Toolchain',
             subtitle='ARM none-eabi compiler.',
             button_text='Install',
-            callback=install_arm_runner(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/arm.png')
+            callback=lambda: install_arm_runner(instance_contents),
+            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/arm.png'),
+            installed = instance_contents['installer']['gcc'] == 'installed'
         ))
 
         layout.addStretch()
