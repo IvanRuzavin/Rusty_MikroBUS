@@ -1,4 +1,4 @@
-import subprocess, urllib.request, os
+import subprocess, urllib.request, os, json
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -26,11 +26,15 @@ ST_LINK_RAR_URL = 'https://download.mikroe.com/setups/drivers/mikroprog/arm/st-l
 OPENOCD_URL = 'https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v0.12.0-7/xpack-openocd-0.12.0-7-win32-x64.zip'
 ARM_NONE_EABI_URL = 'https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v14.2.1-1.1/xpack-arm-none-eabi-gcc-14.2.1-1.1-win32-x64.zip'
 PROBE_RS_PS_COMMAND = (
-    'powershell -ExecutionPolicy Bypass -c "irm https://github.com/probe-rs/probe-rs/releases/download/v0.27.0/probe-rs-tools-installer.ps1 | iex"'
+    'irm https://github.com/probe-rs/probe-rs/releases/download/v0.27.0/probe-rs-tools-installer.ps1 | iex'
 )
 
 # Helper Functions
-def download_and_run(url: str, filename: str):
+def update_instance_uid(instance_contents):
+    with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'w') as application_instance:
+        json.dump(instance_contents, application_instance, indent = 4)
+
+def download_and_run(url: str, filename: str, instance_contents):
     try:
         save_path = os.path.join(INSTALLER_DIR, filename)
 
@@ -38,13 +42,20 @@ def download_and_run(url: str, filename: str):
         urllib.request.urlretrieve(url, save_path)
 
         # Run the installer
-        subprocess.Popen([save_path], shell=True)
+        if 'rustup' in url:
+            subprocess.Popen(['&', save_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
+            instance_contents['installer']['rust'] = 'installed'
+        else:
+            subprocess.Popen([save_path], shell=True)
+            instance_contents['installer']['msvc'] = 'installed'
+        update_instance_uid(instance_contents)
 
     except Exception as e:
         QMessageBox.critical(None, 'Installer Error', f'Failed to handle {filename}: {e}')
 
 def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
     try:
+        os.makedirs(output_dir, exist_ok=True)
         import patoolib
         rar_path = os.path.join(output_dir, temp_name)
 
@@ -60,18 +71,26 @@ def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
     except Exception as e:
         QMessageBox.critical(None, 'Extractor Error', f'Failed to extract archive: {e}')
 
-def install_stlink():
+def install_stlink(instance_contents):
     download_extract_to(ST_LINK_RAR_URL, INSTALLER_DIR)
-    subprocess.run(['explorer', INSTALLER_DIR])   # optional
+    subprocess.run(['explorer', INSTALLER_DIR])
+    instance_contents['installer']['stlink'] = 'installed'
+    update_instance_uid(instance_contents)
 
-def install_openocd_runner():
+def install_openocd_runner(instance_contents):
     download_extract_to(OPENOCD_URL, RUNNER_DIR)
+    instance_contents['installer']['openocd'] = 'installed'
+    update_instance_uid(instance_contents)
 
-def install_arm_runner():
+def install_arm_runner(instance_contents):
     download_extract_to(ARM_NONE_EABI_URL, RUNNER_DIR)
+    instance_contents['installer']['gcc'] = 'installed'
+    update_instance_uid(instance_contents)
 
-def install_probers():
+def install_probers(instance_contents):
     subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', PROBE_RS_PS_COMMAND], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    instance_contents['installer']['probers'] = 'installed'
+    update_instance_uid(instance_contents)
 
 class StepCard(QWidget):
     def __init__(self, title: str, subtitle: str, button_text: str, callback, icon_path=None):
@@ -112,7 +131,7 @@ class StepCard(QWidget):
         self.setLayout(layout)
 
 class InstallerWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, instance_contents):
         super().__init__()
 
         self.setStyleSheet('''
@@ -150,6 +169,17 @@ class InstallerWindow(QMainWindow):
             }
         ''')
 
+        if 'installer' not in instance_contents:
+            instance_contents['installer'] = {
+                'msvc': 'not_installed',
+                'rust': 'not_installed',
+                'stlink': 'not_installed',
+                'probers': 'not_installed',
+                'openocd': 'not_installed',
+                'gcc': 'not_installed'
+            }
+            update_instance_uid(instance_contents)
+
         self.setWindowTitle('Rust Toolchain Installer')
         self.resize(1000, 700)
 
@@ -164,7 +194,7 @@ class InstallerWindow(QMainWindow):
 
         # Add a header image / sprite if you want
         header = QLabel()
-        header.setPixmap(QPixmap(os.path.join(os.path.dirname(__file__), 'sprites/rust_logo.png')).scaledToWidth(200))
+        header.setText("Please install all the packages below to proceed!")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
@@ -173,7 +203,7 @@ class InstallerWindow(QMainWindow):
             title='Install MSVC Build Tools',
             subtitle='Required for compiling Rust on Windows.',
             button_text='Install',
-            callback=lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe'),
+            callback=lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/msvc.png')
         ))
 
@@ -181,7 +211,7 @@ class InstallerWindow(QMainWindow):
             title='Install Rust Toolchain',
             subtitle='Installs rustup and Rust compiler.',
             button_text='Install',
-            callback=lambda: download_and_run(RUST_URL, 'rustup-init.exe'),
+            callback=lambda: download_and_run(RUST_URL, 'rustup-init.exe', instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/rust.png')
         ))
 
@@ -189,7 +219,7 @@ class InstallerWindow(QMainWindow):
             title='Install ST-Link Drivers',
             subtitle='Required for debugging STM32 MCUs.',
             button_text='Install',
-            callback=install_stlink,
+            callback=install_stlink(instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/stlink.png')
         ))
 
@@ -197,7 +227,7 @@ class InstallerWindow(QMainWindow):
             title='Install Probe-rs Dependencies',
             subtitle='Executes the PowerShell command automatically.',
             button_text='Run',
-            callback=install_probers,
+            callback=install_probers(instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/powershell.png')
         ))
 
@@ -205,7 +235,7 @@ class InstallerWindow(QMainWindow):
             title='Install OpenOCD Runner',
             subtitle='Provides debugger backend.',
             button_text='Install',
-            callback=install_openocd_runner,
+            callback=install_openocd_runner(instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/openocd.png')
         ))
 
@@ -213,7 +243,7 @@ class InstallerWindow(QMainWindow):
             title='Install ARM GCC Toolchain',
             subtitle='ARM none-eabi compiler.',
             button_text='Install',
-            callback=install_arm_runner,
+            callback=install_arm_runner(instance_contents),
             icon_path=os.path.join(os.path.dirname(__file__), 'sprites/arm.png')
         ))
 

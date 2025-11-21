@@ -1,4 +1,4 @@
-import sys
+import sys, os, json
 
 import installer_win as installer
 
@@ -15,6 +15,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from project_setup_application import MCUConfigurator
+
+instance_contents = {
+    'running_os': sys.platform
+}
 
 # Main Window
 class RustyMikrobusApp(QWidget):
@@ -56,14 +60,16 @@ class RustyMikrobusApp(QWidget):
         self.setLayout(layout)
 
     def show_install_steps(self):
-        self.steps_window = installer.InstallerWindow()
+        self.steps_window = installer.InstallerWindow(instance_contents)
         self.steps_window.show()
-
-# Separate Installation Steps Window
-
 
 # Run Application
 if __name__ == '__main__':
+    if os.path.exists(os.path.join(os.path.dirname(__file__), 'instance_uid.json')):
+        with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'r') as application_instance:
+            instance_contents = json.loads(application_instance.read())
+    with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'w') as application_instance:
+        json.dump(instance_contents, application_instance, indent = 4)
     app = QApplication(sys.argv)
     main_window = RustyMikrobusApp()
     main_window.show()
