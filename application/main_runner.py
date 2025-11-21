@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QHBoxLayout
 )
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
@@ -55,7 +56,7 @@ class RustyMikrobusApp(QWidget):
         self.setLayout(layout)
 
     def show_install_steps(self):
-        self.steps_window = installer.InstallStepsWindow()
+        self.steps_window = installer.InstallerWindow()
         self.steps_window.show()
 
 # Separate Installation Steps Window
