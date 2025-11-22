@@ -1,4 +1,4 @@
-import subprocess, urllib.request, os, json
+import subprocess, urllib.request, os, shutil
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QMessageBox,
     QHBoxLayout,
-    QPushButton
+    QPushButton,
+    QApplication
 )
 
 from PyQt6.QtGui import QPixmap
@@ -25,33 +26,55 @@ RUST_URL = 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rust
 ST_LINK_RAR_URL = 'https://download.mikroe.com/setups/drivers/mikroprog/arm/st-link-usb-drivers.rar'
 OPENOCD_URL = 'https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v0.12.0-7/xpack-openocd-0.12.0-7-win32-x64.zip'
 ARM_NONE_EABI_URL = 'https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v14.2.1-1.1/xpack-arm-none-eabi-gcc-14.2.1-1.1-win32-x64.zip'
+# Direct segger download link requires verification, so I provide google deive exe file
+SEGGER_URL = 'https://www.segger.com/downloads/jlink/JLink_Windows_V888_x86_64.exe'
 PROBE_RS_PS_COMMAND = (
     'irm https://github.com/probe-rs/probe-rs/releases/download/v0.27.0/probe-rs-tools-installer.ps1 | iex'
 )
 
-# Helper Functions
-def update_instance_uid(instance_contents):
-    with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'w') as application_instance:
-        json.dump(instance_contents, application_instance, indent = 4)
+dots = '.'
 
-def download_and_run(url: str, filename: str, instance_contents):
+# Helper Functions
+def run_uninstall(directory_path):
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            if 'uninstall' in file.lower():
+                uninstaller_path = os.path.join(root, file)
+                process = subprocess.Popen([uninstaller_path], shell=True)
+                process.wait()
+
+    return os.path.exists(directory_path)
+
+
+def remove_directory(directory_path):
+    shutil.rmtree(directory_path)
+
+    return os.path.exists(directory_path)
+
+def download_and_run(url: str, filename: str, instance_contents, refresh_all=None):
     try:
         save_path = os.path.join(INSTALLER_DIR, filename)
 
         # Download file
-        urllib.request.urlretrieve(url, save_path)
+        if 'jlink' not in url:
+            urllib.request.urlretrieve(url, save_path)
+        else:
+            process = subprocess.Popen(['start', SEGGER_URL], shell=True)
+            process.wait()
 
         # Run the installer
         if 'rustup' in url:
+            install_path = instance_contents['rustup_path']
             process = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', '&', save_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
-            instance_contents['installer']['rust'] = 'installed'
+            process.wait()
+        elif 'jlink' in url:
+            install_path = instance_contents['jlink_path']
         else:
+            install_path = instance_contents['vs_tools_path']
             process = subprocess.Popen([save_path], shell=True)
-            instance_contents['installer']['msvc'] = 'installed'
-        process.wait
-        update_instance_uid(instance_contents)
+            refresh_all(instance_contents)
 
-        return True
+        return os.path.exists(install_path)
     except:
         return False
 
@@ -80,30 +103,24 @@ def install_stlink(instance_contents):
         # subprocess.run(['explorer', INSTALLER_DIR])
         process = subprocess.Popen([runner], shell=True)
         process.wait()
-        instance_contents['installer']['stlink'] = 'installed'
-        update_instance_uid(instance_contents)
 
-        return True
+        return os.path.exists(instance_contents['stlink_path'])
     except:
         return False
 
 def install_openocd_runner(instance_contents):
     try:
         download_extract_to(OPENOCD_URL, RUNNER_DIR)
-        instance_contents['installer']['openocd'] = 'installed'
-        update_instance_uid(instance_contents)
 
-        return True
+        return os.path.exists(instance_contents['openocd_path'])
     except:
         return False
 
 def install_arm_runner(instance_contents):
     try:
         download_extract_to(ARM_NONE_EABI_URL, RUNNER_DIR)
-        instance_contents['installer']['gcc'] = 'installed'
-        update_instance_uid(instance_contents)
 
-        return True
+        return os.path.exists(instance_contents['gcc_path'])
     except:
         return False
 
@@ -111,17 +128,17 @@ def install_probers(instance_contents):
     try:
         process = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', PROBE_RS_PS_COMMAND], creationflags=subprocess.CREATE_NEW_CONSOLE)
         process.wait()
-        instance_contents['installer']['probers'] = 'installed'
-        update_instance_uid(instance_contents)
 
-        return True
+        return os.path.exists(instance_contents['probers_path'])
     except:
         return False
 
 class StepCard(QWidget):
-    def __init__(self, title, subtitle, button_text, callback, icon_path=None, installed=False):
+    def __init__(self, title, subtitle, inst_callback, uninst_callback, icon_path=None, installed=False, vs_tools_needed=False):
         super().__init__()
-        self.callback = callback
+        self.title = title
+        self.inst_callback = inst_callback
+        self.uninst_callback = uninst_callback
 
         layout = QHBoxLayout()
         layout.setSpacing(20)
@@ -153,42 +170,144 @@ class StepCard(QWidget):
         layout.addLayout(text_col)
 
         # --- BUTTON ---
-        self.btn = QPushButton(button_text)
+        self.btn = QPushButton('Install')
         self.btn.setMinimumWidth(160)
         self.btn.clicked.connect(self.run_install)
 
-        layout.addWidget(self.btn, alignment=Qt.AlignmentFlag.AlignRight)
+        self.btn_uninst = QPushButton('Uninstall')
+        self.btn_uninst.setMinimumWidth(160)
+        self.btn_uninst.clicked.connect(self.run_uninstall)
+
+        layout.addWidget(self.btn)
+        layout.addWidget(self.btn_uninst)
 
         self.setLayout(layout)
 
+        if 'Rust' in title or 'Probe-rs' in title:
+            if vs_tools_needed:
+                self.set_state_vs_tools_required()
+
         # Apply installed state if needed
         if installed:
-            self.set_installed_state()
+            self.set_state_installed()
+        else:
+            self.set_state_uninstalled()
 
     def run_install(self):
         # Call user-provided install function
-        success = self.callback()
+        pack_exists = self.inst_callback()
 
         # If callback reports success → disable & greenify button
-        if success:
-            self.set_installed_state()
+        if pack_exists:
+            self.set_state_installed()
 
-    def set_installed_state(self):
+    def run_uninstall(self):
+        # Call user-provided install function
+        pack_exists = self.uninst_callback()
+
+        # If callback reports success → disable & greenify button
+        if not pack_exists:
+            self.set_state_uninstalled()
+
+    def set_state_installed(self):
         self.btn.setEnabled(False)
         self.btn.setText("Installed")
         self.btn.setStyleSheet(
             """
             QPushButton {
-                background-color: #7DFF7D;
+                background-color: #5DB95D;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            """
+        )
+        self.btn_uninst.setEnabled(True)
+        self.btn_uninst.setText("Uninstall")
+        self.btn_uninst.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #E06666;
                 border-radius: 10px;
                 font-weight: bold;
             }
             """
         )
 
+    def set_state_uninstalled(self):
+        self.btn.setEnabled(True)
+        self.btn.setText("Install")
+        self.btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2D73FF;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            """
+        )
+        self.btn_uninst.setEnabled(False)
+        self.btn_uninst.setText("Uninstall")
+        self.btn_uninst.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #999999;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            """
+        )
+
+    def set_state_vs_tools_required(self):
+        self.btn.setEnabled(False)
+        self.btn.setText("Install MSVC Tools")
+        self.btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #999999;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            """
+        )
+
+    def refresh_rust_buttons(self, instance_contents):
+        title = self.windowTitle() if hasattr(self, 'windowTitle') else ""
+
+        if dots.len() == 0:
+            dots = '.'
+        elif dots.len() == 1:
+            dots = '..'
+        elif dots.len() == 2:
+            dots = '...'
+        else:
+            dots = ''
+
+        if 'MSVC' in self.title:
+            self.btn.setEnabled(False)
+            self.btn.setText(f'Installing{dots}')
+            self.btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #F1C232;
+                    border-radius: 10px;
+                    font-weight: bold;
+                }
+                """
+            )
+            QApplication.processEvents()
+
+        if 'Rust' in self.title or 'Probe-rs' in self.title:
+            # These are blocked unless MSVC is installed
+            if os.path.exists(instance_contents['vs_tools_path']):
+                # MSVC installed → enable normal button
+                self.btn.setEnabled(True)
+                self.btn.setText('Install')
+                self.btn.setStyleSheet('')
+
 class InstallerWindow(QMainWindow):
     def __init__(self, instance_contents):
         super().__init__()
+        self.step_cards = []
 
         self.setStyleSheet('''
             QWidget {
@@ -225,24 +344,8 @@ class InstallerWindow(QMainWindow):
             }
         ''')
 
-        if 'installer' not in instance_contents:
-            instance_contents['installer'] = {
-                'msvc': 'not_installed',
-                'rust': 'not_installed',
-                'stlink': 'not_installed',
-                'probers': 'not_installed',
-                'openocd': 'not_installed',
-                'gcc': 'not_installed'
-            }
-
-        if os.path.exists(os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1')):
-            instance_contents['installer']['gcc'] = 'installed'
-        if os.path.exists(os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7')):
-            instance_contents['installer']['openocd'] = 'installed'
-        update_instance_uid(instance_contents)
-
         self.setWindowTitle('Rust Toolchain Installer')
-        self.resize(1000, 700)
+        self.resize(1300, 800)
 
         # Modern style applied
         self.apply_styles()
@@ -255,64 +358,89 @@ class InstallerWindow(QMainWindow):
 
         # Add a header image / sprite if you want
         header = QLabel()
-        header.setText("Please install all the packages below to proceed!")
+        header.setText("Please install all the packages below so you can work with Rust applications!")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
         # INSTALLATION STEPS AS CARDS
-        layout.addWidget(StepCard(
-            title='Install MSVC Build Tools',
-            subtitle='Required for compiling Rust on Windows.',
-            button_text='Install',
-            callback=lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
-            installed = instance_contents['installer']['msvc'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install MSVC Build Tools',
+            subtitle    = 'C++ Build Tools are required.',
+            inst_callback   = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
+            uninst_callback = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
+            installed   = os.path.exists(instance_contents['vs_tools_path'])
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
-        layout.addWidget(StepCard(
-            title='Install Rust Toolchain',
-            subtitle='Installs rustup and Rust compiler.',
-            button_text='Install',
-            callback=lambda: download_and_run(RUST_URL, 'rustup-init.exe', instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/rust.png'),
-            installed = instance_contents['installer']['rust'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install Rust Toolchain',
+            subtitle    = 'Installs rustup and Rust compiler.',
+            inst_callback   = lambda: download_and_run(RUST_URL, 'rustup-init.exe', instance_contents),
+            uninst_callback = lambda: remove_directory(instance_contents['rustup_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/rust.png'),
+            installed   = os.path.exists(instance_contents['rustup_path']),
+            vs_tools_needed = not os.path.exists(instance_contents['vs_tools_path'])
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
-        layout.addWidget(StepCard(
-            title='Install ST-Link Drivers',
-            subtitle='Required for debugging STM32 MCUs.',
-            button_text='Install',
-            callback=lambda: install_stlink(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/stlink.png'),
-            installed = instance_contents['installer']['stlink'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install ST-Link Drivers',
+            subtitle    = 'Required for debugging STM32 MCUs.',
+            inst_callback   = lambda: install_stlink(instance_contents),
+            uninst_callback = lambda: remove_directory(instance_contents['stlink_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/stlink.png'),
+            installed   = os.path.exists(instance_contents['stlink_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
-        layout.addWidget(StepCard(
-            title='Install Probe-rs Dependencies',
-            subtitle='Executes the PowerShell command automatically.',
-            button_text='Run',
-            callback=lambda: install_probers(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/powershell.png'),
-            installed = instance_contents['installer']['probers'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install Probe-rs Dependencies',
+            subtitle    = 'Executes the PowerShell command automatically.',
+            inst_callback   = lambda: install_probers(instance_contents),
+            uninst_callback = lambda: remove_directory(instance_contents['probers_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/cargo.png'),
+            installed   = os.path.exists(instance_contents['probers_path']),
+            vs_tools_needed = not os.path.exists(instance_contents['vs_tools_path'])
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
-        layout.addWidget(StepCard(
-            title='Install OpenOCD Runner',
-            subtitle='Provides debugger backend.',
-            button_text='Install',
-            callback=lambda: install_openocd_runner(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/openocd.png'),
-            installed = instance_contents['installer']['openocd'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install OpenOCD Runner',
+            subtitle    = 'Provides debugger backend.',
+            inst_callback   = lambda: install_openocd_runner(instance_contents),
+            uninst_callback = lambda: remove_directory(instance_contents['openocd_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/openocd.png'),
+            installed   = os.path.exists(instance_contents['openocd_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
-        layout.addWidget(StepCard(
-            title='Install ARM GCC Toolchain',
-            subtitle='ARM none-eabi compiler.',
-            button_text='Install',
-            callback=lambda: install_arm_runner(instance_contents),
-            icon_path=os.path.join(os.path.dirname(__file__), 'sprites/arm.png'),
-            installed = instance_contents['installer']['gcc'] == 'installed'
-        ))
+        card = StepCard(
+            title       = 'Install ARM GCC Toolchain',
+            subtitle    = 'ARM none-eabi compiler.',
+            inst_callback   = lambda: install_arm_runner(instance_contents),
+            uninst_callback = lambda: remove_directory(instance_contents['gcc_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/arm.png'),
+            installed   = os.path.exists(instance_contents['gcc_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
+
+        card = StepCard(
+            title       = 'Install SEGGER J-Link programmer',
+            subtitle    = 'Provides connection backend.',
+            inst_callback   = lambda: download_and_run(SEGGER_URL, 'jlink.exe', instance_contents),
+            uninst_callback = lambda: run_uninstall(instance_contents['jlink_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/segger.png'),
+            installed   = os.path.exists(instance_contents['jlink_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
 
         layout.addStretch()
         container.setLayout(layout)
@@ -349,3 +477,7 @@ class InstallerWindow(QMainWindow):
             QPushButton:hover { background-color: #437DFF; }
             QPushButton:pressed { background-color: #1E5DE3; }
         ''')
+
+    def refresh_all(self, instance_contents):
+        for card in self.step_cards:
+            card.refresh_rust_buttons(instance_contents)

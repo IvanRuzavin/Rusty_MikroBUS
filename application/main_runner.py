@@ -17,7 +17,14 @@ from PyQt6.QtGui import QFont
 from project_setup_application import MCUConfigurator
 
 instance_contents = {
-    'running_os': sys.platform
+    'running_os': sys.platform,
+    'vs_tools_path': 'c:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools',
+    'rustup_path': f'{os.path.expanduser("~")}/.rustup',
+    'probers_path': f'{os.path.expanduser("~")}/.cargo',
+    'jlink_path': 'c:/Program Files/SEGGER',
+    'stlink_path': 'c:/Program Files (x86)/STMicroelectronics/stlink_server/stlinkserver.exe',
+    'gcc_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1'),
+    'openocd_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7')
 }
 
 # Main Window
