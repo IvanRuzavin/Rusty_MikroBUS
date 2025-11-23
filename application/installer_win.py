@@ -35,6 +35,9 @@ PROBE_RS_PS_COMMAND = (
 dots = '.'
 
 # Helper Functions
+def file_exists_containing(path, needle):
+    return any(needle in f for _, _, fs in os.walk(path) for f in fs)
+
 def run_uninstall(directory_path):
     for root, _, files in os.walk(directory_path):
         for file in files:
@@ -50,6 +53,22 @@ def remove_directory(directory_path):
     shutil.rmtree(directory_path)
 
     return os.path.exists(directory_path)
+
+def download_and_uninstall(url: str, filename: str, instance_contents, refresh_all=None):
+    try:
+        save_path = os.path.join(INSTALLER_DIR, filename)
+
+        # Download file
+        urllib.request.urlretrieve(url, save_path)
+
+        # Run the installer
+        install_path = instance_contents['vs_tools_path']
+        subprocess.Popen([save_path], shell=True)
+        refresh_all(instance_contents)
+
+        return not os.path.exists(install_path)
+    except:
+        return False
 
 def download_and_run(url: str, filename: str, instance_contents, refresh_all=None):
     try:
@@ -173,13 +192,14 @@ class StepCard(QWidget):
         self.btn = QPushButton('Install')
         self.btn.setMinimumWidth(160)
         self.btn.clicked.connect(self.run_install)
+        layout.addWidget(self.btn)
 
         self.btn_uninst = QPushButton('Uninstall')
+        self.btn_uninst.setEnabled(False)
         self.btn_uninst.setMinimumWidth(160)
         self.btn_uninst.clicked.connect(self.run_uninstall)
-
-        layout.addWidget(self.btn)
         layout.addWidget(self.btn_uninst)
+
 
         self.setLayout(layout)
 
@@ -217,21 +237,29 @@ class StepCard(QWidget):
             QPushButton {
                 background-color: #5DB95D;
                 border-radius: 10px;
-                font-weight: bold;
+                font-weight: normal;
             }
             """
         )
-        self.btn_uninst.setEnabled(True)
-        self.btn_uninst.setText("Uninstall")
-        self.btn_uninst.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #E06666;
-                border-radius: 10px;
-                font-weight: bold;
-            }
-            """
-        )
+        if 'ST-Link' not in self.title:
+            self.btn_uninst.setEnabled(True)
+            self.btn_uninst.setText("Uninstall")
+            self.btn_uninst.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #E06666;
+                    border-radius: 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #437D00;
+                }
+
+                QPushButton:pressed {
+                    background-color: #1E5D00;
+                }
+                """
+            )
 
     def set_state_uninstalled(self):
         self.btn.setEnabled(True)
@@ -243,6 +271,13 @@ class StepCard(QWidget):
                 border-radius: 10px;
                 font-weight: bold;
             }
+            QPushButton:hover {
+                background-color: #437D00;
+            }
+
+            QPushButton:pressed {
+                background-color: #1E5D00;
+            }
             """
         )
         self.btn_uninst.setEnabled(False)
@@ -252,7 +287,7 @@ class StepCard(QWidget):
             QPushButton {
                 background-color: #999999;
                 border-radius: 10px;
-                font-weight: bold;
+                font-weight: normal;
             }
             """
         )
@@ -265,7 +300,7 @@ class StepCard(QWidget):
             QPushButton {
                 background-color: #999999;
                 border-radius: 10px;
-                font-weight: bold;
+                font-weight: normal;
             }
             """
         )
@@ -327,7 +362,7 @@ class InstallerWindow(QMainWindow):
             }
 
             QPushButton {
-                background-color: #2D73FF;
+                background-color: #999999;
                 color: white;
                 border: none;
                 border-radius: 12px;
@@ -336,11 +371,11 @@ class InstallerWindow(QMainWindow):
             }
 
             QPushButton:hover {
-                background-color: #437DFF;
+                background-color: #437D00;
             }
 
             QPushButton:pressed {
-                background-color: #1E5DE3;
+                background-color: #1E5D00;
             }
         ''')
 
@@ -367,7 +402,7 @@ class InstallerWindow(QMainWindow):
             title       = 'Install MSVC Build Tools',
             subtitle    = 'C++ Build Tools are required.',
             inst_callback   = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
-            uninst_callback = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
+            uninst_callback = lambda: download_and_uninstall(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
             icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
             installed   = os.path.exists(instance_contents['vs_tools_path'])
         )
@@ -392,7 +427,7 @@ class InstallerWindow(QMainWindow):
             inst_callback   = lambda: install_stlink(instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['stlink_path']),
             icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/stlink.png'),
-            installed   = os.path.exists(instance_contents['stlink_path']),
+            installed   = file_exists_containing(os.path.dirname(instance_contents['stlink_path']), instance_contents['stlink_path'].split('/')[-1])
         )
         self.step_cards.append(card)
         layout.addWidget(card)

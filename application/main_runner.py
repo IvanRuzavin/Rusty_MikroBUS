@@ -22,7 +22,7 @@ instance_contents = {
     'rustup_path': f'{os.path.expanduser("~")}/.rustup',
     'probers_path': f'{os.path.expanduser("~")}/.cargo',
     'jlink_path': 'c:/Program Files/SEGGER',
-    'stlink_path': 'c:/Program Files (x86)/STMicroelectronics/stlink_server/stlinkserver.exe',
+    'stlink_path': 'c:/Windows/System32/DriverStore/FileRepository/stlink_dbg_winusb.inf_amd64',
     'gcc_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1'),
     'openocd_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7')
 }
