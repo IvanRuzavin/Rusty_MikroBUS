@@ -1,4 +1,4 @@
-import subprocess, urllib.request, os, shutil
+import subprocess, urllib.request, os, shutil, requests
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -31,6 +31,7 @@ SEGGER_URL = 'https://www.segger.com/downloads/jlink/JLink_Windows_V888_x86_64.e
 PROBE_RS_PS_COMMAND = (
     'irm https://github.com/probe-rs/probe-rs/releases/download/v0.27.0/probe-rs-tools-installer.ps1 | iex'
 )
+GITHUB_RELEASE_URL = f"https://api.github.com/repos/IvanRuzavin/Rusty_MikroBUS/releases/latest"
 
 dots = '.'
 
@@ -48,27 +49,15 @@ def run_uninstall(directory_path):
 
     return os.path.exists(directory_path)
 
+def remove_file(file_path):
+    os.remove(file_path)
+
+    return os.path.exists(file_path)
 
 def remove_directory(directory_path):
     shutil.rmtree(directory_path)
 
-    return os.path.exists(directory_path)
-
-def download_and_uninstall(url: str, filename: str, instance_contents, refresh_all=None):
-    try:
-        save_path = os.path.join(INSTALLER_DIR, filename)
-
-        # Download file
-        urllib.request.urlretrieve(url, save_path)
-
-        # Run the installer
-        install_path = instance_contents['vs_tools_path']
-        subprocess.Popen([save_path], shell=True)
-        refresh_all(instance_contents)
-
-        return not os.path.exists(install_path)
-    except:
-        return False
+    return  os.path.exists(directory_path)
 
 def download_and_run(url: str, filename: str, instance_contents, refresh_all=None):
     try:
@@ -96,6 +85,28 @@ def download_and_run(url: str, filename: str, instance_contents, refresh_all=Non
         return os.path.exists(install_path)
     except:
         return False
+
+def download(url: str, filepath:str):
+    file_name = filepath.split(os.sep)[-1].split('/')[-1]
+
+    # Get latest release info
+    release = requests.get(url).json()
+
+    # Find the asset with the correct name
+    asset_url = None
+    for asset in release.get('assets', []):
+        if asset['name'] == file_name:
+            asset_url = asset['browser_download_url']
+            break
+
+    # Download the file
+    file_data = requests.get(asset_url).content
+
+    # Save file
+    with open(filepath, 'wb') as f:
+        f.write(file_data)
+
+    return os.path.exists(filepath)
 
 def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
     try:
@@ -402,7 +413,7 @@ class InstallerWindow(QMainWindow):
             title       = 'Install MSVC Build Tools',
             subtitle    = 'C++ Build Tools are required.',
             inst_callback   = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
-            uninst_callback = lambda: download_and_uninstall(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
+            uninst_callback = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
             icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
             installed   = os.path.exists(instance_contents['vs_tools_path'])
         )
@@ -473,6 +484,17 @@ class InstallerWindow(QMainWindow):
             uninst_callback = lambda: run_uninstall(instance_contents['jlink_path']),
             icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/segger.png'),
             installed   = os.path.exists(instance_contents['jlink_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
+
+        card = StepCard(
+            title       = 'Install Application Database',
+            subtitle    = 'Provides configuration information.',
+            inst_callback   = lambda: download(GITHUB_RELEASE_URL, instance_contents['database_path']),
+            uninst_callback = lambda: remove_file(instance_contents['database_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/database.png'),
+            installed   = os.path.exists(instance_contents['database_path']),
         )
         self.step_cards.append(card)
         layout.addWidget(card)

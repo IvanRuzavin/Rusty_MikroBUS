@@ -10,6 +10,8 @@ from PyQt6.QtCore import Qt
 
 from custom_ide_window import ProjectWindow
 
+database_path = os.path.join(os.path.dirname(__file__))
+
 cfg_lines = """
 source [find interface/stlink.cfg]
 transport select dapdirect_swd
@@ -17,15 +19,64 @@ source [find target/{target_name}]
 """
 
 class MCUConfigurator(QWidget):
-    def __init__(self):
+    def __init__(self, instance_contents):
         super().__init__()
+
+        self.setStyleSheet('''
+            QWidget {
+                background: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0F1C3F, stop:1 #1B2A5A
+                );
+                color: white;
+                font-family: Arial;
+            }
+
+            .card {
+                background: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 16px;
+                padding: 16px;
+            }
+
+            QPushButton {
+                background-color: #999999;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                padding: 10px 18px;
+                font-size: 15px;
+            }
+
+            QPushButton:hover {
+                background-color: #437D00;
+            }
+
+            QPushButton:pressed {
+                background-color: #1E5D00;
+            }
+
+            QComboBox, QLineEdit {
+                background: rgba(255,255,255,0.15);
+                border: 1px solid rgba(255,255,255,0.25);
+                border-radius: 8px;
+                padding: 6px;
+                color: white;
+            }
+
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+        ''')
+
         self.setWindowTitle("Embedded Rust System Parameters")
         self.setMinimumSize(800, 600)
 
         self.current_data = None
         self.field_widgets = {}
 
-        self.database = sqlite3.connect("project_setup\database\database_mikro_sdk_rust.db")
+        self.database = sqlite3.connect(instance_contents['database_path'])
         self.db_cursor = self.database.cursor()
 
         self.init_ui()

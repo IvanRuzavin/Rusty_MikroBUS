@@ -24,19 +24,47 @@ instance_contents = {
     'jlink_path': 'c:/Program Files/SEGGER',
     'stlink_path': 'c:/Windows/System32/DriverStore/FileRepository/stlink_dbg_winusb.inf_amd64',
     'gcc_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1'),
-    'openocd_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7')
+    'openocd_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7'),
+    'database_path': os.path.join(os.path.dirname(__file__), 'database/database_mikro_sdk_rust.db')
 }
+
+def apply_global_style(widget):
+    widget.setStyleSheet("""
+        QWidget {
+            background-color: #0F1C3F;
+            color: white;
+            font-family: Arial;
+        }
+
+        QPushButton {
+            background-color: #162A63;
+            border: 2px solid #1C3C7A;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+            color: white;
+        }
+
+        QPushButton:hover {
+            background-color: #1C3C7A;
+        }
+
+        QPushButton:pressed {
+            background-color: #0A1430;
+        }
+    """)
 
 # Main Window
 class RustyMikrobusApp(QWidget):
     def __init__(self):
         super().__init__()
+        apply_global_style(self)
         self.setWindowTitle("Rust Toolchain Setup")
         self.resize(600, 300)
         self.init_ui()
 
     def launch_mcu_window(self):
-        self.mcu_window = MCUConfigurator()
+        self.mcu_window = MCUConfigurator(instance_contents)
         self.mcu_window.show()
         self.close()
 
@@ -77,6 +105,7 @@ if __name__ == '__main__':
             instance_contents = json.loads(application_instance.read())
     with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'w') as application_instance:
         json.dump(instance_contents, application_instance, indent = 4)
+    os.makedirs(os.path.join(os.path.dirname(__file__), 'database'), exist_ok=True)
     app = QApplication(sys.argv)
     main_window = RustyMikrobusApp()
     main_window.show()
