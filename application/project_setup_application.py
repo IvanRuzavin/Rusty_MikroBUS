@@ -3,10 +3,23 @@ import sys
 import json
 import sqlite3
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QLineEdit, QPushButton, QScrollArea, QFormLayout, QMessageBox, QCompleter
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QComboBox,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QFormLayout,
+    QMessageBox,
+    QCompleter,
+    QGridLayout,
+    QDialog
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QPixmap
 
 from custom_ide_window import ProjectWindow
 
@@ -22,6 +35,24 @@ class MCUConfigurator(QWidget):
     def __init__(self, instance_contents):
         super().__init__()
 
+        self.setWindowTitle("Embedded Rust System Parameters")
+        self.setMinimumSize(800, 600)
+
+        self.database = sqlite3.connect(instance_contents['database_path'])
+        self.db_cursor = self.database.cursor()
+
+        self.field_widgets = {}
+        self.current_data = {}
+
+        self.setWindowTitle("MCU Configuration")
+        self.resize(900, 600)
+        self.apply_style()
+        self.init_ui()
+
+    # -------------------------------------------------------
+    # Global styles (same colors as installer)
+    # -------------------------------------------------------
+    def apply_style(self):
         self.setStyleSheet('''
             QWidget {
                 background: qlineargradient(
@@ -56,153 +87,168 @@ class MCUConfigurator(QWidget):
                 background-color: #1E5D00;
             }
 
-            QComboBox, QLineEdit {
-                background: rgba(255,255,255,0.15);
-                border: 1px solid rgba(255,255,255,0.25);
-                border-radius: 8px;
-                padding: 6px;
-                color: white;
-            }
-
             QScrollArea {
                 background: transparent;
-                border: none;
             }
         ''')
 
-        self.setWindowTitle("Embedded Rust System Parameters")
-        self.setMinimumSize(800, 600)
-
-        self.current_data = None
-        self.field_widgets = {}
-
-        self.database = sqlite3.connect(instance_contents['database_path'])
-        self.db_cursor = self.database.cursor()
-
-        self.init_ui()
-
-
+    # -------------------------------------------------------
+    # Main UI
+    # -------------------------------------------------------
     def init_ui(self):
-        layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
 
-        # MCU selection layout
-        mcu_layout = QHBoxLayout()
-        mcu_label = QLabel("MCU:")
-        # Get MCU list
-        self.db_cursor.execute("SELECT NAME FROM MCU")
-        mcu_list = [row[0] for row in self.db_cursor.fetchall()]
-        self.mcu_combo = QComboBox()
-        self.mcu_combo.setEditable(True)
-        self.mcu_combo.addItems(mcu_list)
+        # Title
+        title = QLabel("Choose MCU")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        main_layout.addWidget(title)
 
-        # Enable filtering while typing
-        completer = QCompleter(mcu_list, self.mcu_combo)
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.mcu_combo.setCompleter(completer)
+        # Grid scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
 
-        # Optional: Hook up a callback
-        self.mcu_combo.currentTextChanged.connect(self.load_mcu_config)
+        self.grid_container = QWidget()
+        self.grid_layout = QGridLayout()
+        self.grid_container.setLayout(self.grid_layout)
+        scroll.setWidget(self.grid_container)
 
-        mcu_layout.addWidget(mcu_label)
-        mcu_layout.addWidget(self.mcu_combo)
-        layout.addLayout(mcu_layout)
+        main_layout.addWidget(scroll)
 
-        self.setLayout(layout)
+        # Lower panel (clock + register config)
+        self.lower_area = QScrollArea()
+        self.lower_area.setWidgetResizable(True)
 
-        # Clock input
-        clock_layout = QHBoxLayout()
-        clock_label = QLabel("Clock (MHz):")
-        self.clock_input = QLineEdit()
-        clock_layout.addWidget(clock_label)
-        clock_layout.addWidget(self.clock_input)
-        layout.addLayout(clock_layout)
-
-        # Scrollable field section
-        self.scroll_area = QScrollArea()
         self.form_widget = QWidget()
         self.form_layout = QFormLayout()
         self.form_widget.setLayout(self.form_layout)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setWidget(self.form_widget)
-        layout.addWidget(self.scroll_area)
+
+        self.lower_area.setWidget(self.form_widget)
+        main_layout.addWidget(self.lower_area)
 
         # Save button
-        self.save_button = QPushButton("Save System Parameters")
+        self.save_button = QPushButton("Save Parameters")
         self.save_button.clicked.connect(self.save_parameters)
-        layout.addWidget(self.save_button)
+        main_layout.addWidget(self.save_button)
 
+        self.setLayout(main_layout)
+
+        # Load and create buttons
+        self.create_mcu_buttons()
+
+    # -------------------------------------------------------
+    # Load MCU names from DB and create grid of buttons
+    # -------------------------------------------------------
+    def create_mcu_buttons(self):
+        self.db_cursor.execute("SELECT NAME FROM MCU")
+        mcus = [row[0] for row in self.db_cursor.fetchall()]
+
+        icon = QPixmap("project_setup/resources/mcu_icon.png").scaled(80, 80)
+
+        row = 0
+        col = 0
+        for name in mcus:
+            widget = QWidget()
+            widget.setObjectName("card")
+            w_layout = QVBoxLayout(widget)
+
+            # MCU image
+            img_label = QLabel()
+            img_label.setPixmap(icon)
+            img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            # Main MCU button
+            btn = QPushButton(name)
+            btn.clicked.connect(lambda _, n=name: self.load_mcu_config(n))
+            btn.setMinimumHeight(40)
+
+            # Sub-button: Clock config
+            clock_btn = QPushButton("Clock Config")
+            clock_btn.clicked.connect(lambda _, n=name: self.open_clock_config(n))
+
+            w_layout.addWidget(img_label)
+            w_layout.addWidget(btn)
+            w_layout.addWidget(clock_btn)
+
+            self.grid_layout.addWidget(widget, row, col)
+
+            col += 1
+            if col > 3:      # 4 per row
+                col = 0
+                row += 1
+
+    # -------------------------------------------------------
+    # Clock config window
+    # -------------------------------------------------------
+    def open_clock_config(self, mcu_name):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{mcu_name} Clock Configuration")
+        dlg.resize(400, 200)
+        dlg.setStyleSheet(self.styleSheet())
+
+        layout = QVBoxLayout(dlg)
+
+        lbl = QLabel("Clock (MHz):")
+        self.clock_input = QLineEdit()
+        layout.addWidget(lbl)
+        layout.addWidget(self.clock_input)
+
+        save = QPushButton("Save")
+        save.clicked.connect(dlg.accept)
+        layout.addWidget(save)
+
+        dlg.exec()
+
+    # -------------------------------------------------------
+    # Load MCU config JSON and fill lower fields
+    # -------------------------------------------------------
     def load_mcu_config(self, mcu_name):
-        self.field_widgets.clear()
-        selected_mcu = self.mcu_combo.currentText()
-        self.db_cursor.execute(f"SELECT FAMILY.VENDOR FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME WHERE MCU.NAME = '{selected_mcu}'")
-        query_result = self.db_cursor.fetchall()
-        if not query_result:
-            return
-        query_data = query_result[0]
-        vendor = query_data[0]
-
-        # Clear previous content
+        # Clear previous
         for i in reversed(range(self.form_layout.count())):
             widget = self.form_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
 
-        filepath = f"project_setup/core_packages/mcu_definitions/{vendor}/{selected_mcu}.json"
+        # Get vendor
+        self.db_cursor.execute(
+            f"SELECT FAMILY.VENDOR FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME WHERE MCU.NAME = '{mcu_name}'"
+        )
+        result = self.db_cursor.fetchall()
+        if not result:
+            return
+
+        vendor = result[0][0]
+        filepath = f"project_setup/core_packages/mcu_definitions/{vendor}/{mcu_name}.json"
         if not os.path.exists(filepath):
             return
 
         with open(filepath, "r") as f:
             self.current_data = json.load(f)
 
-        # Set clock value
-        self.clock_input.setText(str(self.current_data.get("clock", 0)))
-
-        # Populate visible fields
-        for register in self.current_data.get("config_registers", []):
-            reg_key = register["key"]
-            address = register["address"]
+        # Fill registers
+        for reg in self.current_data.get("config_registers", []):
+            reg_key = reg["key"]
+            address = reg["address"]
             combined_key = f"{reg_key}|{address}"
 
-            for field in register["fields"]:
-                field_key = field["key"]
-                label = field.get("label", field_key)
-                init_value = field.get("init", None)
+            for field in reg["fields"]:
+                label = field.get("label", field["key"])
+                init_value = field.get("init", "")
                 mask = field["mask"]
 
+                # Hidden field stored only
                 if field.get("hidden", False):
                     self.field_widgets.setdefault(combined_key, []).append((mask, init_value))
                     continue
 
                 combo = QComboBox()
-                selected_index = -1
 
+                # Normal setting list
                 if "settings" in field:
-                    for i, setting in enumerate(field["settings"]):
+                    for setting in field["settings"]:
                         combo.addItem(setting["label"], setting["value"])
                         if init_value.lower() == setting["value"].lower():
-                            selected_index = i
-
-                elif "settings_array" in field:
-                    settings = field["settings_array"]
-                    min_val = int(settings["min_value"])
-                    max_val = int(settings["max_value"])
-                    inverted = settings.get("inverted", False)
-                    values = list(range(min_val, max_val + 1))
-                    if inverted:
-                        values = list(reversed(values))
-
-                    init_value_array = "0x" + init_value.lstrip('0')
-
-                    for i, val in enumerate(values):
-                        mask_hex = int(f"0x{field["mask"]}", 16)
-                        val_bin = bin(mask_hex)
-                        val_hex = hex(int(f"0x{hex(val)[2:].zfill(8).upper()}", 16) << (len(val_bin) - len(val_bin.rstrip('0'))))
-                        combo.addItem(f"{field_key} = {val}", val_hex)
-                        if init_value_array == val_hex:
-                            selected_index = i
-
-                if selected_index != -1:
-                    combo.setCurrentIndex(selected_index)
+                            combo.setCurrentText(setting["label"])
 
                 self.form_layout.addRow(QLabel(label), combo)
                 self.field_widgets.setdefault(combined_key, []).append((mask, combo))
