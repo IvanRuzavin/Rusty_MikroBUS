@@ -211,18 +211,17 @@ class StepCard(QWidget):
         self.btn_uninst.clicked.connect(self.run_uninstall)
         layout.addWidget(self.btn_uninst)
 
+        # Apply installed state if needed
+        if installed:
+            self.set_state_installed()
+        else:
+            self.set_state_uninstalled()
 
         self.setLayout(layout)
 
         if 'Rust' in title or 'Probe-rs' in title:
             if vs_tools_needed:
                 self.set_state_vs_tools_required()
-
-        # Apply installed state if needed
-        if installed:
-            self.set_state_installed()
-        else:
-            self.set_state_uninstalled()
 
     def run_install(self):
         # Call user-provided install function
