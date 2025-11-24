@@ -71,7 +71,7 @@ class RegisterConfigPanel(QWidget):
     # Load Registers from JSON definition
     # -------------------------------------------------------
     def load_register_config(self):
-        filepath = f"project_setup/core_packages/mcu_definitions/{self.vendor}/{self.mcu_name}.json"
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/mcu_definitions', f'{self.mcu_name}.json')
         if not os.path.exists(filepath):
             QMessageBox.critical(self, "Error", f"MCU definition file missing:\n{filepath}")
             return
