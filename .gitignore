@@ -2,4 +2,5 @@ application/installer/*
 application/instance_uid.json
 application/__pycache__/*
 application/runner/*
-database/*
+application/database/*
+.setup/*

@@ -184,12 +184,17 @@ class MCUConfigurator(QWidget):
         dlg.exec()
 
     def resizeEvent(self, event):
+        if self.grid_layout is not None:
+            self.reflow_grid()
         super().resizeEvent(event)
-        self.reflow_grid()
 
     def reflow_grid(self):
         if not hasattr(self, "mcu_buttons"):
             return
+
+        if self.grid_layout is None:
+            return
+
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         width = self.grid_container.width()
@@ -212,7 +217,23 @@ class MCUConfigurator(QWidget):
                 col = 0
                 row += 1
 
+    def clear_layout(self):
+        layout = self.layout()
+        if layout is None:
+            return
+
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        # also destroy grid_layout reference
+        self.grid_layout = None
+
     def show_register_config(self, mcu_name):
+        self.clear_layout()
+        self.grid_layout = None
         # Fetch vendor & target
         self.db_cursor.execute(
             "SELECT Family.VENDOR, Family.TARGET "
