@@ -143,7 +143,9 @@ class RegisterConfigPanel(QWidget):
 
                 combo = QComboBox()
                 combo.setMinimumHeight(36)
-                combo.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+                combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                combo.setMinimumWidth(0)
+                combo.setMaximumWidth(16777215)
 
                 # disable accidental wheel scrolling
                 combo.wheelEvent = lambda event: None
@@ -167,49 +169,54 @@ class RegisterConfigPanel(QWidget):
     # Reflow / responsive layout
     # -----------------------
     def _reflow_fields(self):
-        """
-        Arrange widgets from self._fields into the grid layout using self.columns columns.
-        We will remove existing items from form_layout and reinsert.
-        Each field is a pair label-above-control placed in a QVBoxLayout and then placed into the grid.
-        """
-        # Clear existing layout items
+        # remove everything
         self._clear_layout(self.form_layout)
 
         if not self._fields:
             return
 
         cols = self.columns
+
+        # equal column behavior
+        for i in range(cols):
+            self.form_layout.setColumnStretch(i, 1)
+            self.form_layout.setColumnMinimumWidth(i, 0)
+
         row = 0
         col = 0
 
         for (label_widget, control_widget, combined_key, mask) in self._fields:
-            # wrapper vertical layout for label above control
-            wrapper = QVBoxLayout()
-            wrapper.setSpacing(6)
-            wrapper.setContentsMargins(0, 0, 0, 0)
-            # ensure control expands horizontally in its column
+
+            # allow full shrink/expand
+            label_widget.setMinimumWidth(0)
+            control_widget.setMinimumWidth(0)
+
+            label_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             control_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+            wrapper = QVBoxLayout()
+            wrapper.setContentsMargins(0, 0, 0, 0)
+            wrapper.setSpacing(6)
             wrapper.addWidget(label_widget)
             wrapper.addWidget(control_widget)
 
-            # Add wrapper to grid at (row, col)
-            # QGridLayout.addLayout expects the layout itself
-            self.form_layout.addLayout(wrapper, row, col)
+            container = QWidget()
+            container.setLayout(wrapper)
+            container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+            # put container in the grid
+            self.form_layout.addWidget(container, row, col)
 
             col += 1
             if col >= cols:
                 col = 0
                 row += 1
 
-        # Add stretch to push items to top if there is extra vertical space
-        # Create an empty spacer row by adding a dummy widget with expanding vertical policy
+        # bottom spacer
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        # place spacer in the grid spanning all columns at next row
         self.form_layout.addWidget(spacer, row + 1, 0, 1, cols)
 
-        # update geometry
         self.form_widget.updateGeometry()
 
     def _clear_layout(self, layout: QLayout):

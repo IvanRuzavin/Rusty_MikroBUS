@@ -117,7 +117,11 @@ class MCUConfigurator(QWidget):
         scroll.setWidget(self.grid_container)
         main_layout.addWidget(scroll)
 
-        self.setLayout(main_layout)
+        if self.layout() == None:
+            self.setLayout(main_layout)
+        else:
+            self.layout().addWidget(title)
+            self.layout().addWidget(scroll)
 
         self.create_mcu_buttons()
 
@@ -128,7 +132,7 @@ class MCUConfigurator(QWidget):
         self.db_cursor.execute("SELECT NAME FROM MCU")
         mcus = [row[0] for row in self.db_cursor.fetchall()]
 
-        icon = QPixmap("project_setup/resources/mcu_icon.png").scaled(80, 80)
+        icon = QPixmap(os.path.join(os.getcwd(), 'application/sprites/mcu.png')).scaled(80, 80)
 
         self.mcu_buttons = []   # store widgets for later reflow
 
@@ -252,6 +256,7 @@ class MCUConfigurator(QWidget):
         self.layout().addWidget(self.register_panel)
 
     def show_mcu_selection(self):
+        self.clear_layout()
         # Restore original MCU grid view (rebuild UI)
         self.init_ui()
 
