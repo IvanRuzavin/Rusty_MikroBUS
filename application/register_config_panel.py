@@ -310,10 +310,47 @@ class RegisterConfigPanel(QWidget):
 
         core_header_output.append(f"pub const FOSC_KHZ_VALUE: u32 = {clock_mhz * 1000};")
 
-        setup_folder = os.path.join(os.getcwd(), '.setup')
+        sdk_folder = os.path.join(os.getcwd(), 'sdk')
+        setup_folder = os.path.join(sdk_folder, '.setup/core')
         os.makedirs(setup_folder, exist_ok=True)
+
+        # Generate core header file
         with open(os.path.join(setup_folder, "core_header.rs"), "w", encoding="utf-8") as f:
             f.write("\n".join(core_header_output))
+
+        # Update config.toml file
+        with open(os.path.join(sdk_folder, '.cargo/template_config.toml'), 'r') as source_toml:
+            source_toml.read()
+        with open(os.path.join(sdk_folder, '.cargo/config.toml'), 'w') as dest_toml:
+            dest_toml.write(source_toml.replace('{compiling_target}', self.target))
+
+        # Pick correct linker script
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/memory', self.mcu_name, 'memory.x')
+        with open(filepath, 'r') as source_file:
+            source_file.read()
+        with open(os.path.join(setup_folder, 'memory.x'), 'w') as dest_file:
+            dest_file.write(source_file)
+
+        # Pick correct startup file
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/startup', f'{self.mcu_name.lower()}.s')
+        with open(filepath, 'r') as source_file:
+            source_file.read()
+        with open(os.path.join(setup_folder, 'startup.s'), 'w') as dest_file:
+            dest_file.write(source_file)
+
+        # Pick correct mcu header file
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/mcu_headers', self.mcu_name, 'lib.rs')
+        with open(filepath, 'r') as source_file:
+            source_file.read()
+        with open(os.path.join(setup_folder, 'mcu_header.rs'), 'w') as dest_file:
+            dest_file.write(source_file)
+
+        # Copy system reset file
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/system_reset/src/reset.rs')
+        with open(filepath, 'r') as source_file:
+            source_file.read()
+        with open(os.path.join(setup_folder, 'reset.rs'), 'w') as dest_file:
+            dest_file.write(source_file)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)
         subprocess.run(f"rustup target add {self.target}", shell=True)

@@ -27,4 +27,4 @@ drv_spi_master = {path = "drv/lib/drv_spi_master"}
 drv_pwm = {path = "drv/lib/drv_pwm"}
 drv_uart = {path = "drv/lib/drv_uart"}
 drv_one_wire = {path = "drv/lib/drv_one_wire"}
-system = {path = "core/system"}
+system = {path = ".setup/core"}
