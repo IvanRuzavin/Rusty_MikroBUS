@@ -309,12 +309,13 @@ class RegisterConfigPanel(QWidget):
 
         core_header_output.append(f"pub const FOSC_KHZ_VALUE: u32 = {clock_mhz * 1000};")
 
+
         sdk_folder = os.path.join(os.getcwd(), 'sdk')
         setup_folder = os.path.join(sdk_folder, '.setup/core')
-        os.makedirs(setup_folder, exist_ok=True)
+        os.makedirs(os.path.join(setup_folder, 'src'), exist_ok=True)
 
         # Generate core header file
-        with open(os.path.join(setup_folder, "core_header.rs"), "w", encoding="utf-8") as f:
+        with open(os.path.join(setup_folder, "src/core_header.rs"), "w", encoding="utf-8") as f:
             f.write("\n".join(core_header_output))
 
         # Update config.toml file
@@ -334,28 +335,49 @@ class RegisterConfigPanel(QWidget):
         filepath = os.path.join(os.getcwd(), 'core/arm/stm32/startup', f'{self.mcu_name.lower()}.s')
         with open(filepath, 'r') as source_file:
             source_file_contents = source_file.read()
-        with open(os.path.join(setup_folder, 'startup.s'), 'w') as dest_file:
+        with open(os.path.join(setup_folder, 'src/startup.s'), 'w') as dest_file:
             dest_file.write(source_file_contents)
 
         # Pick correct mcu header file
         filepath = os.path.join(os.getcwd(), 'core/arm/stm32/mcu_headers', self.mcu_name, 'lib.rs')
         with open(filepath, 'r') as source_file:
             source_file_contents = source_file.read()
-        with open(os.path.join(setup_folder, 'mcu_header.rs'), 'w') as dest_file:
+        with open(os.path.join(setup_folder, 'src/mcu_header.rs'), 'w') as dest_file:
             dest_file.write(source_file_contents)
 
         # Copy system reset file
-        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/system/reset.rs')
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/reset.rs')
         with open(filepath, 'r') as source_file:
             source_file_contents = source_file.read()
-        with open(os.path.join(setup_folder, 'reset.rs'), 'w') as dest_file:
+        with open(os.path.join(setup_folder, 'src/reset.rs'), 'w') as dest_file:
             dest_file.write(source_file_contents)
 
         # Copy clock init file
         filepath = os.path.join(os.getcwd(), f'core/arm/stm32/system/{self.system}/init_clock.rs')
         with open(filepath, 'r') as source_file:
             source_file_contents = source_file.read()
-        with open(os.path.join(setup_folder, 'init_clock.rs'), 'w') as dest_file:
+        with open(os.path.join(setup_folder, 'src/init_clock.rs'), 'w') as dest_file:
+            dest_file.write(source_file_contents)
+
+        # Copy main core Cargo file
+        filepath = os.path.join(os.getcwd(), f'core/arm/stm32/Cargo.toml')
+        with open(filepath, 'r') as source_file:
+            source_file_contents = source_file.read()
+        with open(os.path.join(setup_folder, 'Cargo.toml'), 'w') as dest_file:
+            dest_file.write(source_file_contents)
+
+        # Copy main core lib.rs file
+        filepath = os.path.join(os.getcwd(), f'core/arm/stm32/lib.rs')
+        with open(filepath, 'r') as source_file:
+            source_file_contents = source_file.read()
+        with open(os.path.join(setup_folder, 'src/lib.rs'), 'w') as dest_file:
+            dest_file.write(source_file_contents)
+
+        # Copy common_header.rs file
+        filepath = os.path.join(os.getcwd(), f'core/arm/stm32/common_header.rs')
+        with open(filepath, 'r') as source_file:
+            source_file_contents = source_file.read()
+        with open(os.path.join(setup_folder, 'common_header.rs'), 'w') as dest_file:
             dest_file.write(source_file_contents)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)
