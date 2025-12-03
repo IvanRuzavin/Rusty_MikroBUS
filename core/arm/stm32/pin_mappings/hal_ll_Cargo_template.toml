@@ -20,7 +20,7 @@ hal_ll_gpio_constants = {path = "gpio/hal_ll_gpio_constants"}
 hal_ll_target_names = {path = "hal_ll_target_names"}
 system = {path = "../../../.setup/core"}
 bit_control = {path = "../core/bit_control"}
-mcu_definition = {path = "../family_definitions/stm/{family}"}
+mcu_definition = {path = "../../../.setup/sdk"}
 
 interrupt = {path = "../core/interrupt", optional = true}
 

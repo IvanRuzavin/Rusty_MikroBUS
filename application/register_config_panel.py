@@ -400,8 +400,11 @@ class RegisterConfigPanel(QWidget):
             hal_ll_template = source_file.read()
 
         # Fetch appropriate pin mappings data
-        self.current_data
-        for module in self.current_data.get("module_list", []):
+        for language_impl in self.current_data.get("language_list", []):
+            if language_impl.get("language") == "RUST":
+                current_data = language_impl
+
+        for module in current_data.get("module_list", []):
             module_name = module.get("module_name")
             sub_module_list = ""
             for sub_module in module.get("sub_modules", []):
@@ -418,7 +421,7 @@ class RegisterConfigPanel(QWidget):
                     sub_module_list += "\","
                 family_template = family_template.replace(f"{{{sub_module_name}_features}}", pin_mapping)
             sub_module_list = sub_module_list.rstrip(',')
-            hal_ll_template = hal_ll_template.replace(f"{{{module_name}}}", sub_module_list)
+            hal_ll_template = hal_ll_template.replace(f"{{{module_name}}}", sub_module_list).replace('{family}', self.family)
 
         # Configure pin mapping definitions
         with open(os.path.join(setup_folder, 'Cargo.toml'), 'w') as dest_file:

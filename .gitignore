@@ -6,3 +6,5 @@ application/database/*
 sdk/.setup/*
 sdk/.cargo/*
 sdk/target
+sdk/targets/arm/stm32/src/*
+sdk/targets/arm/stm32/Cargo.toml
