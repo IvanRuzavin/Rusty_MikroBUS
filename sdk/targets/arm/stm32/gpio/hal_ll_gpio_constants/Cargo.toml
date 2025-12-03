@@ -1,21 +1,20 @@
 [package]
-name = "hal_i2c_master"
-version = "0.0.1"
+name = "hal_ll_gpio_constants"
+version = "0.1.0"
 edition = "2024"
 author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
+
 
 [profile.release]
 opt-level = 'z'
 lto = true
 
+
 [profile.dev]
 opt-level = 0
 lto = false
 
+
 [dependencies]
-hal_ll = { path = "../../../targets/arm/stm32" }
-hal_target = { path = "../../interface"}
 
 [features]
-default = ["i2c"]
-i2c = ["hal_ll/i2c"]

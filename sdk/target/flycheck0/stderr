@@ -1,0 +1,18 @@
+warning: unused manifest key: package.author
+    Updating crates.io index
+error: failed to get `mcu_definition` as a dependency of package `hal_ll v0.0.1 (D:\work_mikroe\GIT\Rusty_MikroBUS\sdk\targets\arm\stm32)`
+    ... which satisfies path dependency `hal_ll` of package `hal_adc v0.0.1 (D:\work_mikroe\GIT\Rusty_MikroBUS\sdk\hal\lib\adc)`
+    ... which satisfies path dependency `hal_adc` of package `drv_analog_in v0.0.1 (D:\work_mikroe\GIT\Rusty_MikroBUS\sdk\drv\lib\drv_analog_in)`
+    ... which satisfies path dependency `drv_analog_in` of package `mikrosdk v0.0.1 (D:\work_mikroe\GIT\Rusty_MikroBUS\sdk)`
+
+Caused by:
+  failed to load source for dependency `mcu_definition`
+
+Caused by:
+  Unable to update D:\work_mikroe\GIT\Rusty_MikroBUS\sdk\targets\arm\common\mcu_definitions\stm32
+
+Caused by:
+  failed to read `D:\work_mikroe\GIT\Rusty_MikroBUS\sdk\targets\arm\common\mcu_definitions\stm32\Cargo.toml`
+
+Caused by:
+  Системе не удается найти указанный путь. (os error 3)

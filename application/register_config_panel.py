@@ -1,5 +1,5 @@
 # register_config_panel.py
-import os
+import os, shutil
 import json
 import subprocess
 from PyQt6.QtWidgets import (
@@ -21,13 +21,15 @@ class RegisterConfigPanel(QWidget):
     - Rounded corners for input controls and buttons via stylesheet.
     """
 
-    def __init__(self, parent_window, system, mcu_name, vendor, target):
+    def __init__(self, parent_window, system, mcu_name, vendor, target, family, db_cursor):
         super().__init__()
         self.parent_window = parent_window
         self.mcu_name = mcu_name
         self.vendor = vendor
         self.target = target
         self.system = system
+        self.family = family.lower()
+        self.db_cursor = db_cursor
 
         # Will hold (label_widget, control_widget, combined_key, mask) tuples for layout management
         self._fields = []        # visible fields -> tuples (label_widget, control_widget, combined_key, mask)
@@ -311,8 +313,13 @@ class RegisterConfigPanel(QWidget):
 
 
         sdk_folder = os.path.join(os.getcwd(), 'sdk')
+
+        if os.path.exists(os.path.join(sdk_folder, '.setup')):
+            shutil.rmtree(os.path.join(sdk_folder, '.setup'))
         setup_folder = os.path.join(sdk_folder, '.setup/core')
         os.makedirs(os.path.join(setup_folder, 'src'), exist_ok=True)
+
+        #################### CORE CONFIG PART ####################
 
         # Generate core header file
         with open(os.path.join(setup_folder, "src/core_header.rs"), "w", encoding="utf-8") as f:
@@ -379,6 +386,89 @@ class RegisterConfigPanel(QWidget):
             source_file_contents = source_file.read()
         with open(os.path.join(setup_folder, 'common_header.rs'), 'w') as dest_file:
             dest_file.write(source_file_contents)
+
+        #################### SDK CONFIG PART ####################
+        setup_folder = os.path.join(sdk_folder, '.setup/sdk')
+        os.makedirs(os.path.join(setup_folder), exist_ok=True)
+
+        # Copy appropriate pin mappings file
+        folderpath = os.path.join(os.getcwd(), 'core/arm/stm32/pin_mappings')
+        shutil.copytree(os.path.join(folderpath, self.family, 'src'), os.path.join(setup_folder, 'src'))
+        with open(os.path.join(folderpath, self.family, 'Cargo_family_template.toml'), 'r') as source_file:
+            family_template = source_file.read()
+        with open(os.path.join(folderpath, 'hal_ll_Cargo_template.toml'), 'r') as source_file:
+            hal_ll_template = source_file.read()
+
+        # Fetch appropriate pin mappings data
+        self.current_data
+        for module in self.current_data.get("module_list", []):
+            module_name = module.get("module_name")
+            sub_module_list = ""
+            for sub_module in module.get("sub_modules", []):
+                sub_module_name = sub_module.get("sub_module_name")
+                pin_mapping = ""
+                for pin_feature in sub_module.get("pin_map_features"):
+                    pin_mapping += "\""
+                    pin_mapping += pin_feature
+                    pin_mapping += "\","
+                pin_mapping = pin_mapping.rstrip(',')
+                if pin_mapping != "":
+                    sub_module_list += "\""
+                    sub_module_list += sub_module_name
+                    sub_module_list += "\","
+                family_template = family_template.replace(f"{{{sub_module_name}_features}}", pin_mapping)
+            sub_module_list = sub_module_list.rstrip(',')
+            hal_ll_template = hal_ll_template.replace(f"{{{module_name}}}", sub_module_list)
+
+        # Configure pin mapping definitions
+        with open(os.path.join(setup_folder, 'Cargo.toml'), 'w') as dest_file:
+            dest_file.write(family_template)
+
+        # Configure modules definitions
+        with open(os.path.join(sdk_folder, 'targets/arm/stm32/Cargo.toml'), 'w') as dest_file:
+            dest_file.write(hal_ll_template)
+
+        # Fetch appropriate modules implementation
+        ## TODO - define in json ???
+        selected_mcu = self.mcu_combo.currentText()
+        self.db_cursor.execute(f"SELECT FAMILY.* FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME WHERE MCU.NAME = '{selected_mcu}'")
+        query_result = self.db_cursor.fetchall()[0]
+        gpio = query_result[4]
+        adc = query_result[5]
+        i2c = query_result[6]
+        spi = query_result[7]
+        tim = query_result[8]
+        uart = query_result[9]
+
+        with open(f"targets/arm/stm32/gpio/gpio_port/{gpio}/gpio_port.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/gpio_port.rs", "w") as f:
+            f.write(implementation)
+
+        with open(f"targets/arm/stm32/adc/{adc}/adc.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/adc.rs", "w") as f:
+            f.write(implementation)
+
+        with open(f"targets/arm/stm32/i2c/{i2c}/i2c_master.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/i2c_master.rs", "w") as f:
+            f.write(implementation)
+
+        with open(f"targets/arm/stm32/spi/{spi}/spi_master.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/spi_master.rs", "w") as f:
+            f.write(implementation)
+
+        with open(f"targets/arm/stm32/tim/{tim}/tim.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/tim.rs", "w") as f:
+            f.write(implementation)
+
+        with open(f"targets/arm/stm32/uart/{uart}/uart.rs", "r") as f:
+            implementation = f.read()
+        with open("targets/arm/stm32/src/uart.rs", "w") as f:
+            f.write(implementation)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)
         subprocess.run(f"rustup target add {self.target}", shell=True)

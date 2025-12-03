@@ -236,11 +236,11 @@ class MCUConfigurator(QWidget):
         self.grid_layout = None
         # Fetch vendor & target
         self.db_cursor.execute(
-            "SELECT Family.VENDOR, Family.TARGET, MCU.SYSTEM_LIB "
+            "SELECT Family.VENDOR, Family.TARGET, MCU.SYSTEM_LIB, MCU.FAMILY "
             "FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME "
             f"WHERE MCU.NAME = '{mcu_name}'"
         )
-        vendor, target, system_name = self.db_cursor.fetchall()[0]
+        vendor, target, system_name, family = self.db_cursor.fetchall()[0]
 
         # Clear the window and load the register panel
         for i in reversed(range(self.layout().count())):
@@ -248,7 +248,7 @@ class MCUConfigurator(QWidget):
             if widget:
                 widget.setParent(None)
 
-        self.register_panel = RegisterConfigPanel(self, system_name, mcu_name, vendor, target)
+        self.register_panel = RegisterConfigPanel(self, system_name, mcu_name, vendor, target, family, self.db_cursor)
         self.layout().addWidget(self.register_panel)
 
     def show_mcu_selection(self):

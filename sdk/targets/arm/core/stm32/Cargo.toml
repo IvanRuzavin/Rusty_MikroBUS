@@ -1,5 +1,5 @@
 [package]
-name = "hal_i2c_master"
+name = "interrupt"
 version = "0.0.1"
 edition = "2024"
 author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
@@ -13,9 +13,4 @@ opt-level = 0
 lto = false
 
 [dependencies]
-hal_ll = { path = "../../../targets/arm/stm32" }
-hal_target = { path = "../../interface"}
-
-[features]
-default = ["i2c"]
-i2c = ["hal_ll/i2c"]
+bit_control = {path = "../common/bit_control"}

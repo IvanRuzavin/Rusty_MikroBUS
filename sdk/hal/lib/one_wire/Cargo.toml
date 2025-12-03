@@ -13,7 +13,7 @@ opt-level = 0
 lto = false
 
 [dependencies]
-hal_ll = { path = "../../../hal_ll" }
+hal_ll = { path = "../../../targets/arm/stm32" }
 hal_target = { path = "../../interface"}
 
 [features]

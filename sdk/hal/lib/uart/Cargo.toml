@@ -13,11 +13,11 @@ opt-level = 0
 lto = false
 
 [dependencies]
-hal_ll = { path = "../../../hal_ll" }
+hal_ll = { path = "../../../targets/arm/stm32" }
 hal_target = { path = "../../interface"}
 hal_gpio = { path = "../gpio"}
-system = {path = "../../../core/system"}
-interrupt = {path = "../../../core/interrupt"}
+system = {path = "../../../.setup/core"}
+interrupt = {path = "../../../targets/arm/core/stm32"}
 ring = {path = "../../../platform/ring"}
 
 [features]
