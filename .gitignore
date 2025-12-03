@@ -3,4 +3,5 @@ application/instance_uid.json
 application/__pycache__/*
 application/runner/*
 application/database/*
-.setup/*
+sdk/.setup/*
+sdk/.cargo/*

@@ -21,14 +21,13 @@ class RegisterConfigPanel(QWidget):
     - Rounded corners for input controls and buttons via stylesheet.
     """
 
-    def __init__(self, parent_window, database, mcu_name, vendor, target):
+    def __init__(self, parent_window, system, mcu_name, vendor, target):
         super().__init__()
         self.parent_window = parent_window
-        self.database = database
-        self.db_cursor = database.cursor()
         self.mcu_name = mcu_name
         self.vendor = vendor
         self.target = target
+        self.system = system
 
         # Will hold (label_widget, control_widget, combined_key, mask) tuples for layout management
         self._fields = []        # visible fields -> tuples (label_widget, control_widget, combined_key, mask)
@@ -319,38 +318,45 @@ class RegisterConfigPanel(QWidget):
             f.write("\n".join(core_header_output))
 
         # Update config.toml file
-        with open(os.path.join(sdk_folder, '.cargo/template_config.toml'), 'r') as source_toml:
-            source_toml.read()
-        with open(os.path.join(sdk_folder, '.cargo/config.toml'), 'w') as dest_toml:
-            dest_toml.write(source_toml.replace('{compiling_target}', self.target))
+        with open(os.path.join(sdk_folder, '.cargo/template_config.toml'), 'r') as source_file:
+            source_file_contents = source_file.read()
+        with open(os.path.join(sdk_folder, '.cargo/config.toml'), 'w') as dest_file:
+            dest_file.write(source_file_contents.replace('{compiling_target}', self.target))
 
         # Pick correct linker script
         filepath = os.path.join(os.getcwd(), 'core/arm/stm32/memory', self.mcu_name, 'memory.x')
         with open(filepath, 'r') as source_file:
-            source_file.read()
+            source_file_contents = source_file.read()
         with open(os.path.join(setup_folder, 'memory.x'), 'w') as dest_file:
-            dest_file.write(source_file)
+            dest_file.write(source_file_contents)
 
         # Pick correct startup file
         filepath = os.path.join(os.getcwd(), 'core/arm/stm32/startup', f'{self.mcu_name.lower()}.s')
         with open(filepath, 'r') as source_file:
-            source_file.read()
+            source_file_contents = source_file.read()
         with open(os.path.join(setup_folder, 'startup.s'), 'w') as dest_file:
-            dest_file.write(source_file)
+            dest_file.write(source_file_contents)
 
         # Pick correct mcu header file
         filepath = os.path.join(os.getcwd(), 'core/arm/stm32/mcu_headers', self.mcu_name, 'lib.rs')
         with open(filepath, 'r') as source_file:
-            source_file.read()
+            source_file_contents = source_file.read()
         with open(os.path.join(setup_folder, 'mcu_header.rs'), 'w') as dest_file:
-            dest_file.write(source_file)
+            dest_file.write(source_file_contents)
 
         # Copy system reset file
-        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/system_reset/src/reset.rs')
+        filepath = os.path.join(os.getcwd(), 'core/arm/stm32/system/reset.rs')
         with open(filepath, 'r') as source_file:
-            source_file.read()
+            source_file_contents = source_file.read()
         with open(os.path.join(setup_folder, 'reset.rs'), 'w') as dest_file:
-            dest_file.write(source_file)
+            dest_file.write(source_file_contents)
+
+        # Copy clock init file
+        filepath = os.path.join(os.getcwd(), f'core/arm/stm32/system/{self.system}/init_clock.rs')
+        with open(filepath, 'r') as source_file:
+            source_file_contents = source_file.read()
+        with open(os.path.join(setup_folder, 'init_clock.rs'), 'w') as dest_file:
+            dest_file.write(source_file_contents)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)
         subprocess.run(f"rustup target add {self.target}", shell=True)

@@ -183,10 +183,6 @@ class MCUConfigurator(QWidget):
     # -------------------------------------------------------
     # Load JSON and populate register fields
     # -------------------------------------------------------
-    def load_mcu_config(self, mcu_name):
-        dlg = RegisterConfigPanel(mcu_name, self.database)
-        dlg.exec()
-
     def resizeEvent(self, event):
         if self.grid_layout is not None:
             self.reflow_grid()
@@ -240,11 +236,11 @@ class MCUConfigurator(QWidget):
         self.grid_layout = None
         # Fetch vendor & target
         self.db_cursor.execute(
-            "SELECT Family.VENDOR, Family.TARGET "
+            "SELECT Family.VENDOR, Family.TARGET, MCU.SYSTEM_LIB "
             "FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME "
             f"WHERE MCU.NAME = '{mcu_name}'"
         )
-        vendor, target = self.db_cursor.fetchall()[0]
+        vendor, target, system_name = self.db_cursor.fetchall()[0]
 
         # Clear the window and load the register panel
         for i in reversed(range(self.layout().count())):
@@ -252,7 +248,7 @@ class MCUConfigurator(QWidget):
             if widget:
                 widget.setParent(None)
 
-        self.register_panel = RegisterConfigPanel(self, self.database, mcu_name, vendor, target)
+        self.register_panel = RegisterConfigPanel(self, system_name, mcu_name, vendor, target)
         self.layout().addWidget(self.register_panel)
 
     def show_mcu_selection(self):
