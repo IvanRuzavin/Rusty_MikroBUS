@@ -5,3 +5,4 @@ application/runner/*
 application/database/*
 sdk/.setup/*
 sdk/.cargo/*
+sdk/target

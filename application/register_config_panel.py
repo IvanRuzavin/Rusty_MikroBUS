@@ -430,8 +430,7 @@ class RegisterConfigPanel(QWidget):
 
         # Fetch appropriate modules implementation
         ## TODO - define in json ???
-        selected_mcu = self.mcu_combo.currentText()
-        self.db_cursor.execute(f"SELECT FAMILY.* FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME WHERE MCU.NAME = '{selected_mcu}'")
+        self.db_cursor.execute(f"SELECT FAMILY.* FROM MCU JOIN FAMILY ON MCU.FAMILY = FAMILY.NAME WHERE MCU.NAME = '{self.mcu_name}'")
         query_result = self.db_cursor.fetchall()[0]
         gpio = query_result[4]
         adc = query_result[5]
@@ -440,40 +439,40 @@ class RegisterConfigPanel(QWidget):
         tim = query_result[8]
         uart = query_result[9]
 
-        with open(f"targets/arm/stm32/gpio/gpio_port/{gpio}/gpio_port.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/gpio/gpio_port/{gpio}/gpio_port.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/gpio_port.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/gpio_port.rs', 'w') as f:
             f.write(implementation)
 
-        with open(f"targets/arm/stm32/adc/{adc}/adc.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/adc/{adc}/adc.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/adc.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/adc.rs', 'w') as f:
             f.write(implementation)
 
-        with open(f"targets/arm/stm32/i2c/{i2c}/i2c_master.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/i2c/{i2c}/i2c_master.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/i2c_master.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/i2c_master.rs', 'w') as f:
             f.write(implementation)
 
-        with open(f"targets/arm/stm32/spi/{spi}/spi_master.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/spi/{spi}/spi_master.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/spi_master.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/spi_master.rs', 'w') as f:
             f.write(implementation)
 
-        with open(f"targets/arm/stm32/tim/{tim}/tim.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/tim/{tim}/tim.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/tim.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/tim.rs', 'w') as f:
             f.write(implementation)
 
-        with open(f"targets/arm/stm32/uart/{uart}/uart.rs", "r") as f:
+        with open(f'sdk/targets/arm/stm32/uart/{uart}/uart.rs', 'r') as f:
             implementation = f.read()
-        with open("targets/arm/stm32/src/uart.rs", "w") as f:
+        with open('sdk/targets/arm/stm32/src/uart.rs', 'w') as f:
             f.write(implementation)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)
-        subprocess.run(f"rustup target add {self.target}", shell=True)
+        subprocess.run(f'rustup target add {self.target}', shell=True)
 
-        QMessageBox.information(self, "Success", "MCU configuration saved.")
+        QMessageBox.information(self, 'Success', 'MCU configuration saved.')
         # Original behavior: close parent window - keep same
         try:
             self.parent_window.close()
