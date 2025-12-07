@@ -13,4 +13,4 @@ opt-level = 0
 lto = false
 
 [dependencies]
-bit_control = {path = "../common/bit_control"}
+bit_control = {path = "../../common/bit_control"}
