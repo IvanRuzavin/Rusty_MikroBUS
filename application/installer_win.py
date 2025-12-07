@@ -1,4 +1,4 @@
-import subprocess, urllib.request, os, shutil, requests
+import subprocess, urllib.request, os, shutil, requests, py7zr
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -106,6 +106,11 @@ def download(url: str, filepath:str):
     with open(filepath, 'wb') as f:
         f.write(file_data)
 
+    if filepath.endswith('.7z'):
+        with py7zr.SevenZipFile(filepath, mode='r') as z:
+            z.extractall(path=os.path.join(os.path.dirname(filepath), file_name.replace('.7z', '')))
+        os.remove(filepath)
+        filepath = filepath.replace('.7z', '')
     return os.path.exists(filepath)
 
 def download_extract_to(url: str, output_dir: str, temp_name='temp.rar'):
@@ -354,6 +359,10 @@ class InstallerWindow(QMainWindow):
         super().__init__()
         self.step_cards = []
 
+        # Install application sprites on every run
+        os.makedirs(instance_contents['sprites_path'], exist_ok=True)
+        download(GITHUB_RELEASE_URL, f'{instance_contents['sprites_path']}.7z')
+
         self.setStyleSheet('''
             QWidget {
                 background: qlineargradient(
@@ -494,6 +503,28 @@ class InstallerWindow(QMainWindow):
             uninst_callback = lambda: remove_file(instance_contents['database_path']),
             icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/database.png'),
             installed   = os.path.exists(instance_contents['database_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
+
+        card = StepCard(
+            title       = 'Install Application SDK',
+            subtitle    = 'Provides source code.',
+            inst_callback   = lambda: download(GITHUB_RELEASE_URL, f'{instance_contents['sdk_path']}.7z'),
+            uninst_callback = lambda: remove_directory(instance_contents['sdk_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/sdk.png'),
+            installed   = os.path.exists(instance_contents['sdk_path']),
+        )
+        self.step_cards.append(card)
+        layout.addWidget(card)
+
+        card = StepCard(
+            title       = 'Install Application Core',
+            subtitle    = 'Provides MCU system configuration code.',
+            inst_callback   = lambda: download(GITHUB_RELEASE_URL, f'{instance_contents['core_path']}.7z'),
+            uninst_callback = lambda: remove_directory(instance_contents['core_path']),
+            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/core.png'),
+            installed   = os.path.exists(instance_contents['core_path']),
         )
         self.step_cards.append(card)
         layout.addWidget(card)

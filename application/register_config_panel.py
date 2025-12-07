@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from custom_ide_window import ProjectWindow
+from custom_ide_window import ProjectPanel
 
 class RegisterConfigPanel(QWidget):
     """
@@ -489,10 +489,9 @@ class RegisterConfigPanel(QWidget):
         cfg_target = f'{self.mcu_name[:7].lower()}x.cfg'
 
         # Open the project window
-        self.project_window = ProjectWindow(self.parent_window, self.mcu_name, cfg_target, self.target)
-        self.project_window.show()
-
-        self.parent_window.close()
+        self._clear_layout(self.layout())
+        self.project_panel = ProjectPanel(self.parent_window, self.mcu_name, cfg_target, self.target)
+        self.layout().addWidget(self.project_panel)
 
     # -----------------------
     # Styling

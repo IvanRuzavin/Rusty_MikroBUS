@@ -23,9 +23,12 @@ instance_contents = {
     'probers_path': f'{os.path.expanduser("~")}/.cargo',
     'jlink_path': 'c:/Program Files/SEGGER',
     'stlink_path': 'c:/Windows/System32/DriverStore/FileRepository/stlink_vcp.inf',
-    'gcc_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-arm-none-eabi-gcc-14.2.1-1.1'),
-    'openocd_path': os.path.join(os.path.dirname(__file__), 'runner/xpack-openocd-0.12.0-7'),
-    'database_path': os.path.join(os.path.dirname(__file__), 'database/database_mikro_sdk_rust.db')
+    'gcc_path': os.path.join(os.getcwd(), 'application/runner/xpack-arm-none-eabi-gcc-14.2.1-1.1'),
+    'openocd_path': os.path.join(os.getcwd(), 'application/runner/xpack-openocd-0.12.0-7'),
+    'database_path': os.path.join(os.getcwd(), 'application/database/database_mikro_sdk_rust.db'),
+    'sprites_path': os.path.join(os.getcwd(), 'application/sprites'),
+    'sdk_path': os.path.join(os.getcwd(), 'sdk'),
+    'core_path': os.path.join(os.getcwd(), 'core')
 }
 
 def apply_global_style(widget):

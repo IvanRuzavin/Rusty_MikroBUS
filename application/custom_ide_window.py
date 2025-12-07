@@ -51,7 +51,7 @@ class DebugWorker(QThread):
             self.output_signal.emit("[INFO] Starting OpenOCD...\n")
             self.openocd = subprocess.Popen(
                 [
-                    r"..\\application\\runner\\xpack-openocd-0.12.0-7\\bin\\openocd.exe",
+                    rf"..\\application\\runner\\xpack-openocd-0.12.0-7\\bin\\openocd.exe",
                     "-f", rf"..\\application\\runner\\xpack-openocd-0.12.0-7\\bin\\{self.cfg_target}"
                 ],
                 stdout=subprocess.PIPE,
@@ -139,51 +139,16 @@ class DebugWorker(QThread):
 # -------------------------
 # Main PyQt Project Window
 # -------------------------
-class ProjectWindow(QWidget):
+class ProjectPanel(QWidget):
     def __init__(self, parent_cfg_window, mcu_name, cfg_target, arm_target):
         super().__init__()
 
-        self.parent_cfg_window = parent_cfg_window   # <-- to return back
-        self.setWindowTitle("Rust Project Builder")
-        self.setMinimumSize(900, 700)
+        self.parent_cfg_window = parent_cfg_window
 
         # -------------------------------------------------------
         # Apply global UI style (same as MCUConfigurator)
         # -------------------------------------------------------
-        self.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #0F1C3F, stop:1 #1B2A5A
-                );
-                color: white;
-                font-family: Arial;
-            }
-
-            QPushButton {
-                background-color: #777;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                padding: 8px 14px;
-                font-size: 14px;
-            }
-
-            QPushButton:hover {
-                background-color: #437D00;
-            }
-
-            QPushButton:pressed {
-                background-color: #1E5D00;
-            }
-
-            QComboBox {
-                background-color: #222;
-                color: white;
-                padding: 4px;
-                border-radius: 5px;
-            }
-        """)
+        self.setStyleSheet(self.parent_cfg_window.styleSheet())
 
         # -----------------------------
         # Layout and basic UI controls

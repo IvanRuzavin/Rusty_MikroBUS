@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPixmap
 
-from custom_ide_window import ProjectWindow
 from register_config_panel import RegisterConfigPanel
 
 database_path = os.path.join(os.path.dirname(__file__))
