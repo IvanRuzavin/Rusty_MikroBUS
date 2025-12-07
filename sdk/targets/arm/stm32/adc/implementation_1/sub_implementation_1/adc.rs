@@ -43,7 +43,8 @@
 
 use crate::target::*;
 use crate::gpio_port::{hal_ll_gpio_analog_input,hal_ll_gpio_port_base,hal_ll_gpio_port_index,hal_ll_gpio_pin_mask};
-use system::{rcc_get_clocks_frequency, delay_1us, RCC_ClocksTypeDef, RCC_TypeDef, RCC_BASE};
+use system::init_clock::{rcc_get_clocks_frequency, delay_1us, RCC_ClocksTypeDef};
+use system::mcu_header::{RCC_TypeDef, RCC_BASE};
 pub use mcu_definition::adc::*;
 use core::fmt;
 
@@ -195,9 +196,9 @@ impl Default for hal_ll_adc_hw_specifics_map_t {
     }
 }
 
-static mut hal_ll_module_state: [hal_ll_adc_handle_register_t; ADC_MODULE_COUNT as usize]  = [ 
+static mut hal_ll_module_state: [hal_ll_adc_handle_register_t; ADC_MODULE_COUNT as usize]  = [
     hal_ll_adc_handle_register_t{
-        adc_handle : 0, 
+        adc_handle : 0,
         init_ll_state : false
         };
     ADC_MODULE_COUNT as usize];
@@ -226,13 +227,13 @@ pub fn hal_ll_adc_register_handle(pin: hal_ll_pin_name_t, vref_input: hal_ll_adc
 
     unsafe{
         match resolution {
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_6_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_6_BIT =>
                 hal_ll_adc_hw_specifics_map[pin_check_result as usize].resolution = HAL_LL_ADC_6BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_8_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_8_BIT =>
                 hal_ll_adc_hw_specifics_map[pin_check_result as usize].resolution = HAL_LL_ADC_8BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_10_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_10_BIT =>
                 hal_ll_adc_hw_specifics_map[pin_check_result as usize].resolution = HAL_LL_ADC_10BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_12_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_12_BIT =>
                 hal_ll_adc_hw_specifics_map[pin_check_result as usize].resolution = HAL_LL_ADC_12BIT_RES,
             _ => return Err(HAL_LL_ADC_ERROR::HAL_LL_ADC_UNSUPPORTED_RESOLUTION)
         }
@@ -252,14 +253,14 @@ pub fn hal_ll_adc_register_handle(pin: hal_ll_pin_name_t, vref_input: hal_ll_adc
     *hal_module_id = pin_check_result;
 
     hal_ll_module_state[pin_check_result as usize].adc_handle = hal_ll_adc_hw_specifics_map[pin_check_result as usize].base;
-    
+
     Ok(hal_ll_module_state[pin_check_result as usize])
     }
 }
 
 //not thread safe
 pub fn hal_ll_module_configure_adc (handle: &mut hal_ll_adc_handle_register_t) {
-    
+
     let hal_ll_adc_hw_specifics_map_local: &mut hal_ll_adc_hw_specifics_map_t = hal_ll_get_specifics(*handle);
     let hal_handle : &mut hal_ll_adc_handle_register_t = handle;
     let pin_check_result : u8 = (*hal_ll_adc_hw_specifics_map_local).module_index;
@@ -281,13 +282,13 @@ pub fn hal_ll_adc_set_resolution(handle: &mut hal_ll_adc_handle_register_t, reso
     unsafe{
         hal_ll_module_state[pin_check_result as usize].init_ll_state = false;
         match resolution {
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_6_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_6_BIT =>
                 hal_ll_adc_hw_specifics_map_local.resolution = HAL_LL_ADC_6BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_8_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_8_BIT =>
                 hal_ll_adc_hw_specifics_map_local.resolution = HAL_LL_ADC_8BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_10_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_10_BIT =>
                 hal_ll_adc_hw_specifics_map_local.resolution = HAL_LL_ADC_10BIT_RES,
-            hal_ll_adc_resolution_t::ADC_RESOLUTION_12_BIT => 
+            hal_ll_adc_resolution_t::ADC_RESOLUTION_12_BIT =>
                 hal_ll_adc_hw_specifics_map_local.resolution = HAL_LL_ADC_12BIT_RES,
             _ => return Err(HAL_LL_ADC_ERROR::HAL_LL_ADC_UNSUPPORTED_RESOLUTION)
         }
@@ -308,7 +309,7 @@ pub fn hal_ll_adc_set_vref_input(handle: &mut hal_ll_adc_handle_register_t, vref
 
     unsafe{
         hal_ll_module_state[pin_check_result as usize].init_ll_state = false;
-        
+
         match vref_input {
             hal_ll_adc_voltage_reference_t::ADC_VREF_EXTERNAL => (),
             _ => return Err(HAL_LL_ADC_ERROR::HAL_LL_ADC_UNSUPPORTED_VREF)
@@ -326,7 +327,7 @@ pub fn hal_ll_adc_set_vref_value(handle: &mut hal_ll_adc_handle_register_t, vref
 {
     let hal_handle : &mut hal_ll_adc_handle_register_t = handle;
     let hal_ll_adc_hw_specifics_map_local: &mut hal_ll_adc_hw_specifics_map_t = hal_ll_get_specifics(*hal_handle);
-    
+
     hal_ll_adc_hw_specifics_map_local.vref_value = vref_value;
 }
 
@@ -371,7 +372,7 @@ pub fn hal_ll_adc_close(handle: &mut hal_ll_adc_handle_register_t) {
 
         unsafe{
             hal_ll_module_state[pin_check_result as usize] = hal_ll_adc_handle_register_t::default();
-        
+
             *handle = hal_ll_module_state[pin_check_result as usize];
         }
     }
@@ -391,7 +392,7 @@ fn hal_ll_adc_check_pins(pin: hal_ll_pin_name_t, index: &mut u8) -> u8
 
     //check if pin is already used by another adc
     for module_index in 0x00 .. ADC_MODULE_COUNT {
-        if  pin == unsafe{hal_ll_adc_hw_specifics_map[module_index as usize].pin}  {               
+        if  pin == unsafe{hal_ll_adc_hw_specifics_map[module_index as usize].pin}  {
             return HAL_LL_PIN_NC;
         }
     }
@@ -406,7 +407,7 @@ fn hal_ll_adc_check_pins(pin: hal_ll_pin_name_t, index: &mut u8) -> u8
             *index = pin_index;
 
             // Check if module is taken
-            if  hal_ll_adc_handle_register_t::default().adc_handle == unsafe{hal_ll_module_state[hal_ll_module_id as usize].adc_handle}  {               
+            if  hal_ll_adc_handle_register_t::default().adc_handle == unsafe{hal_ll_module_state[hal_ll_module_id as usize].adc_handle}  {
                 return hal_ll_module_id;
             } else {
                 index_counter = index_counter + 1;
@@ -455,16 +456,16 @@ fn _hal_ll_adc_enable_clock(base :  u8) {
     unsafe {
         let rcc_ptr : *mut RCC_TypeDef = RCC_BASE as *mut RCC_TypeDef;
         #[cfg(feature = "adc1")]
-        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8) 
+        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8)
         {set_reg_bit( &(*rcc_ptr).APB2ENR as *const u32 as u32, HAL_LL_ADC1_ENABLE_CLOCK);}
-        
+
         #[cfg(feature = "adc2")]
-        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8) 
+        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8)
         {set_reg_bit(&(*rcc_ptr).APB2ENR as *const u32 as u32, HAL_LL_ADC2_ENABLE_CLOCK);}
 
         #[cfg(feature = "adc3")]
-        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8) 
-        {set_reg_bit(&(*rcc_ptr).APB2ENR as *const u32 as u32, HAL_LL_ADC3_ENABLE_CLOCK);} 
+        if base == hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8)
+        {set_reg_bit(&(*rcc_ptr).APB2ENR as *const u32 as u32, HAL_LL_ADC3_ENABLE_CLOCK);}
     }
 }
 
@@ -480,15 +481,15 @@ fn _hal_ll_adc_hw_init(base : u32, resolution : u32,  channel : u16) {
         *reg &= !HAL_LL_ADC_PRESCALER_MASK;
         #[cfg(not(feature = "f7"))]
         {
-            if rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_180MHZ 
+            if rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_180MHZ
             {
                 *reg |= HAL_LL_ADC_PRESCALER_8;
             }
-            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_120MHZ 
+            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_120MHZ
             {
                 *reg |= HAL_LL_ADC_PRESCALER_6;
             }
-            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_60MHZ 
+            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_60MHZ
             {
                 *reg |= HAL_LL_ADC_PRESCALER_4;
             }
@@ -500,11 +501,11 @@ fn _hal_ll_adc_hw_init(base : u32, resolution : u32,  channel : u16) {
 
         #[cfg(feature = "f7")]
         {
-            if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_144MHZ 
+            if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_144MHZ
             {
                 *reg |= HAL_LL_ADC_PRESCALER_6;
             }
-            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_72MHZ 
+            else if  rcc_clocks.PCLK2_Frequency > HAL_LL_ADC_72MHZ
             {
                 *reg |= HAL_LL_ADC_PRESCALER_4;
             }
@@ -513,7 +514,7 @@ fn _hal_ll_adc_hw_init(base : u32, resolution : u32,  channel : u16) {
                 *reg |= HAL_LL_ADC_PRESCALER_2;
             }
         }
-        
+
 
         (*adc_ptr).cr1 &= 0xFFF0FEFF;
         (*adc_ptr).cr2 &= !(HAL_LL_ADC_CONT | HAL_LL_ADC_ALIGN | HAL_LL_ADC_JEXTSEL);

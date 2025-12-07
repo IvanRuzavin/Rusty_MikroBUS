@@ -50,7 +50,7 @@ use drv_digital_in::*;
 use drv_digital_out::*;
 use drv_i2c_master::*;
 use drv_name::*;
-use system::*;
+use system::init_clock::*;
 
 const pin_scl: pin_name_t = GPIO_B8;
 const pin_sda: pin_name_t = GPIO_B9;

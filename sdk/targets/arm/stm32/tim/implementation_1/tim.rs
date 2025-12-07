@@ -44,7 +44,8 @@ use crate::target::*;
 pub use mcu_definition::tim::*;
 use crate::gpio::*;
 use crate::gpio::gpio_constants::*;
-use system::{rcc_get_clocks_frequency, RCC_ClocksTypeDef, RCC_TypeDef, RCC_BASE};
+use system::init_clock::{rcc_get_clocks_frequency, RCC_ClocksTypeDef};
+use system::mcu_header::{RCC_TypeDef, RCC_BASE};
 use core::fmt;
 
 const HAL_LL_TIM_ENABLE_COUNTER_BIT: u32 = 0;
@@ -167,9 +168,9 @@ struct hal_ll_tim_hw_specifics_map_t {
     pub module_index : hal_ll_pin_name_t,
 }
 
-static mut hal_ll_module_state: [hal_ll_tim_handle_register_t; TIM_MODULE_COUNT as usize]  = [ 
+static mut hal_ll_module_state: [hal_ll_tim_handle_register_t; TIM_MODULE_COUNT as usize]  = [
     hal_ll_tim_handle_register_t{
-        tim_handle : 0, 
+        tim_handle : 0,
         init_ll_state : false
         };
         TIM_MODULE_COUNT as usize];
@@ -212,20 +213,20 @@ pub fn hal_ll_tim_register_handle(pin: hal_ll_pin_name_t, hal_module_id: &mut u8
     if pin_check_result == HAL_LL_PIN_NC {
         return Err(HAL_LL_TIM_ERROR::TIM_WRONG_PIN);
     }
-    
+
     unsafe{
         if hal_ll_tim_hw_specifics_map[pin_check_result as usize].config[config_index as usize].pin != pin {
             hal_ll_tim_alternate_functions_set_state(&mut hal_ll_tim_hw_specifics_map[pin_check_result as usize], false );
             hal_ll_tim_map_pins( pin_check_result as usize, config_index as usize, index_list);
             hal_ll_tim_alternate_functions_set_state(&mut hal_ll_tim_hw_specifics_map[pin_check_result as usize], true );
-        
+
             hal_ll_module_state[pin_check_result as usize].init_ll_state = false;
         }
 
         *hal_module_id = pin_check_result;
 
         hal_ll_module_state[pin_check_result as usize].tim_handle = hal_ll_tim_hw_specifics_map[pin_check_result as usize].base;
-        
+
         Ok(hal_ll_module_state[pin_check_result as usize])
     }
 }
@@ -357,7 +358,7 @@ pub fn hal_ll_tim_stop(handle: &mut hal_ll_tim_handle_register_t, pin: hal_ll_pi
     let hal_ll_tim_hw_specifics_map_local: &mut hal_ll_tim_hw_specifics_map_t = hal_ll_get_specifics(*hal_handle);
     let tim_ptr : *mut hal_ll_tim_base_handle_t = hal_ll_tim_hw_specifics_map_local.base as *mut hal_ll_tim_base_handle_t;
     let mut channel: hal_ll_tim_channel_t = hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE;
-    
+
     for config_index in 0x00 .. hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE as u8 {
         if hal_ll_tim_hw_specifics_map_local.config[config_index as usize].pin == pin {
             channel = hal_ll_tim_hw_specifics_map_local.config[config_index as usize].channel;
@@ -390,11 +391,11 @@ pub fn hal_ll_tim_close(handle: &mut hal_ll_tim_handle_register_t) {
         hal_ll_tim_set_clock(hal_ll_tim_hw_specifics_map_local, false);
 
         hal_ll_tim_hw_specifics_map_local.config = [
-            hal_ll_tim_t{   pin: HAL_LL_PIN_NC, 
-                            channel: hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE, 
-                            af: 0 }; 
+            hal_ll_tim_t{   pin: HAL_LL_PIN_NC,
+                            channel: hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE,
+                            af: 0 };
                 8];
-        
+
         unsafe{hal_ll_module_state[pin_check_result as usize] = *hal_handle;}
     }
 }
@@ -417,7 +418,7 @@ fn hal_ll_tim_check_pins(pin: hal_ll_pin_name_t, index: &mut u8, config_index: &
     //check if pin is already taken
     for module_index in 0x00 .. TIM_MODULE_COUNT {
         for config_index in 0x00 .. hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE as u8 {
-            if  pin == unsafe{hal_ll_tim_hw_specifics_map[module_index as usize].config[config_index as usize].pin}  {               
+            if  pin == unsafe{hal_ll_tim_hw_specifics_map[module_index as usize].config[config_index as usize].pin}  {
                 return HAL_LL_PIN_NC;
             }
         }
@@ -435,23 +436,23 @@ fn hal_ll_tim_check_pins(pin: hal_ll_pin_name_t, index: &mut u8, config_index: &
             *index = pin_index;
 
             // Check if module is not taken
-            if  hal_ll_tim_handle_register_t::default().tim_handle == unsafe{hal_ll_module_state[hal_ll_module_id as usize].tim_handle}  {               
+            if  hal_ll_tim_handle_register_t::default().tim_handle == unsafe{hal_ll_module_state[hal_ll_module_id as usize].tim_handle}  {
                 *config_index = hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE as u8 - 1;
                 return hal_ll_module_id;
             }
-            
+
             //check if channel is taken
             is_channel_taken = false;
             for config_counter in 0x00 .. hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE as u8 {
-                if  hal_ll_channel == unsafe{hal_ll_tim_hw_specifics_map[hal_ll_module_id as usize].config[config_counter as usize].channel}  {               
+                if  hal_ll_channel == unsafe{hal_ll_tim_hw_specifics_map[hal_ll_module_id as usize].config[config_counter as usize].channel}  {
                     is_channel_taken = true;
                 }
 
-                if  unsafe{hal_ll_tim_hw_specifics_map[hal_ll_module_id as usize].config[config_counter as usize].channel} == hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE {               
+                if  unsafe{hal_ll_tim_hw_specifics_map[hal_ll_module_id as usize].config[config_counter as usize].channel} == hal_ll_tim_channel_t::HAL_LL_TIM_CHANNEL_NONE {
                     tmp_config_index = config_counter;
                 }
             }
-            
+
             if !is_channel_taken {
                 *config_index = tmp_config_index;
                 return hal_ll_module_id;
@@ -476,7 +477,7 @@ fn hal_ll_get_specifics<'a>(handle: hal_ll_tim_handle_register_t) -> &'a mut hal
     let mut hal_ll_module_count: usize = TIM_MODULE_COUNT as usize;
     let mut hal_ll_module_error : usize = 0;
     hal_ll_module_error = hal_ll_module_count;
-    
+
     unsafe{
         while hal_ll_module_count > 0 {
             hal_ll_module_count -= 1;
@@ -686,7 +687,7 @@ fn hal_ll_tim_alternate_functions_set_state(map: &mut hal_ll_tim_hw_specifics_ma
         if (*map).config[config_index as usize].pin != HAL_LL_PIN_NC  {
             module.pins[0 + module_index as usize] = VALUE( (*map).config[config_index as usize].pin, (*map).config[config_index as usize].af );
             module.configs[0 + module_index as usize] = tim_config;
-            
+
             module_index += 1;
         }
     }
@@ -713,7 +714,7 @@ fn hal_ll_tim_hw_init(map: &mut hal_ll_tim_hw_specifics_map_t) {
 
         (*tim_ptr).psc = 0;
         (*tim_ptr).arr = ck_psc & 0xFFFF;
-        
+
         map.max_period = (ck_psc & 0xFFFF) as u16;
     }
 }

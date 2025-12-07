@@ -48,7 +48,7 @@ use panic_halt;
 
 use drv_spi_master::*;
 use drv_name::*;
-use system::*;
+use system::init_clock::*;
 
 const pin_sck: pin_name_t = GPIO_C10;
 const pin_miso: pin_name_t = GPIO_C11;
@@ -63,7 +63,7 @@ fn main() -> ! {
     let mut spi_write_buff: [u8; 14] = [0x02, 0x00, 0x00, 0x00, 0x63, 0x6F, 0x64, 0x65, 0x20, 0x6C, 0x79, 0x6F, 0x6B, 0x6F];
     let mut spi_read_order: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
 
-    let mut spi : spi_master_t = spi_master_t::default(); 
+    let mut spi : spi_master_t = spi_master_t::default();
     let mut spi_config : spi_master_config_t = spi_master_config_t::default();
 
     spi_config.sck = pin_sck;
@@ -77,7 +77,7 @@ fn main() -> ! {
     spi_config.default_write_data = 0x55;
     //hal_spi_master_set_default_write_data(&mut spi, spi_config);
 
-    
+
     spi_master_select_device(pin_cs);
     spi_master_write(&mut spi, &mut spi_write_buff, 14);
     spi_master_deselect_device(pin_cs);

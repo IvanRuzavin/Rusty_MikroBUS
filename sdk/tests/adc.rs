@@ -50,7 +50,7 @@ use drv_analog_in::*;
 use drv_digital_out::*;
 use drv_port::*;
 use drv_name::*;
-use system::*;
+use system::init_clock::*;
 
 const port_out: port_name_t = GPIO_PORT_E;
 const pin_an: pin_name_t = GPIO_A3;
@@ -76,13 +76,13 @@ fn main() -> ! {
     let mut output1: port_t = port_t::default();
 
     port_init(&mut output1 , port_out, 0xFFFF, gpio_direction_t::GPIO_DIGITAL_OUTPUT);
-    
-    
+
+
     loop {
         read_value = analog_in_read(&mut adc1).ok().unwrap();
         read_voltage = analog_in_read_voltage(&mut adc1).ok().unwrap();
 
         port_write(&mut output1, read_value);
-        
+
     }
 }

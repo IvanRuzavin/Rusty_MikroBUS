@@ -44,7 +44,7 @@
 
 use crate::gpio::*;
 use crate::gpio::pin_names::*;
-use system::Delay_us;
+use system::init_clock::Delay_us;
 use core::fmt;
 
 const RESET_PINS_OFFSET : u8 = 16;
@@ -67,8 +67,8 @@ impl fmt::Display for HAL_LL_ONE_WIRE_ERROR {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::ONE_WIRE_WRONG_PINS => write!(f, "ONE_WIRE_WRONG_PINS occurred"),
-            Self::ACQUIRE_FAIL => write!(f, "ACQUIRE_FAIL occurred"),                    
-            Self::ONE_WIRE_ERROR => write!(f, "ONE_WIRE_ERROR occurred"),                    
+            Self::ACQUIRE_FAIL => write!(f, "ACQUIRE_FAIL occurred"),
+            Self::ONE_WIRE_ERROR => write!(f, "ONE_WIRE_ERROR occurred"),
         }
     }
 }
@@ -230,7 +230,7 @@ pub fn hal_ll_one_wire_search_next_device(obj : &mut hal_ll_one_wire_t, one_wire
 #[allow(unused_assignments)]
 fn hal_ll_one_wire_search(obj : &mut hal_ll_one_wire_t, one_wire_device_list : &mut hal_ll_one_wire_rom_address_t) -> Result<u8> {
     let mut search_result: u8 = 0;
-    
+
     let mut rom_byte_number: u8 = 0;
     let mut rom_byte_mask: u8 = 0;
     let mut id_bit_number: u8 = 0;
@@ -239,7 +239,7 @@ fn hal_ll_one_wire_search(obj : &mut hal_ll_one_wire_t, one_wire_device_list : &
     let mut id_bit: u8 = 0;
 
     let mut cmp_id_bit: u8 = 0;
-    
+
     let mut search_direction: u8 = 0;
 
     unsafe {
@@ -251,11 +251,11 @@ fn hal_ll_one_wire_search(obj : &mut hal_ll_one_wire_t, one_wire_device_list : &
 
                 return Err(HAL_LL_ONE_WIRE_ERROR::ONE_WIRE_ERROR);
             }
-        
+
 
             let read_command : [u8; 1 ] = [ONE_WIRE_CMD_ROM_SEARCH];
 
-            hal_ll_one_wire_write_byte(&read_command, 1);  
+            hal_ll_one_wire_write_byte(&read_command, 1);
 
             loop {
                 hal_ll_one_wire_read_bit(&mut id_bit);
@@ -288,7 +288,7 @@ fn hal_ll_one_wire_search(obj : &mut hal_ll_one_wire_t, one_wire_device_list : &
                 } else {
                     one_wire_device_list.address[rom_byte_number as usize] &= !rom_byte_mask;
                 }
-                
+
                 hal_ll_one_wire_write_bit( search_direction );
 
                 id_bit_number += 1;
@@ -325,7 +325,7 @@ fn hal_ll_one_wire_search(obj : &mut hal_ll_one_wire_t, one_wire_device_list : &
         }
 
     }
-    
+
     Ok(search_result)
 }
 
@@ -349,7 +349,7 @@ pub fn hal_ll_one_wire_write_byte(write_data_buffer : &[u8], write_data_length :
                 unsafe {
                     *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_set;
                     *(one_wire_handle.bsrr as *mut u32) = (hal_ll_gpio_pin_mask( one_wire_handle.data_pin ) as u32) << RESET_PINS_OFFSET;
-                
+
                     one_wire_timing_value_a();
 
                     *(one_wire_handle.moder as *mut u32) &= one_wire_handle.moder_clear;
@@ -360,7 +360,7 @@ pub fn hal_ll_one_wire_write_byte(write_data_buffer : &[u8], write_data_length :
                 unsafe {
                     *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_set;
                     *(one_wire_handle.bsrr as *mut u32) = (hal_ll_gpio_pin_mask( one_wire_handle.data_pin ) as u32) << RESET_PINS_OFFSET;
-                    
+
                     one_wire_timing_value_c();
 
                     *(one_wire_handle.moder as *mut u32) &= one_wire_handle.moder_clear;
@@ -385,7 +385,7 @@ pub fn hal_ll_one_wire_read_byte(read_data_buffer : &mut [u8], read_data_length 
             unsafe {
                 *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_set;
                 *(one_wire_handle.bsrr as *mut u32) = (hal_ll_gpio_pin_mask( one_wire_handle.data_pin ) as u32) << RESET_PINS_OFFSET;
-            
+
                 one_wire_timing_value_a();
 
                 *(one_wire_handle.moder as *mut u32) &= one_wire_handle.moder_clear;
@@ -417,7 +417,7 @@ pub fn hal_ll_one_wire_reconfigure(obj : &mut hal_ll_one_wire_t) {
 
     unsafe {
         one_wire_handle.data_pin = obj.data_pin % PORT_SIZE;
-        
+
         let gpio_ptr : *mut hal_ll_gpio_base_handle_t = one_wire_pin.base as *mut hal_ll_gpio_base_handle_t;
 
         one_wire_handle.moder = &(*gpio_ptr).moder as *const u32 as u32;
@@ -444,7 +444,7 @@ fn hal_ll_one_wire_write_bit(write_data_buffer : u8) {
 
             one_wire_timing_value_a();
             *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_clear;
-            
+
             one_wire_timing_value_b();
         } else {
             *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_set;
@@ -452,7 +452,7 @@ fn hal_ll_one_wire_write_bit(write_data_buffer : u8) {
 
             one_wire_timing_value_c();
             *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_clear;
-            
+
             one_wire_timing_value_d();
         }
     }
@@ -464,7 +464,7 @@ fn hal_ll_one_wire_read_bit(read_data_buffer : &mut u8) {
     unsafe {
         *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_set;
         *(one_wire_handle.bsrr as *mut u32) = (hal_ll_gpio_pin_mask( one_wire_handle.data_pin ) as u32) << RESET_PINS_OFFSET;
-        
+
         one_wire_timing_value_a();
         *(one_wire_handle.moder as *mut u32) |= one_wire_handle.moder_clear;
 
@@ -478,7 +478,7 @@ fn hal_ll_one_wire_read_bit(read_data_buffer : &mut u8) {
 
         one_wire_timing_value_f();
     }
-   
+
 }
 
 

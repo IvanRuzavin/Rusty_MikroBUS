@@ -51,8 +51,8 @@ class DebugWorker(QThread):
             self.output_signal.emit("[INFO] Starting OpenOCD...\n")
             self.openocd = subprocess.Popen(
                 [
-                    r"runner\\xpack-openocd-0.12.0-7\\bin\\openocd.exe",
-                    "-f", rf"runner\\xpack-openocd-0.12.0-7\\bin\\{self.cfg_target}"
+                    r"..\\application\\runner\\xpack-openocd-0.12.0-7\\bin\\openocd.exe",
+                    "-f", rf"..\\application\\runner\\xpack-openocd-0.12.0-7\\bin\\{self.cfg_target}"
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -64,7 +64,7 @@ class DebugWorker(QThread):
             self.output_signal.emit("[INFO] Starting GDB...\n")
             self.gdb = subprocess.Popen(
                 [
-                    r"runner\\xpack-arm-none-eabi-gcc-14.2.1-1.1\\bin\\arm-none-eabi-gdb.exe",
+                    r"..\\application\\runner\\xpack-arm-none-eabi-gcc-14.2.1-1.1\\bin\\arm-none-eabi-gdb.exe",
                     rf"./target/{self.arm_target}/debug/mikrosdk"
                 ],
                 stdin=subprocess.PIPE,

@@ -48,7 +48,7 @@ use panic_halt;
 
 use drv_pwm::*;
 use drv_name::*;
-use system::*;
+use system::init_clock::*;
 
 const pin_tim_1: pin_name_t = GPIO_E9;  //channel 1
 const pin_tim_2: pin_name_t = GPIO_E11; //channel 2
@@ -74,11 +74,11 @@ fn main() -> ! {
     let mut pwm_6: pwm_t = pwm_t::default();
     let mut pwm_7: pwm_t = pwm_t::default();
 
-    
+
     let mut pwm_8: pwm_t = pwm_t::default();
     let mut pwm_9: pwm_t = pwm_t::default();
     let mut pwm_10: pwm_t = pwm_t::default();
-    
+
 
     let mut pwm_config_1: pwm_config_t = pwm_config_t::default();
     let mut pwm_config_2: pwm_config_t = pwm_config_t::default();
@@ -88,7 +88,7 @@ fn main() -> ! {
     let mut pwm_config_6: pwm_config_t = pwm_config_t::default();
     let mut pwm_config_7: pwm_config_t = pwm_config_t::default();
 
-    
+
     let mut pwm_config_8: pwm_config_t = pwm_config_t::default();
     let mut pwm_config_9: pwm_config_t = pwm_config_t::default();
     let mut pwm_config_10: pwm_config_t = pwm_config_t::default();
@@ -129,7 +129,7 @@ fn main() -> ! {
     pwm_set_duty(&mut pwm_7, duty3);
     pwm_set_duty(&mut pwm_4, duty4);
 
-    
+
     pwm_set_duty(&mut pwm_8, 0.5);
     pwm_set_duty(&mut pwm_9, 0.4);
     pwm_set_duty(&mut pwm_10, 0.3);
@@ -142,7 +142,7 @@ fn main() -> ! {
     pwm_start(&mut pwm_6);
     pwm_start(&mut pwm_7);
 
-    
+
     pwm_start(&mut pwm_8);
     pwm_start(&mut pwm_9);
     pwm_start(&mut pwm_10);

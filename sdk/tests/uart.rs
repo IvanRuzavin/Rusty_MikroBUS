@@ -47,7 +47,7 @@ use panic_halt;
 
 use drv_name::*;
 use drv_uart::*;
-use system::*;
+use system::init_clock::*;
 
 const tx_pin: pin_name_t = GPIO_C6;
 const rx_pin: pin_name_t = GPIO_C7;

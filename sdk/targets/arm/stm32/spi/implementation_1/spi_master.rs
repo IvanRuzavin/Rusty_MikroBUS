@@ -45,7 +45,8 @@ use crate::target::*;
 pub use mcu_definition::spi::*;
 use crate::gpio::*;
 use crate::gpio::gpio_constants::*;
-use system::{rcc_get_clocks_frequency, RCC_ClocksTypeDef, RCC_TypeDef, RCC_BASE};
+use system::init_clock::{rcc_get_clocks_frequency, RCC_ClocksTypeDef};
+use system::mcu_header::{RCC_TypeDef, RCC_BASE};
 use core::fmt;
 
 pub const HAL_LL_SPI_MASTER_SPEED_100K : u32 = 100_000;
@@ -94,9 +95,9 @@ pub enum HAL_LL_SPI_MASTER_ERROR {
 impl fmt::Display for HAL_LL_SPI_MASTER_ERROR {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::SPI_MASTER_WRONG_PINS => write!(f, "SPI_MASTER_WRONG_PINS occurred"),                  
-            Self::ACQUIRE_FAIL => write!(f, "ACQUIRE_FAIL occurred"),                  
-            Self::SPI_MASTER_ERROR => write!(f, "SPI_MASTER_ERROR occurred"),                  
+            Self::SPI_MASTER_WRONG_PINS => write!(f, "SPI_MASTER_WRONG_PINS occurred"),
+            Self::ACQUIRE_FAIL => write!(f, "ACQUIRE_FAIL occurred"),
+            Self::SPI_MASTER_ERROR => write!(f, "SPI_MASTER_ERROR occurred"),
         }
     }
 }
@@ -121,13 +122,13 @@ pub const SPI_MASTER_MODE_DEFAULT : hal_ll_spi_master_mode_t = hal_ll_spi_master
 pub struct hal_ll_spi_pin_id {
     pub pin_sck : u8,
     pub pin_miso : u8,
-    pub pin_mosi : u8,    
+    pub pin_mosi : u8,
 }
 
 pub struct hal_ll_spi_pin_t {
     pub pin_sck : hal_ll_pin_af_t,
     pub pin_miso : hal_ll_pin_af_t,
-    pub pin_mosi : hal_ll_pin_af_t,    
+    pub pin_mosi : hal_ll_pin_af_t,
 }
 
 struct hal_ll_spi_hw_specifics_map_t
@@ -177,9 +178,9 @@ struct hal_ll_spi_master_base_handle_t {
 }
 
 
-static mut hal_ll_module_state: [hal_ll_spi_master_handle_register_t; SPI_MODULE_COUNT as usize]  = [ 
+static mut hal_ll_module_state: [hal_ll_spi_master_handle_register_t; SPI_MODULE_COUNT as usize]  = [
     hal_ll_spi_master_handle_register_t{
-        spi_master_handle : 0, 
+        spi_master_handle : 0,
         init_ll_state : false
         };
         SPI_MODULE_COUNT as usize];
@@ -205,14 +206,14 @@ static mut hal_ll_spi_hw_specifics_map: [hal_ll_spi_hw_specifics_map_t; (SPI_MOD
 
 pub fn hal_ll_spi_master_register_handle(sck: hal_ll_pin_name_t, miso: hal_ll_pin_name_t, mosi: hal_ll_pin_name_t, hal_module_id: &mut u8) -> Result<hal_ll_spi_master_handle_register_t> {
     let pin_check_result: u8;
-    let mut index_list: hal_ll_spi_pin_id = 
+    let mut index_list: hal_ll_spi_pin_id =
         hal_ll_spi_pin_id{ pin_sck: HAL_LL_PIN_NC, pin_miso: HAL_LL_PIN_NC, pin_mosi: HAL_LL_PIN_NC};
 
     pin_check_result = hal_ll_spi_master_check_pins(sck, miso, mosi, &mut index_list);
     if pin_check_result == HAL_LL_PIN_NC {
         return Err(HAL_LL_SPI_MASTER_ERROR::SPI_MASTER_WRONG_PINS);
     }
-    
+
     unsafe{
         if (hal_ll_spi_hw_specifics_map[pin_check_result as usize].pins.pin_sck.pin_name != sck)
         || (hal_ll_spi_hw_specifics_map[pin_check_result as usize].pins.pin_miso.pin_name != miso)
@@ -220,14 +221,14 @@ pub fn hal_ll_spi_master_register_handle(sck: hal_ll_pin_name_t, miso: hal_ll_pi
             hal_ll_spi_master_alternate_functions_set_state(&mut hal_ll_spi_hw_specifics_map[pin_check_result as usize], false );
             hal_ll_spi_master_map_pins( pin_check_result as usize,  &mut index_list);
             hal_ll_spi_master_alternate_functions_set_state(&mut hal_ll_spi_hw_specifics_map[pin_check_result as usize], true );
-        
+
             hal_ll_module_state[pin_check_result as usize].init_ll_state = false;
         }
 
         *hal_module_id = pin_check_result;
 
         hal_ll_module_state[pin_check_result as usize].spi_master_handle = hal_ll_spi_hw_specifics_map[pin_check_result as usize].base;
-        
+
         Ok(hal_ll_module_state[pin_check_result as usize])
     }
 }
@@ -342,7 +343,7 @@ pub fn hal_ll_spi_master_close(  handle: &mut hal_ll_spi_master_handle_register_
 fn hal_ll_spi_master_transfer_bare_metal(spi_ptr: *mut hal_ll_spi_master_base_handle_t, data: u8) -> u8 {
     unsafe{
         (*spi_ptr).dr.data_byte = data;
-    
+
         while check_reg_bit(&(*spi_ptr).sr as *const u32 as u32, HAL_LL_SPI_MASTER_RXNE) == 0 {()}
 
         (*spi_ptr).dr.data_byte
@@ -373,14 +374,14 @@ fn hal_ll_spi_master_check_pins(sck: hal_ll_pin_name_t, miso: hal_ll_pin_name_t,
     let sck_map_size: u8 = _spi_sck_map.len() as u8 ;
     let miso_map_size: u8 = _spi_miso_map.len() as u8 ;
     let mosi_map_size: u8 = _spi_mosi_map.len() as u8 ;
-    
+
     let mut index_counter: u8 = 0;
     let mut hal_ll_module_id: u8 = 0;
 
     if HAL_LL_PIN_NC == sck || HAL_LL_PIN_NC == miso || HAL_LL_PIN_NC == mosi {
         return HAL_LL_PIN_NC;
     }
-    
+
     for sck_index in 0x00 .. sck_map_size {
         if _spi_sck_map[sck_index as usize].pin == sck {
             for miso_index in 0x00 .. miso_map_size {
@@ -412,7 +413,7 @@ fn hal_ll_spi_master_check_pins(sck: hal_ll_pin_name_t, miso: hal_ll_pin_name_t,
             }
         }
     }
-    
+
     if  index_counter > 0 {
         return hal_ll_module_id;
     } else {
@@ -425,7 +426,7 @@ fn hal_ll_get_specifics<'a>(handle: hal_ll_spi_master_handle_register_t) -> &'a 
     let mut hal_ll_module_count: usize = SPI_MODULE_COUNT as usize;
     let mut hal_ll_module_error : usize = 0;
     hal_ll_module_error = hal_ll_module_count;
-    
+
     unsafe{
         while hal_ll_module_count > 0 {
             hal_ll_module_count -= 1;
@@ -529,7 +530,7 @@ fn hal_ll_spi_master_alternate_functions_set_state(map: &mut hal_ll_spi_hw_speci
         module.pins[0] = VALUE( (*map).pins.pin_sck.pin_name, (*map).pins.pin_sck.pin_af );
         module.pins[1] = VALUE( (*map).pins.pin_miso.pin_name, (*map).pins.pin_miso.pin_af );
         module.pins[2] = VALUE( (*map).pins.pin_mosi.pin_name, (*map).pins.pin_mosi.pin_af );
-        
+
 
         module.configs[0] = HAL_LL_SPI_CONFIG;
         module.configs[1] = HAL_LL_SPI_CONFIG;
@@ -607,7 +608,7 @@ fn hal_ll_spi_master_get_actual_speed(clock_value : u32, divider: u32) -> u32{
     if divider == 0x6 {
         return clock_value/128;
     }
-    
+
     clock_value/256
 }
 

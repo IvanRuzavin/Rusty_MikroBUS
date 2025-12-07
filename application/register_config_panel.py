@@ -443,6 +443,11 @@ class RegisterConfigPanel(QWidget):
         tim = query_result[8]
         uart = query_result[9]
 
+        with open(f'sdk/targets/arm/stm32/gpio/hal_ll_gpio/gpio.rs', 'r') as f:
+            implementation = f.read()
+        with open('sdk/targets/arm/stm32/src/gpio.rs', 'w') as f:
+            f.write(implementation)
+
         with open(f'sdk/targets/arm/stm32/gpio/gpio_port/{gpio}/gpio_port.rs', 'r') as f:
             implementation = f.read()
         with open('sdk/targets/arm/stm32/src/gpio_port.rs', 'w') as f:
@@ -471,6 +476,11 @@ class RegisterConfigPanel(QWidget):
         with open(f'sdk/targets/arm/stm32/uart/{uart}/uart.rs', 'r') as f:
             implementation = f.read()
         with open('sdk/targets/arm/stm32/src/uart.rs', 'w') as f:
+            f.write(implementation)
+
+        with open(f'sdk/targets/arm/stm32/one_wire/implementation_1/one_wire.rs', 'r') as f:
+            implementation = f.read()
+        with open('sdk/targets/arm/stm32/src/one_wire.rs', 'w') as f:
             f.write(implementation)
 
         # Add rust target (non-blocking warning: subprocess.run is used as before)

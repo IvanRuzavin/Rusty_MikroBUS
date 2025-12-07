@@ -46,7 +46,7 @@
 use panic_halt;
 
 use drv_name::*;
-use system::*;
+use system::init_clock::*;
 
 use drv_one_wire::*;
 
@@ -76,7 +76,7 @@ fn main() -> ! {
         is_converting[0] = 0x0;
         one_wire_read_rom(&mut one_wire, &mut device_address);
         one_wire_write_byte(&mut one_wire, &device_command[0], 1);
-        
+
 
         //the device writes 1s when it finished conversion
         while is_converting[0] != 0xFF {
