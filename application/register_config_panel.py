@@ -488,12 +488,10 @@ class RegisterConfigPanel(QWidget):
 
         cfg_target = f'{self.mcu_name[:7].lower()}x.cfg'
 
-        QMessageBox.information(self, 'Success', 'MCU configuration saved.')
         # Open the project window
-        self.project_window = ProjectWindow(self.mcu_name, cfg_target, self.target)
+        self.project_window = ProjectWindow(self.parent_window, self.mcu_name, cfg_target, self.target)
         self.project_window.show()
 
-        # Close the current setup window
         self.parent_window.close()
 
     # -----------------------

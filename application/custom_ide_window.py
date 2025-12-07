@@ -140,10 +140,50 @@ class DebugWorker(QThread):
 # Main PyQt Project Window
 # -------------------------
 class ProjectWindow(QWidget):
-    def __init__(self, mcu_name, cfg_target, arm_target):
+    def __init__(self, parent_cfg_window, mcu_name, cfg_target, arm_target):
         super().__init__()
+
+        self.parent_cfg_window = parent_cfg_window   # <-- to return back
         self.setWindowTitle("Rust Project Builder")
         self.setMinimumSize(900, 700)
+
+        # -------------------------------------------------------
+        # Apply global UI style (same as MCUConfigurator)
+        # -------------------------------------------------------
+        self.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0F1C3F, stop:1 #1B2A5A
+                );
+                color: white;
+                font-family: Arial;
+            }
+
+            QPushButton {
+                background-color: #777;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-size: 14px;
+            }
+
+            QPushButton:hover {
+                background-color: #437D00;
+            }
+
+            QPushButton:pressed {
+                background-color: #1E5D00;
+            }
+
+            QComboBox {
+                background-color: #222;
+                color: white;
+                padding: 4px;
+                border-radius: 5px;
+            }
+        """)
 
         # -----------------------------
         # Layout and basic UI controls
@@ -160,6 +200,10 @@ class ProjectWindow(QWidget):
         self.project_combo.setEditable(False)
         self.project_combo.addItems(project_list)
 
+        # -----------------------------
+        # Buttons (including NEW one)
+        # -----------------------------
+        change_setup_button = QPushButton("Change Setup")
         choose_project_button = QPushButton("Choose Project")
         build_button = QPushButton("Build Project")
         debug_button = QPushButton("Debug MCU")
@@ -174,22 +218,19 @@ class ProjectWindow(QWidget):
         close_button = QPushButton("Close")
 
         # -----------------------------
-        # Code Editor for main.rs
+        # Code Editor styling
         # -----------------------------
         self.editor = QTextEdit()
         self.editor.setFont(QFont("Consolas", 11))
         self.editor.setStyleSheet("""
-            background-color: #1e1e1e;
+            background-color: #141414;
             color: #dcdcdc;
             border: 1px solid #444;
         """)
 
         self.file_path = os.path.join(self.project_dir, 'src', 'main.rs')
-
-        # Load main.rs on startup
         self.load_file(self.file_path)
 
-        # Save button
         save_button = QPushButton("Save File")
         save_button.clicked.connect(self.save_file)
 
@@ -199,7 +240,7 @@ class ProjectWindow(QWidget):
         self.output_box = QTextEdit()
         self.output_box.setReadOnly(True)
         self.output_box.setStyleSheet("""
-            background-color: #111;
+            background-color: #000;
             color: #0f0;
             font-family: Consolas, monospace;
             font-size: 12px;
@@ -208,6 +249,7 @@ class ProjectWindow(QWidget):
         # -----------------------------
         # Button connections
         # -----------------------------
+        change_setup_button.clicked.connect(self.change_setup)
         choose_project_button.clicked.connect(self.configure_main_project)
         build_button.clicked.connect(self.build_project)
         debug_button.clicked.connect(lambda: self.debug_project(cfg_target, arm_target))
@@ -224,24 +266,23 @@ class ProjectWindow(QWidget):
         # -----------------------------
         # Layout composition
         # -----------------------------
-        main_layout = QHBoxLayout()  # Horizontal split: buttons (left) + content (right)
+        main_layout = QHBoxLayout()
 
-        # ---- Left side: vertical buttons ----
+        # Left: buttons
         button_layout = QVBoxLayout()
         for b in [
+            change_setup_button,  # <-- new button at top
             choose_project_button, build_button, debug_button, step_button,
             step_into_button, step_out_button, restart_button, run_button,
             stop_debug_button, flash_button, erase_button, close_button
         ]:
             button_layout.addWidget(b)
-        button_layout.addStretch()  # push buttons to top
+        button_layout.addStretch()
 
-        # ---- Right side: main content ----
+        # Right side
         right_layout = QVBoxLayout()
-        # ---- Create splitter for vertical resizing ----
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # Optional labels at top and bottom
         editor_container = QWidget()
         editor_layout = QVBoxLayout()
         editor_layout.setContentsMargins(0, 0, 0, 0)
@@ -260,7 +301,6 @@ class ProjectWindow(QWidget):
         splitter.addWidget(editor_container)
         splitter.addWidget(console_container)
 
-        # Optional: set initial proportions (editor bigger)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
 
@@ -269,15 +309,23 @@ class ProjectWindow(QWidget):
         right_layout.addWidget(self.project_combo)
         right_layout.addWidget(splitter)
 
-        # ---- Combine both ----
-        main_layout.addLayout(button_layout, 1)  # left panel
-        main_layout.addLayout(right_layout, 4)   # right panel (wider)
+        # Combine
+        main_layout.addLayout(button_layout, 1)
+        main_layout.addLayout(right_layout, 4)
 
         self.setLayout(main_layout)
 
-        # Threads
         self.debug_worker = None
         self.command_worker = None
+
+    # -------------------------------------------------------
+    # NEW — return to register configuration window
+    # -------------------------------------------------------
+    def change_setup(self):
+        os.chdir(os.path.dirname(self.project_dir))
+        """Close project window and reopen the MCU configuration window."""
+        self.close()
+        self.parent_cfg_window.show_mcu_selection()
 
     # -----------------------------
     # File operations
