@@ -52,7 +52,8 @@ use drv_digital_out::*;
 use drv_name::*;
 use system::init_clock::*;
 
-const port_out: port_name_t = GPIO_PORT_E;
+const port_out_1: port_name_t = GPIO_PORT_E;
+const port_out_2: port_name_t = GPIO_PORT_A;
 const pin_in_1: pin_name_t = GPIO_B0;
 const pin_in_2: pin_name_t = GPIO_B1;
 const pin_in_3: pin_name_t = GPIO_B2;
@@ -65,6 +66,7 @@ const pin_out_3: pin_name_t = GPIO_C3;
 fn main() -> ! {
 
     let mut output1: port_t = port_t::default();
+    let mut output5: port_t = port_t::default();
 
     let mut output2: digital_out_t = digital_out_t::default();
     let mut output3: digital_out_t = digital_out_t::default();
@@ -81,7 +83,10 @@ fn main() -> ! {
     let mut value3 : u8 = 0;
     let mut value4 : u8 = 0;
 
-    port_init(&mut output1 , port_out, 0x5555, gpio_direction_t::GPIO_DIGITAL_OUTPUT);
+    let mut i : u16 = 1;
+
+    port_init(&mut output1 , port_out_1, 0x5555, gpio_direction_t::GPIO_DIGITAL_OUTPUT);
+    port_init(&mut output5 , port_out_2, 0xFFFF, gpio_direction_t::GPIO_DIGITAL_OUTPUT);
 
     digital_in_init(&mut input1, pin_in_1);
     digital_in_init(&mut input2, pin_in_2);
@@ -101,6 +106,12 @@ fn main() -> ! {
         value2 = digital_in_read(&mut input2).ok().unwrap();
         value3 = digital_in_read(&mut input3).ok().unwrap();
         value4 = digital_in_read(&mut input4).ok().unwrap();
+
+        port_write(&mut output5, i);
+        i *= 2;
+        if i == 65536 {
+            i = 1;
+        }
 
         if value1 == 1 {
             port_write(&mut output1, 0xFFFF); //abnormaly slow in this test
