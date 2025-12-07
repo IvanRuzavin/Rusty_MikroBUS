@@ -8,3 +8,4 @@ sdk/.cargo/*
 sdk/target
 sdk/targets/arm/stm32/src/*
 sdk/targets/arm/stm32/Cargo.toml
+sdk/Cargo.lock
