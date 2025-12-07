@@ -4,6 +4,7 @@
 #![allow(unreachable_code)]
 
 use core::arch::global_asm;
+use core::include_str;
 
 global_asm!(include_str!("startup.s"));
 

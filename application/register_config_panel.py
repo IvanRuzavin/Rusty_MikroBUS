@@ -7,9 +7,10 @@ from PyQt6.QtWidgets import (
     QScrollArea, QGridLayout, QComboBox, QLineEdit,
     QHBoxLayout, QMessageBox, QSizePolicy, QLayout
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+from custom_ide_window import ProjectWindow
 
 class RegisterConfigPanel(QWidget):
     """
@@ -384,7 +385,7 @@ class RegisterConfigPanel(QWidget):
         filepath = os.path.join(os.getcwd(), f'core/arm/stm32/common_header.rs')
         with open(filepath, 'r') as source_file:
             source_file_contents = source_file.read()
-        with open(os.path.join(setup_folder, 'common_header.rs'), 'w') as dest_file:
+        with open(os.path.join(setup_folder, 'src/common_header.rs'), 'w') as dest_file:
             dest_file.write(source_file_contents)
 
         #################### SDK CONFIG PART ####################
@@ -475,12 +476,15 @@ class RegisterConfigPanel(QWidget):
         # Add rust target (non-blocking warning: subprocess.run is used as before)
         subprocess.run(f'rustup target add {self.target}', shell=True)
 
+        cfg_target = f'{self.mcu_name[:7].lower()}x.cfg'
+
         QMessageBox.information(self, 'Success', 'MCU configuration saved.')
-        # Original behavior: close parent window - keep same
-        try:
-            self.parent_window.close()
-        except Exception:
-            self.close()
+        # Open the project window
+        self.project_window = ProjectWindow(self.mcu_name, cfg_target, self.target)
+        self.project_window.show()
+
+        # Close the current setup window
+        self.parent_window.close()
 
     # -----------------------
     # Styling

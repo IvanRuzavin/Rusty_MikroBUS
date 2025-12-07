@@ -1,25 +1,19 @@
 import os, subprocess
 import sys
-import json
 import sqlite3
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QLabel,
-    QComboBox,
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QFormLayout,
-    QMessageBox,
-    QCompleter,
     QGridLayout,
     QDialog
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QPixmap, QIcon
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QPixmap
 
 from custom_ide_window import ProjectWindow
 from register_config_panel import RegisterConfigPanel

@@ -152,8 +152,10 @@ class ProjectWindow(QWidget):
         label = QLabel("System setup saved successfully!\nNow you can build or flash the project.")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        self.project_dir = os.path.join(os.getcwd(), 'sdk')
+        os.chdir(self.project_dir)
         project_label = QLabel("Project:")
-        project_list = os.listdir(os.path.join(os.getcwd(), 'test'))
+        project_list = os.listdir(os.path.join(self.project_dir, 'tests'))
         self.project_combo = QComboBox()
         self.project_combo.setEditable(False)
         self.project_combo.addItems(project_list)
@@ -182,7 +184,7 @@ class ProjectWindow(QWidget):
             border: 1px solid #444;
         """)
 
-        self.file_path = os.path.join(os.getcwd(), 'src', 'main.rs')
+        self.file_path = os.path.join(self.project_dir, 'src', 'main.rs')
 
         # Load main.rs on startup
         self.load_file(self.file_path)
@@ -357,9 +359,10 @@ class ProjectWindow(QWidget):
 
     def configure_main_project(self):
         selected_project = self.project_combo.currentText()
-        with open(os.path.join(os.getcwd(), 'test', selected_project, 'main.rs'), 'r') as source_project:
+        with open(os.path.join(self.project_dir, 'tests', selected_project), 'r') as source_project:
             project_content = source_project.read()
-        with open(os.path.join(os.getcwd(), 'src', 'main.rs'), 'w') as dest_project:
+        os.makedirs(os.path.join(self.project_dir, 'src'), exist_ok=True)
+        with open(os.path.join(self.project_dir, 'src', 'main.rs'), 'w') as dest_project:
             dest_project.write(project_content)
         self.log(f"Project {selected_project} configured.\n")
 

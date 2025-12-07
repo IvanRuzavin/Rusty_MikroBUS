@@ -1,3 +1,5 @@
+#![no_std]
+
 pub mod core_header;
 pub mod mcu_header;
 pub mod init_clock;

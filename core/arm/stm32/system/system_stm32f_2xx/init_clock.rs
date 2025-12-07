@@ -37,19 +37,18 @@
 **
 ****************************************************************************/
 
-#![no_std]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(const_item_mutation)]
-//#![allow(unused)]
+#![allow(unused)]
 
 use core::arch::asm;
+use core::default::Default;
 
-mod core_header;
-
-pub use mcu_header::{RCC_TypeDef, RCC_BASE};
-use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos,
+use crate::core_header;
+use crate::mcu_header::{RCC_TypeDef, RCC_BASE};
+use crate::mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos,
     FLASH_TypeDef, FLASH_R_BASE, RCC_CFGR_HPRE_Msk, RCC_CFGR_HPRE_Pos, RCC_CFGR_PPRE1_Msk,
     RCC_CFGR_PPRE1_Pos, RCC_CFGR_PPRE2_Msk, RCC_CFGR_PPRE2_Pos,
     FLASH_ACR_PRFTEN_Pos,
@@ -57,9 +56,9 @@ use mcu_header::{ RCC_CR_HSION_Pos, RCC_CR_HSEBYP_Pos,
     FLASH_ACR_LATENCY_4WS, FLASH_ACR_LATENCY_3WS, FLASH_ACR_LATENCY_2WS, FLASH_ACR_LATENCY_1WS, FLASH_ACR_LATENCY_Msk,
     RCC_CR_HSIRDY_Pos, RCC_CR_HSEON_Pos, RCC_CR_HSERDY_Pos, RCC_CR_PLLON_Pos, RCC_CR_PLLRDY_Pos, RCC_CFGR_SWS_Msk};
 
-use common_header::*;
-use core_header::*;
-use system_reset::*;
+use crate::common_header::*;
+use crate::core_header::*;
+use crate::reset::*;
 
 const ADDRESS_SCB_AIRCR     : u32 = 0xE000ED0C;
 const SCB_AIRCR_SYSRESETREQ : u8  = 2;
