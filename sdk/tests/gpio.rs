@@ -53,7 +53,7 @@ use drv_name::*;
 use system::init_clock::*;
 
 const port_out_1: port_name_t = GPIO_PORT_E;
-const port_out_2: port_name_t = GPIO_PORT_A;
+const port_out_2: port_name_t = GPIO_PORT_C;
 const pin_in_1: pin_name_t = GPIO_B0;
 const pin_in_2: pin_name_t = GPIO_B1;
 const pin_in_3: pin_name_t = GPIO_B2;
@@ -109,7 +109,7 @@ fn main() -> ! {
 
         port_write(&mut output5, i);
         i *= 2;
-        if i == 65536 {
+        if i == 32768 {
             i = 1;
         }
 
