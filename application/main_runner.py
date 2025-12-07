@@ -103,12 +103,19 @@ class RustyMikrobusApp(QWidget):
 
 # Run Application
 if __name__ == '__main__':
-    if os.path.exists(os.path.join(os.path.dirname(__file__), 'instance_uid.json')):
-        with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'r') as application_instance:
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller exe
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.dirname(__file__)
+
+    if os.path.exists(os.path.join(base_path, 'instance_uid.json')):
+        with open(os.path.join(base_path, 'instance_uid.json'), 'r') as application_instance:
             instance_contents = json.loads(application_instance.read())
-    with open(os.path.join(os.path.dirname(__file__), 'instance_uid.json'), 'w') as application_instance:
+    with open(os.path.join(base_path, 'instance_uid.json'), 'w') as application_instance:
         json.dump(instance_contents, application_instance, indent = 4)
-    os.makedirs(os.path.join(os.path.dirname(__file__), 'database'), exist_ok=True)
+
+    os.makedirs(os.path.join(os.path.dirname(instance_contents['database_path'])), exist_ok=True)
     app = QApplication(sys.argv)
     main_window = RustyMikrobusApp()
     main_window.show()

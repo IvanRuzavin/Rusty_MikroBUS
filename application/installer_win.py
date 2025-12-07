@@ -1,4 +1,4 @@
-import subprocess, urllib.request, os, shutil, requests, py7zr
+import subprocess, urllib.request, os, shutil, requests, py7zr, sys
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -16,8 +16,13 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
 
 # Application directories
-INSTALLER_DIR = os.path.join(os.path.dirname(__file__), 'installer')
-RUNNER_DIR = os.path.join(os.path.dirname(__file__), 'runner')
+if getattr(sys, 'frozen', False):
+    # Running as PyInstaller exe
+    base_path = os.path.dirname(sys.executable)
+else:
+    base_path = os.path.dirname(__file__)
+INSTALLER_DIR = os.path.join(base_path, 'application/installer')
+RUNNER_DIR = os.path.join(base_path, 'application/runner')
 os.makedirs(INSTALLER_DIR, exist_ok=True)
 
 # URLs
@@ -422,7 +427,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'C++ Build Tools are required.',
             inst_callback   = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
             uninst_callback = lambda: download_and_run(VS_TOOLS_URL, 'vs_BuildTools.exe', instance_contents, refresh_all=self.refresh_all),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/msvc.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'msvc.png'),
             installed   = os.path.exists(instance_contents['vs_tools_path'])
         )
         self.step_cards.append(card)
@@ -433,7 +438,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Installs rustup and Rust compiler.',
             inst_callback   = lambda: download_and_run(RUST_URL, 'rustup-init.exe', instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['rustup_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/rust.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'rust.png'),
             installed   = os.path.exists(instance_contents['rustup_path']),
             vs_tools_needed = not os.path.exists(instance_contents['vs_tools_path'])
         )
@@ -445,7 +450,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Required for debugging STM32 MCUs.',
             inst_callback   = lambda: install_stlink(instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['stlink_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/stlink.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'stlink.png'),
             installed   = file_exists_containing(os.path.dirname(instance_contents['stlink_path']), instance_contents['stlink_path'].split('/')[-1])
         )
         self.step_cards.append(card)
@@ -456,7 +461,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Executes the PowerShell command automatically.',
             inst_callback   = lambda: install_probers(instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['probers_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/cargo.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'cargo.png'),
             installed   = os.path.exists(instance_contents['probers_path']),
             vs_tools_needed = not os.path.exists(instance_contents['vs_tools_path'])
         )
@@ -468,7 +473,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Provides debugger backend.',
             inst_callback   = lambda: install_openocd_runner(instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['openocd_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/openocd.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'openocd.png'),
             installed   = os.path.exists(instance_contents['openocd_path']),
         )
         self.step_cards.append(card)
@@ -479,7 +484,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'ARM none-eabi compiler.',
             inst_callback   = lambda: install_arm_runner(instance_contents),
             uninst_callback = lambda: remove_directory(instance_contents['gcc_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/arm.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'arm.png'),
             installed   = os.path.exists(instance_contents['gcc_path']),
         )
         self.step_cards.append(card)
@@ -490,7 +495,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Provides connection backend.',
             inst_callback   = lambda: download_and_run(SEGGER_URL, 'jlink.exe', instance_contents),
             uninst_callback = lambda: run_uninstall(instance_contents['jlink_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/segger.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'segger.png'),
             installed   = os.path.exists(instance_contents['jlink_path']),
         )
         self.step_cards.append(card)
@@ -501,7 +506,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Provides configuration information.',
             inst_callback   = lambda: download(GITHUB_RELEASE_URL, instance_contents['database_path']),
             uninst_callback = lambda: remove_file(instance_contents['database_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/database.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'database.png'),
             installed   = os.path.exists(instance_contents['database_path']),
         )
         self.step_cards.append(card)
@@ -512,7 +517,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Provides source code.',
             inst_callback   = lambda: download(GITHUB_RELEASE_URL, f'{instance_contents['sdk_path']}.7z'),
             uninst_callback = lambda: remove_directory(instance_contents['sdk_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/sdk.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'sdk.png'),
             installed   = os.path.exists(instance_contents['sdk_path']),
         )
         self.step_cards.append(card)
@@ -523,7 +528,7 @@ class InstallerWindow(QMainWindow):
             subtitle    = 'Provides MCU system configuration code.',
             inst_callback   = lambda: download(GITHUB_RELEASE_URL, f'{instance_contents['core_path']}.7z'),
             uninst_callback = lambda: remove_directory(instance_contents['core_path']),
-            icon_path   = os.path.join(os.path.dirname(__file__), 'sprites/core.png'),
+            icon_path   = os.path.join(base_path, instance_contents['sprites_path'], 'core.png'),
             installed   = os.path.exists(instance_contents['core_path']),
         )
         self.step_cards.append(card)
