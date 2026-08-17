@@ -1,0 +1,146 @@
+{
+  "name": "mikro-rust-configurator",
+  "displayName": "Mikro Rust Configurator",
+  "description": "NECTO-style MCU and Rust project configuration for mikroSDK-like workspaces.",
+  "version": "0.1.0",
+  "publisher": "mikroe",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "rust",
+    "embedded",
+    "mikrosdk",
+    "necto",
+    "mcu",
+    "stm32",
+    "openocd",
+    "probe-rs"
+  ],
+  "icon": "resources/icon.png",
+  "main": "./src/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onView:mikroRust.dashboard"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The extension generates project files and can execute Rust/OpenOCD/probe-rs tools, so the workspace must be trusted."
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "mikroRust.configure", "title": "Mikro Rust: Configure MCU", "category": "Mikro Rust", "icon": "$(settings-gear)" },
+      { "command": "mikroRust.reconfigure", "title": "Mikro Rust: Reconfigure Current MCU", "category": "Mikro Rust", "icon": "$(refresh)" },
+      { "command": "mikroRust.build", "title": "Mikro Rust: Build Project", "category": "Mikro Rust", "icon": "$(tools)" },
+      { "command": "mikroRust.flash", "title": "Mikro Rust: Flash MCU", "category": "Mikro Rust", "icon": "$(zap)" },
+      { "command": "mikroRust.erase", "title": "Mikro Rust: Erase MCU", "category": "Mikro Rust", "icon": "$(trash)" },
+      { "command": "mikroRust.debug", "title": "Mikro Rust: Debug MCU", "category": "Mikro Rust", "icon": "$(debug-alt)" },
+      { "command": "mikroRust.selectExample", "title": "Mikro Rust: Choose Example Project", "category": "Mikro Rust", "icon": "$(file-code)" },
+      { "command": "mikroRust.openGeneratedSetup", "title": "Mikro Rust: Open Generated Setup", "category": "Mikro Rust", "icon": "$(folder-opened)" },
+      { "command": "mikroRust.diagnostics", "title": "Mikro Rust: Run Diagnostics", "category": "Mikro Rust", "icon": "$(pulse)" },
+      { "command": "mikroRust.refreshDashboard", "title": "Refresh", "category": "Mikro Rust", "icon": "$(refresh)" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mikroRust",
+          "title": "Mikro Rust",
+          "icon": "resources/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "mikroRust": [
+        {
+          "type": "webview",
+          "id": "mikroRust.dashboard",
+          "name": "Configurator",
+          "icon": "resources/activity.svg",
+          "contextualTitle": "Mikro Rust Configurator"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "mikroRust.refreshDashboard",
+          "when": "view == mikroRust.dashboard",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Mikro Rust Configurator",
+      "properties": {
+        "mikroRust.rootPath": {
+          "type": "string",
+          "default": "",
+          "description": "Root containing the core, sdk, and application/database folders. Empty means the current workspace folder. Relative paths are resolved from the workspace folder."
+        },
+        "mikroRust.databasePath": {
+          "type": "string",
+          "default": "application/database/database_mikro_sdk_rust.db",
+          "description": "Path to the MCU SQLite database, relative to Mikro Rust root unless absolute."
+        },
+        "mikroRust.corePath": {
+          "type": "string",
+          "default": "core",
+          "description": "Path to the Rust core repository/folder, relative to Mikro Rust root unless absolute."
+        },
+        "mikroRust.sdkPath": {
+          "type": "string",
+          "default": "sdk",
+          "description": "Path to the mikroSDK-like Rust workspace, relative to Mikro Rust root unless absolute."
+        },
+        "mikroRust.corePlatform": {
+          "type": "string",
+          "default": "arm/stm32",
+          "description": "Platform subpath used below core/ and sdk/targets/. The supplied application uses arm/stm32."
+        },
+        "mikroRust.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Python executable used for SQLite access. Empty enables automatic python3/python/py detection and sqlite3 CLI fallback."
+        },
+        "mikroRust.installRustTargetOnConfigure": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run rustup target add after a successful configuration."
+        },
+        "mikroRust.openocdPath": {
+          "type": "string",
+          "default": "openocd",
+          "description": "OpenOCD executable used by diagnostics/debug integration."
+        },
+        "mikroRust.gdbPath": {
+          "type": "string",
+          "default": "arm-none-eabi-gdb",
+          "description": "ARM GDB executable used for diagnostics/raw debug fallback."
+        },
+        "mikroRust.openocdInterfaceConfig": {
+          "type": "string",
+          "default": "interface/stlink.cfg",
+          "description": "OpenOCD interface configuration file."
+        },
+        "mikroRust.cortexDebugExtensionId": {
+          "type": "string",
+          "default": "marus25.cortex-debug",
+          "description": "Optional VS Code debug extension used for graphical OpenOCD/GDB debugging."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/extension.js && node --check src/configurationEngine.js && node --check src/database.js && node --check src/dashboard.js && node --check src/configurationPanel.js && node --check src/process.js"
+  }
+}
