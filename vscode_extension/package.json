@@ -1,146 +1,120 @@
 {
-  "name": "mikro-rust-configurator",
-  "displayName": "Mikro Rust Configurator",
-  "description": "NECTO-style MCU and Rust project configuration for mikroSDK-like workspaces.",
-  "version": "0.1.0",
-  "publisher": "mikroe",
-  "license": "UNLICENSED",
+  "name": "mikrobus-rust-tools",
+  "displayName": "MikroBUS Rust Tools",
+  "description": "Cross-platform Rust MikroBUS VS Code tools with environment setup, MCU configuration management, workspace binding, reliable Rust tool discovery, build and ST-Link flashing.",
+  "version": "0.0.8",
+  "publisher": "mikroe-dev",
   "engines": {
-    "vscode": "^1.95.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
-    "Programming Languages",
     "Other"
   ],
-  "keywords": [
-    "rust",
-    "embedded",
-    "mikrosdk",
-    "necto",
-    "mcu",
-    "stm32",
-    "openocd",
-    "probe-rs"
-  ],
-  "icon": "resources/icon.png",
-  "main": "./src/extension.js",
-  "extensionKind": [
-    "workspace"
-  ],
   "activationEvents": [
-    "onView:mikroRust.dashboard"
+    "onStartupFinished",
+    "onView:mikrobusRust.setupView",
+    "onCommand:mikrobusRust.openSetup",
+    "onCommand:mikrobusRust.configureMcu",
+    "onWebviewPanel:mikrobusRust.mcuConfigurator",
+    "onCommand:mikrobusRust.useSetupWithWorkspace",
+    "onCommand:mikrobusRust.useCurrentRustFile",
+    "onCommand:mikrobusRust.buildWorkspace",
+    "onCommand:mikrobusRust.flashWorkspace",
+    "onCommand:mikrobusRust.buildFlashWorkspace",
+    "onCommand:mikrobusRust.eraseWorkspaceMcu"
   ],
-  "capabilities": {
-    "untrustedWorkspaces": {
-      "supported": false,
-      "description": "The extension generates project files and can execute Rust/OpenOCD/probe-rs tools, so the workspace must be trusted."
-    }
-  },
+  "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "mikroRust.configure", "title": "Mikro Rust: Configure MCU", "category": "Mikro Rust", "icon": "$(settings-gear)" },
-      { "command": "mikroRust.reconfigure", "title": "Mikro Rust: Reconfigure Current MCU", "category": "Mikro Rust", "icon": "$(refresh)" },
-      { "command": "mikroRust.build", "title": "Mikro Rust: Build Project", "category": "Mikro Rust", "icon": "$(tools)" },
-      { "command": "mikroRust.flash", "title": "Mikro Rust: Flash MCU", "category": "Mikro Rust", "icon": "$(zap)" },
-      { "command": "mikroRust.erase", "title": "Mikro Rust: Erase MCU", "category": "Mikro Rust", "icon": "$(trash)" },
-      { "command": "mikroRust.debug", "title": "Mikro Rust: Debug MCU", "category": "Mikro Rust", "icon": "$(debug-alt)" },
-      { "command": "mikroRust.selectExample", "title": "Mikro Rust: Choose Example Project", "category": "Mikro Rust", "icon": "$(file-code)" },
-      { "command": "mikroRust.openGeneratedSetup", "title": "Mikro Rust: Open Generated Setup", "category": "Mikro Rust", "icon": "$(folder-opened)" },
-      { "command": "mikroRust.diagnostics", "title": "Mikro Rust: Run Diagnostics", "category": "Mikro Rust", "icon": "$(pulse)" },
-      { "command": "mikroRust.refreshDashboard", "title": "Refresh", "category": "Mikro Rust", "icon": "$(refresh)" }
+      {
+        "command": "mikrobusRust.openSetup",
+        "title": "MikroBUS Rust: Open Setup"
+      },
+      {
+        "command": "mikrobusRust.configureMcu",
+        "title": "MikroBUS Rust: Configure MCU"
+      },
+      {
+        "command": "mikrobusRust.useSetupWithWorkspace",
+        "title": "MikroBUS Rust: Use Setup with Current Workspace"
+      },
+      {
+        "command": "mikrobusRust.useCurrentRustFile",
+        "title": "MikroBUS Rust: Use Current Rust File as main.rs"
+      },
+      {
+        "command": "mikrobusRust.buildWorkspace",
+        "title": "MikroBUS Rust: Build Current Project"
+      },
+      {
+        "command": "mikrobusRust.flashWorkspace",
+        "title": "MikroBUS Rust: Flash Current Project"
+      },
+      {
+        "command": "mikrobusRust.buildFlashWorkspace",
+        "title": "MikroBUS Rust: Build & Flash Current Rust File"
+      },
+      {
+        "command": "mikrobusRust.eraseWorkspaceMcu",
+        "title": "MikroBUS Rust: Erase Configured MCU"
+      }
     ],
+    "configuration": {
+      "title": "MikroBUS Rust",
+      "properties": {
+        "mikrobusRust.storageRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional root directory for extension-managed SDK, core, database and runner packages. Leave empty to use VS Code global extension storage."
+        },
+        "mikrobusRust.cargoPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to cargo. Leave empty to resolve cargo from PATH, CARGO_HOME/bin or ~/.cargo/bin."
+        },
+        "mikrobusRust.rustupPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to rustup. Leave empty to resolve rustup from PATH, CARGO_HOME/bin or ~/.cargo/bin."
+        },
+        "mikrobusRust.probeRsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to probe-rs. Leave empty to resolve it from PATH, CARGO_HOME/bin or ~/.cargo/bin."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "mikroRust",
-          "title": "Mikro Rust",
-          "icon": "resources/activity.svg"
+          "id": "mikrobusRust",
+          "title": "MikroBUS Rust",
+          "icon": "media/mikrobus-rust.svg"
         }
       ]
     },
     "views": {
-      "mikroRust": [
+      "mikrobusRust": [
         {
           "type": "webview",
-          "id": "mikroRust.dashboard",
-          "name": "Configurator",
-          "icon": "resources/activity.svg",
-          "contextualTitle": "Mikro Rust Configurator"
+          "id": "mikrobusRust.setupView",
+          "name": "Environment Setup"
         }
       ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "mikroRust.refreshDashboard",
-          "when": "view == mikroRust.dashboard",
+          "command": "mikrobusRust.configureMcu",
+          "when": "view == mikrobusRust.setupView",
           "group": "navigation"
         }
       ]
-    },
-    "configuration": {
-      "title": "Mikro Rust Configurator",
-      "properties": {
-        "mikroRust.rootPath": {
-          "type": "string",
-          "default": "",
-          "description": "Root containing the core, sdk, and application/database folders. Empty means the current workspace folder. Relative paths are resolved from the workspace folder."
-        },
-        "mikroRust.databasePath": {
-          "type": "string",
-          "default": "application/database/database_mikro_sdk_rust.db",
-          "description": "Path to the MCU SQLite database, relative to Mikro Rust root unless absolute."
-        },
-        "mikroRust.corePath": {
-          "type": "string",
-          "default": "core",
-          "description": "Path to the Rust core repository/folder, relative to Mikro Rust root unless absolute."
-        },
-        "mikroRust.sdkPath": {
-          "type": "string",
-          "default": "sdk",
-          "description": "Path to the mikroSDK-like Rust workspace, relative to Mikro Rust root unless absolute."
-        },
-        "mikroRust.corePlatform": {
-          "type": "string",
-          "default": "arm/stm32",
-          "description": "Platform subpath used below core/ and sdk/targets/. The supplied application uses arm/stm32."
-        },
-        "mikroRust.pythonPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional Python executable used for SQLite access. Empty enables automatic python3/python/py detection and sqlite3 CLI fallback."
-        },
-        "mikroRust.installRustTargetOnConfigure": {
-          "type": "boolean",
-          "default": true,
-          "description": "Run rustup target add after a successful configuration."
-        },
-        "mikroRust.openocdPath": {
-          "type": "string",
-          "default": "openocd",
-          "description": "OpenOCD executable used by diagnostics/debug integration."
-        },
-        "mikroRust.gdbPath": {
-          "type": "string",
-          "default": "arm-none-eabi-gdb",
-          "description": "ARM GDB executable used for diagnostics/raw debug fallback."
-        },
-        "mikroRust.openocdInterfaceConfig": {
-          "type": "string",
-          "default": "interface/stlink.cfg",
-          "description": "OpenOCD interface configuration file."
-        },
-        "mikroRust.cortexDebugExtensionId": {
-          "type": "string",
-          "default": "marus25.cortex-debug",
-          "description": "Optional VS Code debug extension used for graphical OpenOCD/GDB debugging."
-        }
-      }
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "check": "node --check src/extension.js && node --check src/configurationEngine.js && node --check src/database.js && node --check src/dashboard.js && node --check src/configurationPanel.js && node --check src/process.js"
-  }
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check media/setup.js && node --check media/mcu.js",
+    "build": "npx @vscode/vsce package"
+  },
+  "license": "UNLICENSED"
 }

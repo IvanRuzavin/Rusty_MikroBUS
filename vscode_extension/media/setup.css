@@ -1,0 +1,298 @@
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  font-family: var(--vscode-font-family);
+}
+
+button {
+  font: inherit;
+}
+
+.page {
+  width: 100%;
+  margin: 0;
+  padding: 12px 10px 20px;
+}
+
+.hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--vscode-textLink-foreground);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.subtitle {
+  margin: 7px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.secondary,
+.actions button,
+.linkButton {
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.secondary {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  background: var(--vscode-panel-border);
+}
+
+.summary > div {
+  min-width: 0;
+  min-height: 54px;
+  padding: 9px 10px;
+  background: var(--vscode-sideBar-background);
+}
+
+.summary strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.summary span {
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+}
+
+.storage {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.storage span {
+  grid-column: 1 / -1;
+}
+
+.platformStorage {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.storage code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 4px 5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--vscode-textCodeBlock-background);
+  font-size: 10px;
+}
+
+.linkButton {
+  padding: 4px 6px;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+}
+
+.notice {
+  margin: 0 0 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--vscode-inputValidation-warningBorder);
+  border-radius: 4px;
+  background: var(--vscode-inputValidation-warningBackground);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.hidden {
+  display: none;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  background: var(--vscode-sideBar-background);
+}
+
+.status-installed {
+  border-left: 3px solid var(--vscode-testing-iconPassed);
+}
+
+.status-missing {
+  border-left: 3px solid var(--vscode-testing-iconFailed);
+}
+
+.status-unsupported {
+  border-left: 3px solid var(--vscode-disabledForeground);
+}
+
+.cardHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.kind {
+  display: inline-block;
+  margin-top: 3px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+}
+
+.badge {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+}
+
+.description,
+.detail {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.description {
+  margin: 8px 0 4px;
+}
+
+.detail {
+  margin: 0 0 7px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pathRow {
+  display: grid;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.pathRow span {
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+}
+
+.pathRow code,
+.version {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 4px 5px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 9px;
+}
+
+.version {
+  margin-top: 5px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.actions button {
+  max-width: 100%;
+  padding: 5px 8px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  font-size: 10px;
+}
+
+.actions button:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.actions button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+footer {
+  margin-top: 12px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+@media (max-width: 280px) {
+  .hero {
+    display: block;
+  }
+
+  .secondary {
+    margin-top: 8px;
+  }
+
+  .cardHeading {
+    display: block;
+  }
+
+  .badge {
+    display: inline-block;
+    margin-top: 5px;
+  }
+}
+
+.heroActions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
