@@ -1,51 +1,26 @@
-# MikroBUS Rust Tools v0.0.6
+# MikroBUS Rust Tools v0.0.9
 
-Cross-platform VS Code extension prototype for the Rust mikroBUS workflow.
+Cross-platform VS Code tooling for the Rust mikroBUS SDK workflow.
 
-## Environment sidebar
+## What changed in 0.0.9
 
-The MikroBUS Rust Activity Bar view keeps the existing Windows/Linux dependency checks and automatic installation for extension-managed packages.
+- Fixes generated `.setup/sdk` crates on Linux when a core family contains `src/Lib.rs` instead of Cargo's expected lowercase `src/lib.rs`. The generator normalizes the copied crate entry point without modifying the installed core package.
+- Adds workspace-native actions for the currently open Rust file after an MCU setup is applied.
+- Adds editor title buttons for **Build**, **Build & Flash**, and **Debug**.
+- Adds keyboard shortcuts while a Rust editor is active in a bound workspace:
+  - `Ctrl+Shift+B` (macOS: `Cmd+Shift+B`) — build current `.rs`
+  - `Ctrl+F5` (macOS: `Cmd+F5`) — build and flash current `.rs`
+  - `F5` — build, flash and start an interactive probe-rs debug session
 
-## MCU configuration workflow
+The current `.rs` file is saved and copied to `sdk/src/main.rs` before current-file build/flash/debug, matching the existing Rusty_MikroBUS test workflow.
 
-`MikroBUS Rust: Configure MCU` opens a main editor view with three states:
+## F5 debugging
 
-1. **MCU catalog** — all database MCUs are shown as a searchable table with MCU name, vendor, family, Rust target, system library and configuration status.
-2. **MCU settings** — selecting a table row replaces the catalog with only that MCU's metadata, system clock and JSON-driven register fields.
-3. **Configured setups** — saved MCU configurations can be edited, rebuilt or removed.
-
-A configured setup stores the selected MCU, clock and register values under the extension-managed root:
-
-```text
-<managed-root>/configured-setups/
-├── setups.json
-└── active.json
-```
-
-The most recently built setup is the active setup and continues to generate the PyQt-compatible output in:
-
-```text
-<managed-root>/sdk/.setup
-```
-
-Rebuilding a different saved setup makes it active. Removing the active setup also removes `sdk/.setup` and the generated `.cargo/config.toml`.
-
-At this stage one saved setup is maintained per MCU. Reconfiguring the same MCU updates that saved setup instead of creating duplicate variants.
+F5 uses the installed `probe-rs` CLI directly as a VS Code Debug Adapter Protocol server. MikroBUS Rust Tools registers its own `mikrobus-rust-debug` adapter, resolves the generated ELF under `target/<rust-target>/debug/<cargo-package-name>`, starts `probe-rs dap-server`, flashes the ELF, halts after reset, and enters VS Code's normal debug UI. No second VS Code debugger extension is required.
 
 ## Build
 
 ```bash
 npm run check
-npm run build
-```
-
-Or directly:
-
-```bash
 npx @vscode/vsce package
 ```
-
-
-## Rust tool discovery
-
-Workspace build/flash commands do not rely only on the PATH inherited by the VS Code extension host. The extension resolves `cargo`, `rustup`, and `probe-rs` from PATH and the standard Rust `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin`) location, then injects that directory into child process PATH. Optional `mikrobusRust.cargoPath`, `mikrobusRust.rustupPath`, and `mikrobusRust.probeRsPath` settings can override discovery.

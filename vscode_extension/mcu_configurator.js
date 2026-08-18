@@ -182,10 +182,35 @@ function registerMcuConfigurator(context) {
     vscode.commands.registerCommand('mikrobusRust.buildFlashWorkspace', async () => {
       await runBoundWorkspaceAction(context, 'buildFlashCurrent');
     }),
+    vscode.commands.registerCommand('mikrobusRust.buildCurrentFile', async () => {
+      await runBoundWorkspaceAction(context, 'buildCurrent');
+    }),
+    vscode.commands.registerCommand('mikrobusRust.flashCurrentFile', async () => {
+      await runBoundWorkspaceAction(context, 'flashCurrent');
+    }),
+    vscode.commands.registerCommand('mikrobusRust.debugCurrentFile', async () => {
+      await debugCurrentRustFile(context);
+    }),
     vscode.commands.registerCommand('mikrobusRust.eraseWorkspaceMcu', async () => {
       await runBoundWorkspaceAction(context, 'erase');
+    }),
+    vscode.debug.registerDebugAdapterDescriptorFactory('mikrobus-rust-debug', {
+      createDebugAdapterDescriptor(session) {
+        const probeRsExecutable = resolveToolExecutable('probe-rs');
+        const cwd = session.workspaceFolder?.uri?.fsPath || process.cwd();
+        return new vscode.DebugAdapterExecutable(
+          probeRsExecutable,
+          ['dap-server'],
+          { cwd, env: buildToolEnvironment(probeRsExecutable) }
+        );
+      }
     })
   );
+  void updateWorkspaceContext();
+}
+
+async function updateWorkspaceContext() {
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.workspaceBound', Boolean(readWorkspaceBinding()));
 }
 
 
@@ -321,6 +346,7 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
   };
   fs.writeFileSync(bindingPath, JSON.stringify(binding, null, 2) + '\n', 'utf8');
   updateWorkspaceRustAnalyzer(workspace.workspaceFolder, workspace.sdkRoot, setup.target);
+  void updateWorkspaceContext();
   return { ...binding, sdkRoot: workspace.sdkRoot, bindingPath, workspaceFolder: workspace.workspaceFolder };
 }
 
@@ -554,6 +580,69 @@ async function executeChecked(channel, tool, args, cwd) {
   if (code !== 0) throw new Error(`${tool} ${args.join(' ')} failed with exit code ${code}. See the MikroBUS Rust output.`);
 }
 
+function readCargoPackageName(cargoTomlPath) {
+  const text = readRequired(cargoTomlPath);
+  let inPackage = false;
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (/^\[.*\]$/.test(trimmed)) {
+      inPackage = trimmed === '[package]';
+      continue;
+    }
+    if (!inPackage) continue;
+    const match = trimmed.match(/^name\s*=\s*["']([^"']+)["']/);
+    if (match) return match[1];
+  }
+  throw new Error(`Cannot determine [package] name from ${cargoTomlPath}.`);
+}
+
+function resolveBuiltProgramBinary(binding, setup) {
+  const packageName = readCargoPackageName(path.join(binding.sdkRoot, 'Cargo.toml'));
+  const executableName = process.platform === 'win32' ? `${packageName}.exe` : packageName;
+  const candidates = [
+    setup.target ? path.join(binding.sdkRoot, 'target', setup.target, 'debug', executableName) : undefined,
+    path.join(binding.sdkRoot, 'target', 'debug', executableName)
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (found) return found;
+  throw new Error(`Cargo build completed, but the debug ELF was not found. Expected one of: ${candidates.join(', ')}`);
+}
+
+async function debugCurrentRustFile(context) {
+  const { binding, setup } = requireWorkspaceBinding(context);
+  const channel = getOutputChannel();
+  channel.show(true);
+  channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz · Debug current Rust file ===`);
+  channel.appendLine(`SDK root: ${binding.sdkRoot}`);
+
+  await useCurrentRustFileAsMain(context);
+  await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
+  const programBinary = resolveBuiltProgramBinary(binding, setup);
+  const probeRsExecutable = resolveToolExecutable('probe-rs');
+  channel.appendLine(`Debug ELF: ${programBinary}`);
+  channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+
+  const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
+    type: 'mikrobus-rust-debug',
+    request: 'launch',
+    name: `MikroBUS Rust: ${setup.mcuName}`,
+    cwd: binding.sdkRoot,
+    chip: setup.mcuName,
+    connectUnderReset: true,
+    flashingConfig: {
+      flashingEnabled: true,
+      haltAfterReset: true,
+      formatOptions: { binaryFormat: 'elf' }
+    },
+    coreConfigs: [{
+      coreIndex: 0,
+      programBinary
+    }],
+    consoleLogLevel: 'Console'
+  });
+  if (!started) throw new Error('VS Code did not start the probe-rs debug session.');
+}
+
 async function runBoundWorkspaceAction(context, action) {
   const { binding, setup } = requireWorkspaceBinding(context);
   const channel = getOutputChannel();
@@ -566,10 +655,15 @@ async function runBoundWorkspaceAction(context, action) {
     title: `MikroBUS Rust: ${action === 'erase' ? 'Erasing' : action === 'flash' ? 'Flashing' : 'Building'} ${setup.mcuName}...`,
     cancellable: false
   }, async () => {
-    if (action === 'buildFlashCurrent') {
+    if (action === 'buildFlashCurrent' || action === 'flashCurrent') {
       await useCurrentRustFileAsMain(context);
       await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
       await executeChecked(channel, 'cargo', ['flash', '--chip', setup.mcuName, '--connect-under-reset'], binding.sdkRoot);
+      return;
+    }
+    if (action === 'buildCurrent') {
+      await useCurrentRustFileAsMain(context);
+      await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
       return;
     }
     if (action === 'build') {
@@ -588,9 +682,11 @@ async function runBoundWorkspaceAction(context, action) {
   });
 
   vscode.window.showInformationMessage(
-    action === 'buildFlashCurrent'
+    action === 'buildFlashCurrent' || action === 'flashCurrent'
       ? `${setup.mcuName}: current Rust file built and flashed successfully.`
-      : `${setup.mcuName}: ${action} completed successfully.`
+      : action === 'buildCurrent'
+        ? `${setup.mcuName}: current Rust file built successfully.`
+        : `${setup.mcuName}: ${action} completed successfully.`
   );
 }
 
@@ -753,7 +849,11 @@ async function handleMcuMessage(message, panel, context) {
   }
 
   if (message.type === 'workspaceAction' && typeof message.action === 'string') {
-    await runBoundWorkspaceAction(context, message.action);
+    if (message.action === 'debugCurrent') {
+      await debugCurrentRustFile(context);
+    } else {
+      await runBoundWorkspaceAction(context, message.action);
+    }
     void panel.webview.postMessage({ type: 'workspaceActionComplete', action: message.action });
     return;
   }
@@ -774,6 +874,7 @@ async function handleMcuMessage(message, panel, context) {
         fs.rmSync(path.join(workspaceBinding.sdkRoot, '.cargo', 'config.toml'), { force: true });
       }
       fs.rmSync(workspaceBinding.bindingPath, { force: true });
+      void updateWorkspaceContext();
     }
     removeConfiguredSetup(context, message.id);
     void panel.webview.postMessage({
@@ -948,12 +1049,15 @@ function findFileRecursively(root, fileName, predicate) {
 }
 
 function parseNumber(value) {
-  if (typeof value === 'number') return value;
-  if (typeof value !== 'string') return 0;
-  const trimmed = value.trim();
-  if (/^0x[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed.slice(2), 16);
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return 0;
+  }
+
+  return Number.parseInt(value.replace(/^0x/i, ''), 16) || 0;
 }
 
 function buildRegisterHeader(definition, selectedValues, clockMhz) {
@@ -1061,6 +1165,7 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
     const familyPinRoot = path.join(pinMappingsRoot, familyLower);
     const sdkSetup = path.join(stagingRoot, 'sdk');
     copyDirectoryRequired(path.join(familyPinRoot, 'src'), path.join(sdkSetup, 'src'));
+    normalizeRustCrateEntryPoint(sdkSetup);
 
     let familyTemplate = readRequired(path.join(familyPinRoot, 'Cargo_family_template.toml'));
     let halLlTemplate = readRequired(path.join(pinMappingsRoot, 'hal_ll_Cargo_template.toml'));
@@ -1152,6 +1257,24 @@ function copyDirectoryRequired(source, destination) {
   if (!fs.existsSync(source)) throw new Error(`Required source directory not found: ${source}`);
   fs.rmSync(destination, { recursive: true, force: true });
   fs.cpSync(source, destination, { recursive: true });
+}
+
+function normalizeRustCrateEntryPoint(crateRoot) {
+  const srcRoot = path.join(crateRoot, 'src');
+  const expected = path.join(srcRoot, 'lib.rs');
+  if (fs.existsSync(expected)) return expected;
+  if (!fs.existsSync(srcRoot)) throw new Error(`Generated Rust crate source directory is missing: ${srcRoot}`);
+
+  const caseInsensitiveMatch = fs.readdirSync(srcRoot, { withFileTypes: true })
+    .find((entry) => entry.isFile() && entry.name.toLowerCase() === 'lib.rs');
+  if (!caseInsensitiveMatch) {
+    throw new Error(`Generated Rust crate is missing src/lib.rs: ${crateRoot}`);
+  }
+
+  // Some existing core packages use "Lib.rs". Cargo requires the conventional
+  // lowercase src/lib.rs path on case-sensitive filesystems such as Linux.
+  fs.copyFileSync(path.join(srcRoot, caseInsensitiveMatch.name), expected);
+  return expected;
 }
 
 function readRequired(filePath) {
@@ -1306,9 +1429,9 @@ function getMcuHtml(webview, extensionUri) {
             <p id="workspaceBindingPath"></p>
           </div>
           <div class="workspaceActions">
-            <button id="workspaceBuild" class="secondary">Build</button>
-            <button id="workspaceFlash" class="secondary">Flash</button>
-            <button id="workspaceBuildFlash" class="primary">Build &amp; Flash current .rs</button>
+            <button id="workspaceBuild" class="secondary">Build current .rs</button>
+            <button id="workspaceFlash" class="primary">Build &amp; Flash current .rs</button>
+            <button id="workspaceDebug" class="primary">Debug current .rs (F5)</button>
             <button id="workspaceErase" class="secondary">Erase MCU</button>
           </div>
         </div>
@@ -1367,6 +1490,9 @@ module.exports = {
     removeConfiguredSetup,
     findCompatibleSdkRoot,
     resolveToolExecutable,
-    buildToolEnvironment
+    buildToolEnvironment,
+    normalizeRustCrateEntryPoint,
+    readCargoPackageName,
+    resolveBuiltProgramBinary
   }
 };

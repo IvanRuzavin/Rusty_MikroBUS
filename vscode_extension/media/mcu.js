@@ -32,9 +32,9 @@
   document.getElementById('showSetupsFromConfig').addEventListener('click', showConfiguredSetups);
   document.getElementById('backToMcus').addEventListener('click', showCatalog);
   document.getElementById('backToMcusFromSetups').addEventListener('click', showCatalog);
-  document.getElementById('workspaceBuild').addEventListener('click', () => workspaceAction('build'));
-  document.getElementById('workspaceFlash').addEventListener('click', () => workspaceAction('flash'));
-  document.getElementById('workspaceBuildFlash').addEventListener('click', () => workspaceAction('buildFlashCurrent'));
+  document.getElementById('workspaceBuild').addEventListener('click', () => workspaceAction('buildCurrent'));
+  document.getElementById('workspaceFlash').addEventListener('click', () => workspaceAction('flashCurrent'));
+  document.getElementById('workspaceDebug').addEventListener('click', () => workspaceAction('debugCurrent'));
   document.getElementById('workspaceErase').addEventListener('click', () => workspaceAction('erase'));
 
   search.addEventListener('input', filterMcuList);

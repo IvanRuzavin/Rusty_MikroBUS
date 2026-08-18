@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "setupId": "stm32f412re",
+  "mcuName": "STM32F412RE",
+  "clockMhz": 100,
+  "target": "thumbv7em-none-eabi",
+  "sdkRoot": ".",
+  "configuredAt": "2026-08-18T11:47:20.764Z",
+  "setupRoot": ".setup"
+}
