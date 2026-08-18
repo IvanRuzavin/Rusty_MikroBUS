@@ -296,3 +296,28 @@ footer {
 }
 
 .heroActions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+.actions {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.actions .secondaryAction {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.actions .secondaryAction:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.actions .dangerAction {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-panel-border));
+}
+
+.actions .dangerAction:hover:not(:disabled) {
+  color: var(--vscode-errorForeground);
+  background: var(--vscode-button-secondaryHoverBackground);
+}

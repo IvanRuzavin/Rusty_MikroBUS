@@ -1,8 +1,8 @@
 {
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Rust Tools",
-  "description": "Cross-platform Rust MikroBUS VS Code tools with MCU setup management, Linux-safe generated crates, current-file build/flash actions, and built-in probe-rs DAP debugging.",
-  "version": "0.0.9",
+  "description": "Cross-platform Rust MikroBUS VS Code tools with MCU setup management, package install/update/uninstall lifecycle controls, workspace build/flash actions, and built-in probe-rs DAP debugging.",
+  "version": "0.0.11",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -24,7 +24,8 @@
     "onCommand:mikrobusRust.eraseWorkspaceMcu",
     "onCommand:mikrobusRust.buildCurrentFile",
     "onCommand:mikrobusRust.flashCurrentFile",
-    "onCommand:mikrobusRust.debugCurrentFile"
+    "onCommand:mikrobusRust.debugCurrentFile",
+    "onDebug:mikrobus-rust-debug"
   ],
   "main": "./extension.js",
   "contributes": {

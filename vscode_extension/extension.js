@@ -8,7 +8,7 @@ const https = require('https');
 const { registerMcuConfigurator } = require('./mcu_configurator');
 
 const VERSIONS = {
-  probeRs: '0.27.0',
+  probeRs: '0.32.0',
   openocd: '0.12.0-7',
   armGcc: '14.2.1-1.1'
 };
@@ -127,6 +127,30 @@ async function handleSetupMessage(message, view, context) {
     return;
   }
 
+  if (message.type === 'update' && typeof message.id === 'string') {
+    await handleUpdateRequest(message.id, context);
+    if (setupView) {
+      postStatus(setupView, scanPackages(context), context);
+    }
+    return;
+  }
+
+  if (message.type === 'uninstall' && typeof message.id === 'string') {
+    await handleUninstallRequest(message.id, context);
+    if (setupView) {
+      postStatus(setupView, scanPackages(context), context);
+    }
+    return;
+  }
+
+  if (message.type === 'updateManagedAll') {
+    await updateAllManagedPackages(context);
+    if (setupView) {
+      postStatus(setupView, scanPackages(context), context);
+    }
+    return;
+  }
+
   if (message.type === 'openSettings') {
     await vscode.commands.executeCommand('workbench.action.openSettings', 'mikrobusRust.storageRoot');
     return;
@@ -158,12 +182,18 @@ function scanPackages(context) {
 
   return definitions.map((definition) => {
     const detected = detectPackage(definition.id, expected);
-    const action = getInstallAction(definition.id, context);
+    const installAction = getInstallAction(definition.id, context);
+    const updateAction = getUpdateAction(definition.id, context);
+    const uninstallAction = getUninstallAction(definition.id, context);
     return {
       ...definition,
       ...detected,
-      installSupported: Boolean(action),
-      installLabel: action ? action.label : 'Manual install'
+      installSupported: Boolean(installAction),
+      installLabel: installAction ? installAction.label : 'Manual install',
+      updateSupported: Boolean(updateAction),
+      updateLabel: updateAction ? updateAction.label : 'Update unavailable',
+      uninstallSupported: Boolean(uninstallAction),
+      uninstallLabel: uninstallAction ? uninstallAction.label : 'Uninstall unavailable'
     };
   });
 }
@@ -608,6 +638,117 @@ function getInstallAction(id, context) {
   return undefined;
 }
 
+function getUpdateAction(id, context) {
+  if (['openocd', 'armGcc', 'database', 'sdk', 'core'].includes(id)) {
+    return managedAction(id === 'openocd' || id === 'armGcc' ? 'Update / reinstall' : 'Update');
+  }
+
+  if (process.platform === 'win32') {
+    if (id === 'msvc') return externalAction('Update', URLS.windows.msvc);
+    if (id === 'rust') return terminalAction('Update', 'rustup update', 'MikroBUS Rust - Rust update', 'powershell.exe');
+    if (id === 'probeRs') {
+      return terminalAction(
+        'Update / reinstall',
+        `Set-ExecutionPolicy -Scope Process Bypass; irm ${URLS.probeRsPowerShell} | iex`,
+        'MikroBUS Rust - probe-rs update',
+        'powershell.exe'
+      );
+    }
+    if (id === 'stlink') return externalAction('Update', URLS.windows.stlink);
+    if (id === 'jlink') return externalAction('Update', URLS.jlink);
+  }
+
+  if (process.platform === 'linux') {
+    if (id === 'linuxBuild') {
+      const command = getLinuxPrerequisiteInstallCommand();
+      return command ? terminalAction('Update', command, 'MikroBUS Rust - prerequisites update') : undefined;
+    }
+    if (id === 'rust') return terminalAction('Update', 'rustup update', 'MikroBUS Rust - Rust update');
+    if (id === 'probeRs') {
+      return terminalAction(
+        'Update / reinstall',
+        `curl --proto '=https' --tlsv1.2 -LsSf ${URLS.probeRsShell} | sh`,
+        'MikroBUS Rust - probe-rs update'
+      );
+    }
+    if (id === 'udev') {
+      return terminalAction(
+        'Update rules',
+        `curl --proto '=https' --tlsv1.2 -LsSf ${URLS.probeRsUdev} -o /tmp/69-probe-rs.rules && sudo install -m 0644 /tmp/69-probe-rs.rules /etc/udev/rules.d/69-probe-rs.rules && sudo udevadm control --reload && sudo udevadm trigger && rm -f /tmp/69-probe-rs.rules`,
+        'MikroBUS Rust - udev update'
+      );
+    }
+    if (id === 'jlink') return externalAction('Update', URLS.jlink);
+  }
+
+  return undefined;
+}
+
+function getUninstallAction(id, context) {
+  if (['openocd', 'armGcc', 'database', 'sdk', 'core'].includes(id)) {
+    return { type: 'managed-uninstall', label: 'Uninstall' };
+  }
+
+  const expected = getExpectedPaths(context);
+  if (id === 'rust') {
+    const rustup = path.join(expected.cargoBin, process.platform === 'win32' ? 'rustup.exe' : 'rustup');
+    const command = `${quoteShellArg(fs.existsSync(rustup) ? rustup : 'rustup')} self uninstall`;
+    return terminalAction('Uninstall...', command, 'MikroBUS Rust - Rust uninstall', process.platform === 'win32' ? 'powershell.exe' : undefined);
+  }
+
+  if (id === 'probeRs') {
+    if (process.platform === 'win32') {
+      const bin = expected.cargoBin.replace(/'/g, "''");
+      return terminalAction(
+        'Uninstall...',
+        `Remove-Item -Force -ErrorAction SilentlyContinue '${bin}\\probe-rs.exe','${bin}\\cargo-flash.exe','${bin}\\cargo-embed.exe'`,
+        'MikroBUS Rust - probe-rs uninstall',
+        'powershell.exe'
+      );
+    }
+    if (process.platform === 'linux') {
+      return terminalAction(
+        'Uninstall...',
+        `rm -f ${quoteShellArg(path.join(expected.cargoBin, 'probe-rs'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-flash'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-embed'))}`,
+        'MikroBUS Rust - probe-rs uninstall'
+      );
+    }
+  }
+
+  if (id === 'udev' && process.platform === 'linux') {
+    return terminalAction(
+      'Uninstall...',
+      `sudo rm -f ${quoteShellArg(expected.udevRules)} && sudo udevadm control --reload && sudo udevadm trigger`,
+      'MikroBUS Rust - udev uninstall'
+    );
+  }
+
+  if (id === 'linuxBuild') {
+    return { type: 'guidance', label: 'Uninstall...', message: 'Linux build prerequisites are shared system packages. MikroBUS Rust will not remove them automatically because other development environments may depend on them. Remove only the packages you no longer need using your distribution package manager.' };
+  }
+
+  if (id === 'msvc' || id === 'stlink') {
+    return { type: 'system-uninstall', label: 'Uninstall...', command: 'appwiz.cpl' };
+  }
+
+  if (id === 'jlink') {
+    if (process.platform === 'win32') {
+      return { type: 'system-uninstall', label: 'Uninstall...', command: 'appwiz.cpl' };
+    }
+    return { type: 'guidance', label: 'Uninstall...', message: 'SEGGER J-Link is system-managed. Use the package/uninstaller method you used to install J-Link. MikroBUS Rust will not delete /opt/SEGGER automatically.' };
+  }
+
+  return undefined;
+}
+
+function quoteShellArg(value) {
+  const text = String(value);
+  if (process.platform === 'win32') {
+    return `"${text.replace(/"/g, '`"')}"`;
+  }
+  return `'${text.replace(/'/g, `'"'"'`)}'`;
+}
+
 function externalAction(label, url) {
   return { type: 'external', label, url };
 }
@@ -676,6 +817,169 @@ async function handleInstallRequest(id, context) {
     terminal.show(true);
     terminal.sendText(action.command, true);
     vscode.window.showInformationMessage(`Installation command started for ${definition.name}. When it finishes, click Refresh in the setup page.`);
+  }
+}
+
+async function handleUpdateRequest(id, context) {
+  const definition = getPackageDefinitions().find((item) => item.id === id);
+  if (!definition) return;
+  const action = getUpdateAction(id, context);
+  if (!action) {
+    vscode.window.showInformationMessage(`Update is not available for ${definition.name} on ${getPlatformLabel()}.`);
+    return;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    `${action.label} ${definition.name}?${definition.kind === 'managed' ? '\n\nThe package will be downloaded to staging, verified, and then replace the extension-managed installation.' : ''}`,
+    { modal: true },
+    action.label
+  );
+  if (choice !== action.label) return;
+
+  if (action.type === 'managed') {
+    try {
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Updating ${definition.name}`,
+        cancellable: true
+      }, async (progress, token) => {
+        await installManagedPackage(id, context, progress, token);
+      });
+      vscode.window.showInformationMessage(`${definition.name} updated successfully.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to update ${definition.name}: ${message}`);
+    }
+    return;
+  }
+
+  await executeLifecycleAction(action, definition, 'update');
+}
+
+async function handleUninstallRequest(id, context) {
+  const definition = getPackageDefinitions().find((item) => item.id === id);
+  if (!definition) return;
+  const action = getUninstallAction(id, context);
+  if (!action) {
+    vscode.window.showInformationMessage(`Uninstall is not available for ${definition.name} on ${getPlatformLabel()}.`);
+    return;
+  }
+
+  const expected = getExpectedPaths(context);
+  const target = expectedPathFor(id, expected);
+  const extra = definition.kind === 'managed'
+    ? '\n\nOnly the extension-managed package path will be removed. Saved MCU setup definitions are kept, but rebuilding them may require reinstalling this package.'
+    : '\n\nThis is a system-level package and may also be used by other projects.';
+  const choice = await vscode.window.showWarningMessage(
+    `Uninstall ${definition.name}?${target ? `\n\nDetected/expected location:\n${target}` : ''}${extra}`,
+    { modal: true },
+    'Uninstall'
+  );
+  if (choice !== 'Uninstall') return;
+
+  if (action.type === 'managed-uninstall') {
+    try {
+      await uninstallManagedPackage(id, context);
+      vscode.window.showInformationMessage(`${definition.name} uninstalled from the extension-managed environment.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to uninstall ${definition.name}: ${message}`);
+    }
+    return;
+  }
+
+  await executeLifecycleAction(action, definition, 'uninstall');
+}
+
+async function executeLifecycleAction(action, definition, verb) {
+  if (action.type === 'external') {
+    await vscode.env.openExternal(vscode.Uri.parse(action.url));
+    vscode.window.showInformationMessage(`Complete the ${definition.name} ${verb} externally, then click Refresh.`);
+    return;
+  }
+
+  if (action.type === 'terminal') {
+    const options = { name: action.terminalName || `MikroBUS Rust - ${definition.name}` };
+    if (action.shellPath) options.shellPath = action.shellPath;
+    const terminal = vscode.window.createTerminal(options);
+    terminal.show(true);
+    terminal.sendText(action.command, true);
+    vscode.window.showInformationMessage(`${definition.name} ${verb} command started. Click Refresh when it finishes.`);
+    return;
+  }
+
+  if (action.type === 'system-uninstall') {
+    if (process.platform === 'win32') {
+      childProcess.spawn('control.exe', [action.command], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      vscode.window.showInformationMessage(`Windows Programs and Features opened. Uninstall ${definition.name}, then click Refresh.`);
+    }
+    return;
+  }
+
+  if (action.type === 'guidance') {
+    vscode.window.showInformationMessage(action.message || `${definition.name} must be managed by the operating system.`);
+  }
+}
+
+async function uninstallManagedPackage(id, context) {
+  const expected = getExpectedPaths(context);
+  const targets = {
+    openocd: expected.openocd,
+    armGcc: expected.armGcc,
+    database: expected.database,
+    sdk: expected.sdk,
+    core: expected.core
+  };
+  const target = targets[id];
+  if (!target) throw new Error(`No managed uninstall target is defined for ${id}.`);
+
+  const resolvedTarget = path.resolve(target);
+  const resolvedRoot = path.resolve(getManagedRoot(context));
+  if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`Refusing to remove a path outside the extension-managed root: ${resolvedTarget}`);
+  }
+  await fs.promises.rm(resolvedTarget, { recursive: true, force: true });
+}
+
+async function updateAllManagedPackages(context) {
+  const installed = scanPackages(context).filter((item) => item.kind === 'managed' && item.status === 'installed' && item.updateSupported);
+  if (installed.length === 0) {
+    vscode.window.showInformationMessage('No installed extension-managed packages are available to update.');
+    return;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    `Update all ${installed.length} installed extension-managed packages?\n\n${installed.map((item) => `• ${item.name}`).join('\n')}`,
+    { modal: true },
+    'Update all'
+  );
+  if (choice !== 'Update all') return;
+
+  const failures = [];
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: 'Updating MikroBUS Rust environment',
+    cancellable: true
+  }, async (progress, token) => {
+    for (let index = 0; index < installed.length; index += 1) {
+      if (token.isCancellationRequested) break;
+      const item = installed[index];
+      progress.report({ message: `${index + 1}/${installed.length}: ${item.name}` });
+      try {
+        await installManagedPackage(item.id, context, progress, token);
+      } catch (error) {
+        failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  });
+
+  if (failures.length > 0) {
+    vscode.window.showWarningMessage(`Environment update finished with ${failures.length} failure(s). See Output for details.`);
+    const output = vscode.window.createOutputChannel('MikroBUS Rust Environment');
+    output.appendLine(failures.join('\n'));
+    output.show(true);
+  } else {
+    vscode.window.showInformationMessage('All installed extension-managed packages were updated successfully.');
   }
 }
 
@@ -772,8 +1076,20 @@ async function installDatabase(expected, tempRoot, progress, token) {
   }
 
   await fs.promises.mkdir(path.dirname(expected.database), { recursive: true });
-  await fs.promises.rm(expected.database, { force: true });
-  await fs.promises.rename(downloaded, expected.database);
+  const backup = `${expected.database}.mikrobus-backup-${Date.now()}`;
+  const hadDatabase = fs.existsSync(expected.database);
+  if (hadDatabase) {
+    await fs.promises.rename(expected.database, backup);
+  }
+  try {
+    await fs.promises.rename(downloaded, expected.database);
+    if (hadDatabase) await fs.promises.rm(backup, { force: true });
+  } catch (error) {
+    if (hadDatabase && fs.existsSync(backup)) {
+      await fs.promises.rename(backup, expected.database).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 async function installRustyArchive(id, expected, tempRoot, progress, token) {
@@ -1044,14 +1360,31 @@ async function replaceDirectory(source, target) {
     throw new Error(`Cannot install from an empty directory: ${source}`);
   }
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
-  await fs.promises.rm(target, { recursive: true, force: true });
+  const backup = `${target}.mikrobus-backup-${Date.now()}`;
+  const hadTarget = fs.existsSync(target);
+
+  if (hadTarget) {
+    await fs.promises.rename(target, backup);
+  }
+
   try {
-    await fs.promises.rename(source, target);
+    try {
+      await fs.promises.rename(source, target);
+    } catch (error) {
+      if (error && error.code === 'EXDEV') {
+        await fs.promises.cp(source, target, { recursive: true, force: true });
+        await fs.promises.rm(source, { recursive: true, force: true });
+      } else {
+        throw error;
+      }
+    }
+    if (hadTarget) {
+      await fs.promises.rm(backup, { recursive: true, force: true });
+    }
   } catch (error) {
-    if (error && error.code === 'EXDEV') {
-      await fs.promises.cp(source, target, { recursive: true, force: true });
-      await fs.promises.rm(source, { recursive: true, force: true });
-      return;
+    await fs.promises.rm(target, { recursive: true, force: true }).catch(() => {});
+    if (hadTarget && fs.existsSync(backup)) {
+      await fs.promises.rename(backup, target).catch(() => {});
     }
     throw error;
   }
@@ -1325,7 +1658,7 @@ function getSetupHtml(webview, extensionUri) {
         <h1>Development environment setup</h1>
         <p class="subtitle">The extension detects the current host platform and checks the packages required by the Rust MikroBUS workflow.</p>
       </div>
-      <div class="heroActions"><button id="configureMcu" class="secondary">Configure MCU</button><button id="refresh" class="secondary">Refresh</button></div>
+      <div class="heroActions"><button id="configureMcu" class="secondary">Configure MCU</button><button id="updateManaged" class="secondary">Update managed</button><button id="refresh" class="secondary">Refresh</button></div>
     </header>
 
     <section class="summary" aria-live="polite">
@@ -1339,7 +1672,7 @@ function getSetupHtml(webview, extensionUri) {
     <section id="packageGrid" class="grid" aria-label="Package status"></section>
 
     <footer>
-      <p>System packages use the host-specific installer or an integrated terminal command. OpenOCD, ARM GCC, database, SDK and core are downloaded, extracted and installed automatically into the extension-managed root.</p>
+      <p>Installed packages now expose update and uninstall actions. OpenOCD, ARM GCC, database, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

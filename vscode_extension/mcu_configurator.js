@@ -3,9 +3,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const childProcess = require('child_process');
+const net = require('net');
 
 let mcuPanel;
 let outputChannel;
+const debugServerProcesses = new Map();
+const debugOwnedBreakpoints = new Map();
+let pendingDebugLaunch;
 
 function getManagedRoot(context) {
   const configured = vscode.workspace.getConfiguration('mikrobusRust').get('storageRoot', '').trim();
@@ -195,14 +199,79 @@ function registerMcuConfigurator(context) {
       await runBoundWorkspaceAction(context, 'erase');
     }),
     vscode.debug.registerDebugAdapterDescriptorFactory('mikrobus-rust-debug', {
-      createDebugAdapterDescriptor(session) {
+      async createDebugAdapterDescriptor(session) {
         const probeRsExecutable = resolveToolExecutable('probe-rs');
-        const cwd = session.workspaceFolder?.uri?.fsPath || process.cwd();
-        return new vscode.DebugAdapterExecutable(
+        const cwd = session.configuration.cwd || session.workspaceFolder?.uri?.fsPath || process.cwd();
+        const port = await findAvailableDebugPort();
+        const channel = getOutputChannel();
+        channel.appendLine(`Starting probe-rs DAP server on 127.0.0.1:${port}`);
+        channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+
+        const child = childProcess.spawn(
           probeRsExecutable,
-          ['dap-server'],
-          { cwd, env: buildToolEnvironment(probeRsExecutable) }
+          ['dap-server', '--port', String(port)],
+          {
+            cwd,
+            shell: false,
+            windowsHide: true,
+            env: buildToolEnvironment(probeRsExecutable)
+          }
         );
+        debugServerProcesses.set(session.id, child);
+        child.stdout.on('data', (data) => channel.append(`[probe-rs] ${data.toString()}`));
+        child.stderr.on('data', (data) => channel.append(`[probe-rs] ${data.toString()}`));
+        child.on('error', (error) => channel.appendLine(`[probe-rs] failed to start: ${error.message}`));
+        child.on('close', (code) => {
+          channel.appendLine(`[probe-rs] DAP server exited with code ${code ?? -1}`);
+          debugServerProcesses.delete(session.id);
+        });
+
+        try {
+          await waitForDebugServer(port, child, 7000);
+        } catch (error) {
+          stopDebugServerProcess(session.id);
+          throw error;
+        }
+        return new vscode.DebugAdapterServer(port, '127.0.0.1');
+      }
+    }),
+    vscode.debug.onDidStartDebugSession((session) => {
+      if (session.type !== 'mikrobus-rust-debug' || !pendingDebugLaunch) return;
+      const pending = pendingDebugLaunch;
+      pendingDebugLaunch = undefined;
+      if (pending.ownedBreakpoint) {
+        debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
+      }
+    }),
+    vscode.debug.registerDebugAdapterTrackerFactory('mikrobus-rust-debug', {
+      createDebugAdapterTracker(session) {
+        let configurationDoneRequestSeq;
+        return {
+          onWillReceiveMessage(message) {
+            if (message?.type === 'request' && message.command === 'configurationDone') {
+              configurationDoneRequestSeq = message.seq;
+            }
+          },
+          onDidSendMessage(message) {
+            if (
+              configurationDoneRequestSeq !== undefined &&
+              message?.type === 'response' &&
+              message.request_seq === configurationDoneRequestSeq &&
+              message.success !== false
+            ) {
+              configurationDoneRequestSeq = undefined;
+              void continueFromResetToEntry(session);
+            }
+          }
+        };
+      }
+    }),
+    vscode.debug.onDidTerminateDebugSession((session) => {
+      stopDebugServerProcess(session.id);
+      const breakpoint = debugOwnedBreakpoints.get(session.id);
+      if (breakpoint) {
+        vscode.debug.removeBreakpoints([breakpoint]);
+        debugOwnedBreakpoints.delete(session.id);
       }
     })
   );
@@ -608,6 +677,169 @@ function resolveBuiltProgramBinary(binding, setup) {
   throw new Error(`Cargo build completed, but the debug ELF was not found. Expected one of: ${candidates.join(', ')}`);
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function findAvailableDebugPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = address && typeof address === 'object' ? address.port : undefined;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (!port) reject(new Error('Could not allocate a local DAP TCP port.'));
+        else resolve(port);
+      });
+    });
+  });
+}
+
+async function waitForDebugServer(port, child, timeoutMs) {
+  // Do not probe the DAP port by opening a socket here: older probe-rs
+  // versions accept a single DAP client, so a readiness connection can steal
+  // the session from VS Code. Give the child a short startup window instead
+  // and fail early if it exits.
+  const startupWindow = Math.min(timeoutMs, 500);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < startupWindow) {
+    if (child.exitCode !== null) {
+      throw new Error(`probe-rs dap-server exited before VS Code could connect (exit code ${child.exitCode}).`);
+    }
+    await delay(50);
+  }
+  if (child.exitCode !== null) {
+    throw new Error(`probe-rs dap-server exited before VS Code could connect (exit code ${child.exitCode}).`);
+  }
+}
+
+function stopDebugServerProcess(sessionId) {
+  const child = debugServerProcesses.get(sessionId);
+  if (!child) return;
+  debugServerProcesses.delete(sessionId);
+  try {
+    if (!child.killed) child.kill();
+  } catch {
+    // The process may already be gone.
+  }
+}
+
+function cargoTomlString(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function debugBinName() {
+  return 'mikrobus_debug_current';
+}
+
+function resolveBuiltNamedBinary(binding, setup, binName) {
+  const candidates = [
+    setup.target ? path.join(binding.sdkRoot, 'target', setup.target, 'debug', binName) : undefined,
+    setup.target ? path.join(binding.sdkRoot, 'target', setup.target, 'debug', `${binName}.exe`) : undefined,
+    path.join(binding.sdkRoot, 'target', 'debug', binName),
+    path.join(binding.sdkRoot, 'target', 'debug', `${binName}.exe`)
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (found) return found;
+  throw new Error(`Cargo build completed, but the debug ELF was not found. Expected one of: ${candidates.join(', ')}`);
+}
+
+async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
+  if (!isPathWithin(binding.sdkRoot, source)) {
+    throw new Error(`The active Rust file is outside the bound SDK root: ${binding.sdkRoot}`);
+  }
+  const cargoToml = path.join(binding.sdkRoot, 'Cargo.toml');
+  const original = readRequired(cargoToml);
+  const relativeSource = path.relative(binding.sdkRoot, source).split(path.sep).join('/');
+  const binName = debugBinName();
+  const startMarker = '# --- MIKROBUS RUST TEMP DEBUG TARGET BEGIN ---';
+  const endMarker = '# --- MIKROBUS RUST TEMP DEBUG TARGET END ---';
+  const markerPattern = new RegExp(`\\n?${startMarker.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}[\\s\\S]*?${endMarker.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\n?`, 'g');
+  const cleanManifest = original.replace(markerPattern, '\n').trimEnd();
+  const temporaryTarget = [
+    '', '', startMarker,
+    '[[bin]]',
+    `name = ${cargoTomlString(binName)}`,
+    `path = ${cargoTomlString(relativeSource)}`,
+    endMarker, ''
+  ].join('\n');
+
+  fs.writeFileSync(cargoToml, `${cleanManifest}${temporaryTarget}`, 'utf8');
+  try {
+    await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
+    return { programBinary: resolveBuiltNamedBinary(binding, setup, binName), binName };
+  } finally {
+    fs.writeFileSync(cargoToml, `${cleanManifest}\n`, 'utf8');
+  }
+}
+
+function findMainEntryLine(sourceText) {
+  const lines = sourceText.split(/\r?\n/);
+  let mainLine = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/\bfn\s+main\s*\(/.test(lines[i])) {
+      mainLine = i;
+      break;
+    }
+  }
+  if (mainLine < 0) return 0;
+  for (let i = mainLine + 1; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue;
+    if (trimmed === '{' || trimmed === '}') continue;
+    return i;
+  }
+  return mainLine;
+}
+
+function sameFilePath(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function ensureEntryBreakpoint(source) {
+  const line = findMainEntryLine(readRequired(source));
+  for (const breakpoint of vscode.debug.breakpoints) {
+    if (!(breakpoint instanceof vscode.SourceBreakpoint)) continue;
+    if (!sameFilePath(breakpoint.location.uri.fsPath, source)) continue;
+    if (breakpoint.location.range.start.line === line) {
+      return { breakpoint, line, owned: false };
+    }
+  }
+  const location = new vscode.Location(vscode.Uri.file(source), new vscode.Position(line, 0));
+  const breakpoint = new vscode.SourceBreakpoint(location, true);
+  vscode.debug.addBreakpoints([breakpoint]);
+  return { breakpoint, line, owned: true };
+}
+
+async function continueFromResetToEntry(session) {
+  const channel = getOutputChannel();
+  // haltAfterReset keeps the core safe while VS Code sends source breakpoints.
+  // Once the adapter reports a stopped thread, continue so execution lands on
+  // the temporary first-line breakpoint (or an earlier user breakpoint).
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const threadsResponse = await session.customRequest('threads');
+      const threadId = threadsResponse?.threads?.[0]?.id;
+      if (threadId !== undefined) {
+        await session.customRequest('stackTrace', { threadId, startFrame: 0, levels: 1 });
+        await delay(350);
+        await session.customRequest('continue', { threadId });
+        channel.appendLine('Debugger continued from reset; waiting for the first source breakpoint.');
+        return;
+      }
+    } catch {
+      // The launch/configuration handshake is still in progress.
+    }
+    await delay(100);
+  }
+  channel.appendLine('Debugger stayed halted after reset. Press Continue once to run to the first source breakpoint.');
+}
+
 async function debugCurrentRustFile(context) {
   const { binding, setup } = requireWorkspaceBinding(context);
   const channel = getOutputChannel();
@@ -615,12 +847,22 @@ async function debugCurrentRustFile(context) {
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz · Debug current Rust file ===`);
   channel.appendLine(`SDK root: ${binding.sdkRoot}`);
 
-  await useCurrentRustFileAsMain(context);
-  await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
-  const programBinary = resolveBuiltProgramBinary(binding, setup);
+  const source = getActiveRustSource(binding);
+  const editor = vscode.window.activeTextEditor;
+  if (editor) await editor.document.save();
+
+  const { programBinary } = await buildCurrentRustSourceForDebug(binding, setup, source, channel);
   const probeRsExecutable = resolveToolExecutable('probe-rs');
+  const entry = ensureEntryBreakpoint(source);
+  channel.appendLine(`Debug source: ${source}`);
   channel.appendLine(`Debug ELF: ${programBinary}`);
   channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+  channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
+
+  pendingDebugLaunch = {
+    source,
+    ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
+  };
 
   const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
     type: 'mikrobus-rust-debug',
@@ -640,7 +882,11 @@ async function debugCurrentRustFile(context) {
     }],
     consoleLogLevel: 'Console'
   });
-  if (!started) throw new Error('VS Code did not start the probe-rs debug session.');
+  if (!started) {
+    pendingDebugLaunch = undefined;
+    if (entry.owned) vscode.debug.removeBreakpoints([entry.breakpoint]);
+    throw new Error('VS Code did not start the probe-rs debug session.');
+  }
 }
 
 async function runBoundWorkspaceAction(context, action) {
@@ -1049,15 +1295,14 @@ function findFileRecursively(root, fileName, predicate) {
 }
 
 function parseNumber(value) {
-  if (typeof value === 'number') {
-    return value;
-  }
-
-  if (typeof value !== 'string') {
-    return 0;
-  }
-
-  return Number.parseInt(value.replace(/^0x/i, ''), 16) || 0;
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'string') return 0;
+  const trimmed = value.trim();
+  if (/^0x[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed.slice(2), 16);
+  // MCU definition JSON stores register values as bare hexadecimal strings
+  // (for example "01000000" for RCC_CR.PLLON), not decimal strings.
+  if (/^[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed, 16);
+  return 0;
 }
 
 function buildRegisterHeader(definition, selectedValues, clockMhz) {

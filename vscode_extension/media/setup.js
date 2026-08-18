@@ -11,6 +11,10 @@
     vscode.postMessage({ type: 'refresh' });
   });
 
+  document.getElementById('updateManaged').addEventListener('click', () => {
+    vscode.postMessage({ type: 'updateManagedAll' });
+  });
+
   document.getElementById('configureMcu').addEventListener('click', () => {
     vscode.postMessage({ type: 'configureMcu' });
   });
@@ -20,11 +24,22 @@
   });
 
   grid.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-install]');
-    if (!button) {
+    const install = event.target.closest('button[data-install]');
+    if (install) {
+      vscode.postMessage({ type: 'install', id: install.dataset.install });
       return;
     }
-    vscode.postMessage({ type: 'install', id: button.dataset.install });
+
+    const update = event.target.closest('button[data-update]');
+    if (update) {
+      vscode.postMessage({ type: 'update', id: update.dataset.update });
+      return;
+    }
+
+    const uninstall = event.target.closest('button[data-uninstall]');
+    if (uninstall) {
+      vscode.postMessage({ type: 'uninstall', id: uninstall.dataset.uninstall });
+    }
   });
 
   window.addEventListener('message', (event) => {
@@ -106,19 +121,30 @@
 
     const actions = document.createElement('div');
     actions.className = 'actions';
-    const button = document.createElement('button');
-    button.dataset.install = item.id;
-    button.disabled = item.status === 'installed' || !item.installSupported;
-    if (item.status === 'installed') {
-      button.textContent = 'Installed';
-    } else if (item.installSupported) {
-      button.textContent = item.installLabel || 'Install';
-    } else {
-      button.textContent = 'Manual install';
-    }
-    actions.append(button);
-    article.append(actions);
 
+    if (item.status === 'installed') {
+      const update = document.createElement('button');
+      update.className = 'secondaryAction';
+      update.dataset.update = item.id;
+      update.disabled = !item.updateSupported;
+      update.textContent = item.updateSupported ? (item.updateLabel || 'Update') : 'Update unavailable';
+      actions.append(update);
+
+      const uninstall = document.createElement('button');
+      uninstall.className = 'dangerAction';
+      uninstall.dataset.uninstall = item.id;
+      uninstall.disabled = !item.uninstallSupported;
+      uninstall.textContent = item.uninstallSupported ? (item.uninstallLabel || 'Uninstall') : 'Uninstall unavailable';
+      actions.append(uninstall);
+    } else {
+      const install = document.createElement('button');
+      install.dataset.install = item.id;
+      install.disabled = !item.installSupported;
+      install.textContent = item.installSupported ? (item.installLabel || 'Install') : 'Manual install';
+      actions.append(install);
+    }
+
+    article.append(actions);
     return article;
   }
 

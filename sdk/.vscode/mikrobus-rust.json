@@ -5,6 +5,6 @@
   "clockMhz": 100,
   "target": "thumbv7em-none-eabi",
   "sdkRoot": ".",
-  "configuredAt": "2026-08-18T11:47:20.764Z",
+  "configuredAt": "2026-08-18T12:19:15.702Z",
   "setupRoot": ".setup"
 }
