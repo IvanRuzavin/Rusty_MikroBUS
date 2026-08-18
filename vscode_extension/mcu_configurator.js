@@ -891,6 +891,16 @@ async function debugCurrentRustFile(context) {
 
 async function runBoundWorkspaceAction(context, action) {
   const { binding, setup } = requireWorkspaceBinding(context);
+
+  if (action === 'erase') {
+    const confirmation = await vscode.window.showWarningMessage(
+      `Erase all flash memory on ${setup.mcuName}?`,
+      { modal: true, detail: `Workspace: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\n\nThis will erase the MCU flash through probe-rs. The configured setup itself will not be removed.` },
+      'Erase MCU'
+    );
+    if (confirmation !== 'Erase MCU') return;
+  }
+
   const channel = getOutputChannel();
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz ===`);
