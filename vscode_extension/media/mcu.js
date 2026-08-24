@@ -328,7 +328,7 @@
       const actionsCell = document.createElement('td');
       actionsCell.className = 'actionsCell';
       actionsCell.append(
-        actionButton(usedHere ? 'Re-apply to workspace' : 'Use with workspace', () => {
+        actionButton(usedHere ? 'Re-apply to workspace' : 'Apply to workspace', () => {
           setSetupsStatus(`Applying ${setup.mcuName} to current Rust workspace...`);
           vscode.postMessage({ type: 'useSetupWithWorkspace', id: setup.id });
         }, usedHere ? 'primaryAction' : ''),
@@ -355,7 +355,7 @@
     }
     card.classList.remove('hidden');
     document.getElementById('workspaceBindingTitle').textContent = `${state.workspaceBinding.mcuName} · ${state.workspaceBinding.clockMhz} MHz`;
-    document.getElementById('workspaceBindingPath').textContent = `SDK: ${state.workspaceBinding.sdkRoot || '—'} · Workspace: ${state.workspaceBinding.openedRoot || state.workspaceBinding.workspaceName || '—'}`;
+    document.getElementById('workspaceBindingPath').textContent = `Reusable setup: ${state.workspaceBinding.sdkRoot || '—'} · Project: ${state.workspaceBinding.openedRoot || state.workspaceBinding.workspaceName || '—'}`;
   }
 
   function workspaceAction(action) {

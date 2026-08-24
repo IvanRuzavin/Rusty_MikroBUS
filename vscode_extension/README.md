@@ -4,6 +4,17 @@
 >
 > The extension brings the NECTO Studio / mikroSDK-style MCU configuration workflow into Visual Studio Code: install and maintain the development environment, select an MCU from a database, configure clock/register settings, generate MCU-specific Rust setup files, save reusable setups, bind a setup to a Rust workspace, and build, flash, erase, and debug the currently opened Rust application.
 
+## Version 0.0.15 highlights
+
+- Saved MCU configurations now contain a complete reusable build workspace: Cargo metadata, DRV, HAL, target/LL layers, generated pin mappings, selected core, startup, linker script, MCU header, and clock setup.
+- A setup can be applied to a normal source folder containing `main.rs`; the project no longer needs a copy of the SDK tree.
+- Build, flash, and debug compile the active Rust source directly through the reusable setup, preserving the original source path for diagnostics and breakpoints.
+- The debug toolbar now includes extension-owned **Step Out** (`Shift+F11`) and **Restart Debugger** (`Ctrl+Shift+F5`) controls. Restart first uses the probe-rs DAP restart request and automatically relaunches the same configuration if the adapter rejects it.
+- On Windows, probe-rs DAP now runs directly over stdin/stdout instead of a temporary localhost TCP port, avoiding the port race and firewall dependency in the previous launch path.
+- Whenever execution stops, all local/static/global scopes exposed by probe-rs are printed to the Debug Console. The same dump can be requested from the debug toolbar with **Print Variables to Debug Console**.
+- `examples/ips_display_2/` now uses the supplied Nucleo-F412ZG mikroBUS 1 mapping.
+- `examples/oled_c/` contains a complete SSD1351-based OLED C Click Rust driver and demo for the same mikroBUS 1 socket.
+
 ---
 
 ## Table of contents
@@ -86,9 +97,9 @@ The extension has two main user interfaces:
 
 # What the extension is trying to achieve
 
-The long-term project model is intentionally small.
+The project model is intentionally small.
 
-A user application should eventually be able to look approximately like this:
+A user application can look approximately like this:
 
 ```text
 blink/
@@ -184,7 +195,7 @@ This distinction is important because several packages are installed, but not al
 | Rust target manager | **rustup** | `rustup target add <target>` when a setup is generated |
 | Primary programmer | **probe-rs tools / cargo-flash** | `cargo flash --chip <MCU> --connect-under-reset` |
 | Flash erase | **probe-rs** | `probe-rs erase --chip <MCU>` |
-| Primary debugger | **probe-rs DAP server** | `probe-rs dap-server --port <port>` connected directly to VS Code DAP |
+| Primary debugger | **probe-rs DAP server** | stdin/stdout DAP on Windows; localhost TCP DAP on Linux/macOS |
 | USB probe support | **ST-Link / J-Link / CMSIS-DAP through probe-rs** | probe-rs communicates with the physical probe; Linux uses udev rules |
 | Rust SDK | **Rusty_MikroBUS `sdk.7z`** | Permanent shared HAL/DRV/targets/application package structure |
 | MCU core | **Rusty_MikroBUS `core.7z`** | MCU JSON definitions, memory files, startup, system initialization, pin mappings, headers |
@@ -1182,7 +1193,16 @@ Generated configurations are saved under:
 ```text
 <managed-root>/configured-setups/
 ├── setups.json
-└── active.json
+├── active.json
+└── workspaces/
+    └── <setup-id>/
+        ├── Cargo.toml
+        ├── .cargo/config.toml
+        ├── .setup/
+        ├── drv/
+        ├── hal/
+        ├── platform/
+        └── targets/
 ```
 
 ## `setups.json`
@@ -1198,6 +1218,8 @@ A saved setup contains information similar to:
   "target": "thumbv7em-none-eabi",
   "systemLib": "system_stm32f_4xx",
   "clockMhz": 100,
+  "sdkRoot": "workspaces/stm32f412re",
+  "artifactVersion": 1,
   "values": {
     "0:0": "00000001",
     "0:4": "01000000"
@@ -1230,7 +1252,7 @@ Reconfiguring the same MCU updates the existing record rather than automatically
 
 Each configured setup exposes:
 
-- **Use with workspace**
+- **Apply to workspace**
 - **Edit clock/settings**
 - **Rebuild**
 - **Remove**
@@ -1260,16 +1282,15 @@ The extension supports a workspace-binding model.
 A setup can be selected from **Configured Setups** and applied using:
 
 ```text
-Use with workspace
+Apply to workspace
 ```
 
 The extension then:
 
-1. resolves the Rust SDK backend;
-2. rebuilds the selected MCU setup against that SDK;
-3. creates a workspace binding;
-4. updates Rust Analyzer configuration;
-5. exposes Build / Flash / Debug / Erase actions for Rust editors.
+1. resolves the setup's complete extension-managed build workspace;
+2. creates a lightweight binding in the source workspace;
+3. updates Rust Analyzer to use the reusable setup manifest and target;
+4. exposes Build / Flash / Debug / Erase actions for the active Rust source.
 
 The binding is stored in:
 
@@ -1287,8 +1308,6 @@ A binding contains data similar to:
   "clockMhz": 100,
   "target": "thumbv7em-none-eabi",
   "sdkRoot": "...",
-  "projectRoot": ".",
-  "standaloneProject": true,
   "configuredAt": "...",
   "setupRoot": "..."
 }
@@ -1298,56 +1317,20 @@ A binding contains data similar to:
 
 # Standalone/minimal Rust projects
 
-The current development implementation supports two workspace models.
-
-## Mode A — SDK tree opened directly
-
-This is compatible with the original PyQt-style workflow.
-
-Examples:
-
-```text
-Rusty_MikroBUS/sdk
-```
-
-or:
-
-```text
-Rusty_MikroBUS/sdk/tests
-```
-
-The extension walks upward looking for an SDK root containing:
-
-```text
-Cargo.toml
-.cargo/template_config.toml
-targets/
-```
-
-When found, that SDK tree becomes the build backend.
-
-## Mode B — standalone application workspace
-
-If the opened folder is not an SDK tree, the extension can use:
-
-```text
-<managed-root>/sdk
-```
-
-as the build backend.
-
-The application source remains in the user's workspace.
+Every configured MCU setup owns an independent complete SDK build workspace. The user's application source remains in the normal project folder.
 
 Conceptually:
 
 ```text
 my-blink-project/
-└── gpio.rs
+├── .vscode/
+│   └── mikrobus-rust.json
+└── main.rs
 
           uses
            |
            v
-<managed-root>/sdk/
+<managed-root>/configured-setups/workspaces/stm32f412re/
 ├── hal/
 ├── drv/
 ├── targets/
@@ -1355,23 +1338,7 @@ my-blink-project/
 └── Cargo.toml
 ```
 
-This is the architecture intended to support very small MCU projects without copying a 1 GB SDK/core tree into every project.
-
-### Current standalone build behavior
-
-For normal Build/Flash-current-file actions, the active `.rs` file is copied to:
-
-```text
-<bound-sdk>/src/main.rs
-```
-
-and Cargo is run from the SDK backend.
-
-Therefore the standalone project's own `Cargo.toml` is not yet the authoritative build manifest for the mikroSDK build path.
-
-### Current standalone debug behavior
-
-Debug is better isolated: the opened `.rs` file is compiled directly as a temporary Cargo binary target so DWARF points to the original source file. This is required for correct VS Code breakpoint mapping.
+Build, flash, and debug temporarily register the active `.rs` file as a Cargo binary target in that reusable setup. The manifest is restored immediately after the operation. The source is not copied, so compiler diagnostics and DWARF breakpoint paths continue to identify the file open in VS Code.
 
 ---
 
@@ -1397,8 +1364,8 @@ The command:
 
 1. requires a workspace binding;
 2. saves the active Rust file;
-3. verifies that the file is inside the allowed project root;
-4. copies the file to the bound SDK's `src/main.rs`;
+3. verifies that the file is inside the bound source workspace;
+4. registers it temporarily as `mikrobus_current` in the reusable setup;
 5. resolves Cargo;
 6. runs:
 
@@ -1536,29 +1503,33 @@ MikroBUS Rust (probe-rs)
 
 ## Why the debugger uses probe-rs DAP directly
 
-The extension starts:
+On Windows, the extension launches:
+
+```bash
+probe-rs dap-server
+```
+
+through a VS Code `DebugAdapterExecutable`. DAP messages travel over the child process stdin/stdout, so Windows does not need a temporary localhost port or a firewall exception.
+
+On Linux and macOS, the extension retains the existing launch:
 
 ```bash
 probe-rs dap-server --port <free-local-port>
 ```
 
-It then returns a VS Code `DebugAdapterServer` pointing at:
+and returns a VS Code `DebugAdapterServer` pointing at:
 
 ```text
 127.0.0.1:<port>
 ```
 
-This is a TCP DAP connection.
+This is a TCP DAP connection on non-Windows hosts.
 
 The extension does not need a second third-party VS Code debugger extension for this path.
 
 ## Debugging the current `.rs` file directly
 
-Build/Flash-current-file copies the source to `src/main.rs`.
-
-That is not suitable for source-level breakpoint mapping because DWARF would identify `src/main.rs`, not the original file the user is editing.
-
-For F5, the extension therefore temporarily adds a Cargo binary target to the SDK Cargo manifest:
+For F5, the extension temporarily adds the active source as a Cargo binary target to the reusable setup manifest:
 
 ```toml
 # temporary, inserted only for the debug build
@@ -1652,6 +1623,14 @@ BREAKPOINTS
 
 plus the standard debug toolbar for continue/step/restart/stop where supported by the adapter/target.
 
+After every `stopped` DAP event, the extension also prints all non-register variable scopes exposed by probe-rs into the Debug Console. It includes locals from the active call stack and prints static/global scopes once. Arrays, structures, references, and other child values are recursively expanded within the configured safety limits. Variables removed by Rust/LLVM optimization or not exposed by the debug adapter cannot be recovered by the extension.
+
+The extension also contributes direct controls for these operations:
+
+- **MikroBUS Rust: Step Out** sends a DAP `stepOut` request for the active probe-rs thread.
+- **MikroBUS Rust: Restart Debugger** sends a DAP `restart` request. If restart is rejected, the extension stops and relaunches the same configuration automatically.
+- **MikroBUS Rust: Print Variables to Debug Console** requests the same variable dump manually while execution is paused.
+
 ---
 
 # Keyboard shortcuts and editor actions
@@ -1675,6 +1654,9 @@ MikroBUS Rust contributes editor-title actions.
 | Build current `.rs` | `Ctrl+Shift+B` | `MikroBUS Rust: Build Current Rust File` |
 | Build + flash current `.rs` | `Ctrl+F5` | `MikroBUS Rust: Build & Flash Current Rust File` |
 | Debug current `.rs` | `F5` | `MikroBUS Rust: Debug Current Rust File` |
+| Step out of function | `Shift+F11` | `MikroBUS Rust: Step Out` |
+| Restart debugger | `Ctrl+Shift+F5` | `MikroBUS Rust: Restart Debugger` |
+| Print paused variables | Command/debug toolbar | `MikroBUS Rust: Print Variables to Debug Console` |
 | Erase MCU | toolbar button | `MikroBUS Rust: Erase Configured MCU` |
 
 These keybindings are scoped to a bound Rust workspace so the extension does not globally replace F5/Ctrl+F5 behavior in unrelated files.
@@ -1708,7 +1690,7 @@ This is particularly useful when only an SDK tests folder or a standalone source
 
 # Supported devices
 
-The following **36 devices are currently marked as supported for this extension workflow**.
+The following **37 devices are currently marked as supported for this extension workflow**.
 
 The Rust target and system library values shown below come from the current MikroBUS Rust database schema used by the extension.
 
@@ -1718,9 +1700,9 @@ The Rust target and system library values shown below come from the current Mikr
 |---|---:|---|
 | STM32F2 | 2 | `thumbv7m-none-eabi` |
 | STM32L1 | 1 | `thumbv7m-none-eabi` |
-| STM32F4 | 28 | `thumbv7em-none-eabi` |
+| STM32F4 | 29 | `thumbv7em-none-eabi` |
 | STM32F7 | 5 | `thumbv7em-none-eabi` |
-| **Total** | **36** | — |
+| **Total** | **37** | — |
 
 ## Detailed supported-device table
 
@@ -1729,6 +1711,7 @@ The Rust target and system library values shown below come from the current Mikr
 | ✅ | STM32F479II | F4 | `thumbv7em-none-eabi` | `system_stm32f_4hs` |
 | ✅ | STM32F429ZI | F4 | `thumbv7em-none-eabi` | `system_stm32f_4hs` |
 | ✅ | STM32F412RE | F4 | `thumbv7em-none-eabi` | `system_stm32f_4xx` |
+| ✅ | STM32F412ZG | F4 | `thumbv7em-none-eabi` | `system_stm32f_4xx` |
 | ✅ | STM32F405ZG | F4 | `thumbv7em-none-eabi` | `system_stm32f_4xx` |
 | ✅ | STM32F217ZG | F2 | `thumbv7m-none-eabi` | `system_stm32f_2xx` |
 | ✅ | STM32L152RE | L1 | `thumbv7m-none-eabi` | `system_stm32l_1xx` |
@@ -1837,6 +1820,19 @@ The resolved executable directory and Cargo bin directories are prepended to the
 
 This avoids the common VS Code desktop-launch problem where Rust was installed but `~/.cargo/bin` was not present in the extension host's inherited PATH.
 
+## Debug Console variable dump settings
+
+The variable dump is enabled by default and can be adjusted with:
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `mikrobusRust.dumpVariablesOnStop` | `true` | Print variables after every debugger stop. |
+| `mikrobusRust.variableDumpMaxDepth` | `5` | Maximum recursive child depth (`0` prints only top-level values). |
+| `mikrobusRust.variableDumpMaxEntries` | `5000` | Maximum values printed by one dump. |
+| `mikrobusRust.variableDumpMaxValueLength` | `512` | Maximum characters printed for each name, type, or value. |
+
+Set `mikrobusRust.dumpVariablesOnStop` to `false` to disable automatic output while retaining the manual debug-toolbar command.
+
 ---
 
 # Commands contributed by the extension
@@ -1846,7 +1842,7 @@ The extension currently contributes commands including:
 ```text
 MikroBUS Rust: Open Setup
 MikroBUS Rust: Configure MCU
-MikroBUS Rust: Use Setup with Current Workspace
+MikroBUS Rust: Apply Setup to Current Workspace
 MikroBUS Rust: Use Current Rust File as main.rs
 MikroBUS Rust: Build Current Project
 MikroBUS Rust: Flash Current Project
@@ -1854,6 +1850,9 @@ MikroBUS Rust: Build & Flash Current Rust File
 MikroBUS Rust: Erase Configured MCU
 MikroBUS Rust: Build Current Rust File
 MikroBUS Rust: Debug Current Rust File
+MikroBUS Rust: Step Out
+MikroBUS Rust: Restart Debugger
+MikroBUS Rust: Print Variables to Debug Console
 ```
 
 These can be found in the VS Code Command Palette.
@@ -1891,8 +1890,8 @@ These can be found in the VS Code Command Palette.
 1. Open the Rust workspace/source folder.
 2. Open Configured Setups.
 3. Choose the MCU setup.
-4. Click Use with workspace.
-5. The extension rebuilds the setup for the selected SDK backend.
+4. Click Apply to workspace.
+5. The extension selects the setup's complete reusable build workspace.
 6. The workspace receives .vscode/mikrobus-rust.json.
 7. Rust Analyzer is pointed at the selected target/backend.
 ```
@@ -2023,9 +2022,9 @@ coreIndex = 0
 
 Multi-core/AMP target selection is not implemented in this Rust extension yet.
 
-## 11. Debug uses localhost TCP
+## 11. Debug transport is host-specific
 
-The extension allocates a free localhost port and starts `probe-rs dap-server` there. The DAP server is terminated when the VS Code debug session ends.
+On Windows, the extension starts `probe-rs dap-server` as a VS Code debug-adapter process and uses stdin/stdout DAP. On Linux and macOS, it allocates a free localhost port and starts the DAP server there. The non-Windows server process is terminated when the VS Code debug session ends.
 
 ## 12. Supported-device validation is narrower than database enumeration
 
@@ -2240,11 +2239,13 @@ FLASH
 DEBUG
   F5
   cargo build --bin mikrobus_debug_current
-  probe-rs dap-server --port <localhost-port>
+  Windows: probe-rs dap-server (stdin/stdout)
+  Linux/macOS: probe-rs dap-server --port <localhost-port>
   flash ELF
   halt after reset
   stop at first executable line of main()
   use normal VS Code breakpoints
+  print exposed locals/statics/globals to Debug Console
 
 ERASE
   Erase MCU button

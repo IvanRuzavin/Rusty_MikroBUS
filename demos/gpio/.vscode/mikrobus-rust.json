@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "setupId": "stm32f412re",
+  "mcuName": "STM32F412RE",
+  "clockMhz": 100,
+  "target": "thumbv7em-none-eabi",
+  "sdkRoot": "c:\\Users\\IvanRus\\AppData\\Roaming\\Code\\User\\globalStorage\\mikroe-dev.mikrobus-rust-tools\\configured-setups\\workspaces\\stm32f412re",
+  "configuredAt": "2026-08-24T18:16:33.141Z",
+  "setupRoot": "c:\\Users\\IvanRus\\AppData\\Roaming\\Code\\User\\globalStorage\\mikroe-dev.mikrobus-rust-tools\\configured-setups\\workspaces\\stm32f412re\\.setup"
+}

@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Rust Tools",
   "description": "Cross-platform Rust MikroBUS VS Code tools with MCU setup management, package install/update/uninstall lifecycle controls, workspace build/flash actions, and built-in probe-rs DAP debugging.",
-  "version": "0.0.12",
+  "version": "0.0.15",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -25,6 +25,9 @@
     "onCommand:mikrobusRust.buildCurrentFile",
     "onCommand:mikrobusRust.flashCurrentFile",
     "onCommand:mikrobusRust.debugCurrentFile",
+    "onCommand:mikrobusRust.debugStepOut",
+    "onCommand:mikrobusRust.restartDebugger",
+    "onCommand:mikrobusRust.dumpDebugVariables",
     "onDebug:mikrobus-rust-debug"
   ],
   "main": "./extension.js",
@@ -40,7 +43,7 @@
       },
       {
         "command": "mikrobusRust.useSetupWithWorkspace",
-        "title": "MikroBUS Rust: Use Setup with Current Workspace"
+        "title": "MikroBUS Rust: Apply Setup to Current Workspace"
       },
       {
         "command": "mikrobusRust.useCurrentRustFile",
@@ -77,6 +80,21 @@
         "command": "mikrobusRust.debugCurrentFile",
         "title": "MikroBUS Rust: Debug Current Rust File",
         "icon": "$(debug-alt)"
+      },
+      {
+        "command": "mikrobusRust.debugStepOut",
+        "title": "MikroBUS Rust: Step Out",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "mikrobusRust.restartDebugger",
+        "title": "MikroBUS Rust: Restart Debugger",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "mikrobusRust.dumpDebugVariables",
+        "title": "MikroBUS Rust: Print Variables to Debug Console",
+        "icon": "$(list-tree)"
       }
     ],
     "configuration": {
@@ -101,6 +119,32 @@
           "type": "string",
           "default": "",
           "description": "Optional absolute path to probe-rs. Leave empty to resolve it from PATH, CARGO_HOME/bin or ~/.cargo/bin."
+        },
+        "mikrobusRust.dumpVariablesOnStop": {
+          "type": "boolean",
+          "default": true,
+          "description": "Print all local, static, and global variable scopes exposed by probe-rs to the Debug Console whenever execution stops."
+        },
+        "mikrobusRust.variableDumpMaxDepth": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Maximum child expansion depth for automatic and manual Debug Console variable dumps."
+        },
+        "mikrobusRust.variableDumpMaxEntries": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 100,
+          "maximum": 20000,
+          "description": "Maximum number of values printed by one Debug Console variable dump."
+        },
+        "mikrobusRust.variableDumpMaxValueLength": {
+          "type": "integer",
+          "default": 512,
+          "minimum": 64,
+          "maximum": 8192,
+          "description": "Maximum number of characters printed for each variable name, type, or value."
         }
       }
     },
@@ -151,6 +195,23 @@
           "when": "editorLangId == rust && mikrobusRust.workspaceBound",
           "group": "navigation@13"
         }
+      ],
+      "debug/toolBar": [
+        {
+          "command": "mikrobusRust.debugStepOut",
+          "when": "debugType == mikrobus-rust-debug",
+          "group": "navigation@45"
+        },
+        {
+          "command": "mikrobusRust.restartDebugger",
+          "when": "debugType == mikrobus-rust-debug",
+          "group": "navigation@46"
+        },
+        {
+          "command": "mikrobusRust.dumpDebugVariables",
+          "when": "debugType == mikrobus-rust-debug",
+          "group": "navigation@47"
+        }
       ]
     },
     "keybindings": [
@@ -170,6 +231,17 @@
         "command": "mikrobusRust.debugCurrentFile",
         "key": "f5",
         "when": "editorLangId == rust && mikrobusRust.workspaceBound"
+      },
+      {
+        "command": "mikrobusRust.debugStepOut",
+        "key": "shift+f11",
+        "when": "inDebugMode && debugType == mikrobus-rust-debug"
+      },
+      {
+        "command": "mikrobusRust.restartDebugger",
+        "key": "ctrl+shift+f5",
+        "mac": "cmd+shift+f5",
+        "when": "inDebugMode && debugType == mikrobus-rust-debug"
       }
     ],
     "debuggers": [

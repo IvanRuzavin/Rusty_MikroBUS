@@ -9,6 +9,9 @@ let mcuPanel;
 let outputChannel;
 const debugServerProcesses = new Map();
 const debugOwnedBreakpoints = new Map();
+const debugSessionSources = new Map();
+const debugVariableDumpTimers = new Map();
+const debugVariableDumpInProgress = new Set();
 let pendingDebugLaunch;
 
 function getManagedRoot(context) {
@@ -44,7 +47,8 @@ function getConfiguredSetupPaths(context) {
   return {
     root,
     registry: path.join(root, 'setups.json'),
-    active: path.join(root, 'active.json')
+    active: path.join(root, 'active.json'),
+    workspaces: path.join(root, 'workspaces')
   };
 }
 
@@ -54,6 +58,20 @@ function setupIdForMcu(mcuName) {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'mcu';
+}
+
+function setupWorkspaceRoot(context, setupId) {
+  return path.join(getConfiguredSetupPaths(context).workspaces, setupIdForMcu(setupId));
+}
+
+function resolveSetupSdkRoot(context, setup) {
+  const stored = String(setup?.sdkRoot || '').trim();
+  if (stored) {
+    return path.isAbsolute(stored)
+      ? path.resolve(stored)
+      : path.resolve(getConfiguredSetupPaths(context).root, stored);
+  }
+  return setupWorkspaceRoot(context, setup?.id || setup?.mcuName);
 }
 
 function readConfiguredSetupRegistry(context) {
@@ -135,6 +153,8 @@ function saveConfiguredSetup(context, payload, result) {
     relativePlatform: result.relativePlatform,
     clockMhz: result.clockMhz,
     values: payload.values && typeof payload.values === 'object' ? payload.values : {},
+    sdkRoot: path.relative(getConfiguredSetupPaths(context).root, result.sdkRoot).split(path.sep).join('/'),
+    artifactVersion: 1,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
     lastBuiltAt: now
@@ -157,10 +177,13 @@ function removeConfiguredSetup(context, id) {
   writeConfiguredSetupRegistry(context, registry);
 
   if (getActiveSetupId(context) === id) {
-    const paths = getManagedPaths(context);
-    fs.rmSync(path.join(paths.sdk, '.setup'), { recursive: true, force: true });
-    fs.rmSync(path.join(paths.sdk, '.cargo', 'config.toml'), { force: true });
     clearActiveSetupId(context);
+  }
+
+  const setupPaths = getConfiguredSetupPaths(context);
+  const sdkRoot = resolveSetupSdkRoot(context, setup);
+  if (isPathWithin(setupPaths.workspaces, sdkRoot)) {
+    fs.rmSync(sdkRoot, { recursive: true, force: true });
   }
 
   return setup;
@@ -195,6 +218,15 @@ function registerMcuConfigurator(context) {
     vscode.commands.registerCommand('mikrobusRust.debugCurrentFile', async () => {
       await debugCurrentRustFile(context);
     }),
+    vscode.commands.registerCommand('mikrobusRust.debugStepOut', async () => {
+      await debugStepOut();
+    }),
+    vscode.commands.registerCommand('mikrobusRust.restartDebugger', async () => {
+      await restartDebugger();
+    }),
+    vscode.commands.registerCommand('mikrobusRust.dumpDebugVariables', async () => {
+      await dumpDebugVariables();
+    }),
     vscode.commands.registerCommand('mikrobusRust.eraseWorkspaceMcu', async () => {
       await runBoundWorkspaceAction(context, 'erase');
     }),
@@ -202,10 +234,23 @@ function registerMcuConfigurator(context) {
       async createDebugAdapterDescriptor(session) {
         const probeRsExecutable = resolveToolExecutable('probe-rs');
         const cwd = session.configuration.cwd || session.workspaceFolder?.uri?.fsPath || process.cwd();
-        const port = await findAvailableDebugPort();
         const channel = getOutputChannel();
-        channel.appendLine(`Starting probe-rs DAP server on 127.0.0.1:${port}`);
         channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+
+        if (process.platform === 'win32') {
+          channel.appendLine('Starting probe-rs DAP through stdin/stdout transport (Windows).');
+          return new vscode.DebugAdapterExecutable(
+            probeRsExecutable,
+            ['dap-server'],
+            {
+              cwd,
+              env: buildToolEnvironment(probeRsExecutable)
+            }
+          );
+        }
+
+        const port = await findAvailableDebugPort();
+        channel.appendLine(`Starting probe-rs DAP server on 127.0.0.1:${port}`);
 
         const child = childProcess.spawn(
           probeRsExecutable,
@@ -239,6 +284,7 @@ function registerMcuConfigurator(context) {
       if (session.type !== 'mikrobus-rust-debug' || !pendingDebugLaunch) return;
       const pending = pendingDebugLaunch;
       pendingDebugLaunch = undefined;
+      debugSessionSources.set(session.id, pending.source);
       if (pending.ownedBreakpoint) {
         debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
       }
@@ -251,6 +297,12 @@ function registerMcuConfigurator(context) {
             if (message?.type === 'request' && message.command === 'configurationDone') {
               configurationDoneRequestSeq = message.seq;
             }
+            if (
+              message?.type === 'request' &&
+              ['continue', 'next', 'stepIn', 'stepOut', 'restart', 'disconnect', 'terminate'].includes(message.command)
+            ) {
+              cancelScheduledVariableDump(session.id);
+            }
           },
           onDidSendMessage(message) {
             if (
@@ -262,12 +314,18 @@ function registerMcuConfigurator(context) {
               configurationDoneRequestSeq = undefined;
               void continueFromResetToEntry(session);
             }
+            if (message?.type === 'event' && message.event === 'stopped') {
+              scheduleVariableDump(session, message.body?.threadId, message.body?.reason);
+            }
           }
         };
       }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {
       stopDebugServerProcess(session.id);
+      cancelScheduledVariableDump(session.id);
+      debugVariableDumpInProgress.delete(session.id);
+      debugSessionSources.delete(session.id);
       const breakpoint = debugOwnedBreakpoints.get(session.id);
       if (breakpoint) {
         vscode.debug.removeBreakpoints([breakpoint]);
@@ -318,34 +376,20 @@ function findCompatibleSdkRoot(startPath) {
   return undefined;
 }
 
-function resolveCurrentWorkspaceSdk() {
+function resolveCurrentWorkspaceTarget() {
   const folders = vscode.workspace.workspaceFolders || [];
   if (folders.length === 0) {
-    throw new Error('Open the Rust SDK project or its tests folder in VS Code first.');
+    throw new Error('Open the folder containing the Rust main.rs you want to use first.');
   }
 
-  const candidates = [];
-  const activePath = vscode.window.activeTextEditor?.document?.uri?.scheme === 'file'
-    ? vscode.window.activeTextEditor.document.uri.fsPath
-    : undefined;
-  if (activePath) candidates.push(activePath);
-  for (const folder of folders) candidates.push(folder.uri.fsPath);
-
-  for (const candidate of candidates) {
-    const sdkRoot = findCompatibleSdkRoot(candidate);
-    if (!sdkRoot) continue;
-    const workspaceFolder = folders.find((folder) =>
-      isPathWithin(sdkRoot, folder.uri.fsPath) || isPathWithin(folder.uri.fsPath, sdkRoot)
-    ) || folders[0];
-    return {
-      sdkRoot,
-      workspaceFolder,
-      openedRoot: workspaceFolder.uri.fsPath,
-      cargoToml: path.join(sdkRoot, 'Cargo.toml')
-    };
-  }
-
-  throw new Error('This workspace is not a compatible rusty_mikrobus SDK. Expected Cargo.toml, .cargo/template_config.toml and targets/ in this folder or one of its parents.');
+  const activeUri = vscode.window.activeTextEditor?.document?.uri;
+  const workspaceFolder = activeUri?.scheme === 'file'
+    ? (vscode.workspace.getWorkspaceFolder(activeUri) || folders[0])
+    : folders[0];
+  return {
+    workspaceFolder,
+    openedRoot: workspaceFolder.uri.fsPath
+  };
 }
 
 function getBindingPath(workspaceFolder) {
@@ -385,6 +429,9 @@ function updateWorkspaceRustAnalyzer(workspaceFolder, sdkRoot, target) {
   }
 
   let cargoManifest = path.relative(workspaceFolder.uri.fsPath, path.join(sdkRoot, 'Cargo.toml')) || 'Cargo.toml';
+  if (cargoManifest.startsWith('..') || path.isAbsolute(cargoManifest)) {
+    cargoManifest = path.join(sdkRoot, 'Cargo.toml');
+  }
   cargoManifest = cargoManifest.split(path.sep).join('/');
   const linked = Array.isArray(settings['rust-analyzer.linkedProjects'])
     ? [...settings['rust-analyzer.linkedProjects']]
@@ -399,9 +446,7 @@ function updateWorkspaceRustAnalyzer(workspaceFolder, sdkRoot, target) {
 function writeWorkspaceBinding(workspace, setup, generationResult) {
   const bindingPath = getBindingPath(workspace.workspaceFolder);
   fs.mkdirSync(path.dirname(bindingPath), { recursive: true });
-  let sdkRootValue = path.relative(workspace.workspaceFolder.uri.fsPath, workspace.sdkRoot);
-  if (!sdkRootValue) sdkRootValue = '.';
-  sdkRootValue = sdkRootValue.split(path.sep).join('/');
+  const sdkRoot = path.resolve(generationResult.sdkRoot);
 
   const binding = {
     version: 1,
@@ -409,14 +454,14 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
     mcuName: setup.mcuName,
     clockMhz: setup.clockMhz,
     target: setup.target,
-    sdkRoot: sdkRootValue,
+    sdkRoot,
     configuredAt: new Date().toISOString(),
-    setupRoot: path.relative(workspace.workspaceFolder.uri.fsPath, generationResult.setupRoot).split(path.sep).join('/')
+    setupRoot: path.resolve(generationResult.setupRoot)
   };
   fs.writeFileSync(bindingPath, JSON.stringify(binding, null, 2) + '\n', 'utf8');
-  updateWorkspaceRustAnalyzer(workspace.workspaceFolder, workspace.sdkRoot, setup.target);
+  updateWorkspaceRustAnalyzer(workspace.workspaceFolder, sdkRoot, setup.target);
   void updateWorkspaceContext();
-  return { ...binding, sdkRoot: workspace.sdkRoot, bindingPath, workspaceFolder: workspace.workspaceFolder };
+  return { ...binding, sdkRoot, bindingPath, workspaceFolder: workspace.workspaceFolder };
 }
 
 async function chooseSetupIfNeeded(context, setupId) {
@@ -442,23 +487,12 @@ async function chooseSetupIfNeeded(context, setupId) {
 async function useSetupWithCurrentWorkspace(context, setupId) {
   const setup = await chooseSetupIfNeeded(context, setupId);
   if (!setup) return undefined;
-  const workspace = resolveCurrentWorkspaceSdk();
-  const payload = {
-    setupId: setup.id,
-    mcuName: setup.mcuName,
-    clockMhz: setup.clockMhz,
-    values: setup.values || {}
-  };
-
-  const result = await vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    title: `Applying ${setup.mcuName} setup to ${path.basename(workspace.sdkRoot)}...`,
-    cancellable: false
-  }, async (progress) => generateMcuConfiguration(context, payload, progress, { sdkRoot: workspace.sdkRoot }));
+  const workspace = resolveCurrentWorkspaceTarget();
+  const result = await ensurePortableSetupWorkspace(context, setup);
 
   const binding = writeWorkspaceBinding(workspace, setup, result);
   vscode.window.showInformationMessage(
-    `${setup.mcuName} (${setup.clockMhz} MHz) is now configured for ${workspace.openedRoot}.`,
+    `${setup.mcuName} (${setup.clockMhz} MHz) is now applied to ${workspace.openedRoot}. The project does not need its own SDK tree.`,
     'Build & Flash current .rs'
   ).then(async (choice) => {
     if (choice === 'Build & Flash current .rs') {
@@ -493,7 +527,7 @@ function serializeWorkspaceBinding(binding) {
 function requireWorkspaceBinding(context) {
   const binding = readWorkspaceBinding();
   if (!binding) {
-    throw new Error('No MCU setup is bound to the current workspace. Open Configured setups and choose “Use with workspace”.');
+    throw new Error('No MCU setup is bound to the current workspace. Open Configured setups and choose “Apply to workspace”.');
   }
   const setup = findConfiguredSetup(context, binding.setupId);
   if (!setup) {
@@ -511,8 +545,8 @@ function getActiveRustSource(binding) {
     throw new Error('Open the Rust .rs file you want to use before running this action.');
   }
   const source = editor.document.uri.fsPath;
-  if (!isPathWithin(binding.sdkRoot, source)) {
-    throw new Error(`The active Rust file is outside the bound SDK root: ${binding.sdkRoot}`);
+  if (!binding.workspaceFolder || !isPathWithin(binding.workspaceFolder.uri.fsPath, source)) {
+    throw new Error(`The active Rust file is outside the workspace to which this setup is applied: ${binding.workspaceFolder?.uri?.fsPath || ''}`);
   }
   return source;
 }
@@ -727,6 +761,262 @@ function stopDebugServerProcess(sessionId) {
   }
 }
 
+function activeMikrobusDebugSession() {
+  const session = vscode.debug.activeDebugSession;
+  if (!session || session.type !== 'mikrobus-rust-debug') {
+    throw new Error('No active MikroBUS Rust debug session. Start debugging a Rust file first.');
+  }
+  return session;
+}
+
+async function activeDebugThreadId(session) {
+  const response = await session.customRequest('threads');
+  const threadId = response?.threads?.[0]?.id;
+  if (threadId === undefined) {
+    throw new Error('The debugger did not report an active target thread. Pause at a source line and try again.');
+  }
+  return threadId;
+}
+
+function boundedIntegerSetting(name, fallback, minimum, maximum) {
+  const configured = Number(vscode.workspace.getConfiguration('mikrobusRust').get(name, fallback));
+  if (!Number.isFinite(configured)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(configured)));
+}
+
+function variableDumpSettings() {
+  const configuration = vscode.workspace.getConfiguration('mikrobusRust');
+  return {
+    enabled: configuration.get('dumpVariablesOnStop', true),
+    maxDepth: boundedIntegerSetting('variableDumpMaxDepth', 5, 0, 16),
+    maxEntries: boundedIntegerSetting('variableDumpMaxEntries', 5000, 100, 20000),
+    maxValueLength: boundedIntegerSetting('variableDumpMaxValueLength', 512, 64, 8192)
+  };
+}
+
+function cancelScheduledVariableDump(sessionId) {
+  const timer = debugVariableDumpTimers.get(sessionId);
+  if (timer) clearTimeout(timer);
+  debugVariableDumpTimers.delete(sessionId);
+}
+
+function scheduleVariableDump(session, threadId, reason) {
+  if (!variableDumpSettings().enabled) return;
+  cancelScheduledVariableDump(session.id);
+  const timer = setTimeout(() => {
+    debugVariableDumpTimers.delete(session.id);
+    void dumpDebugVariablesForSession(session, threadId, reason).catch((error) => {
+      const detail = error?.message || String(error);
+      getOutputChannel().appendLine(`Automatic variable dump was unavailable: ${detail}`);
+    });
+  }, 600);
+  debugVariableDumpTimers.set(session.id, timer);
+}
+
+function sanitizeDebugText(value, maxLength) {
+  const compact = String(value ?? '').replace(/\r?\n/g, '\\n').replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, Math.max(0, maxLength - 1))}\u2026`;
+}
+
+function isExcludedDebugScope(scope) {
+  const name = String(scope?.name || '');
+  return scope?.presentationHint === 'registers' || /register|peripheral/i.test(name);
+}
+
+function isGlobalDebugScope(scope) {
+  return /static|global/i.test(String(scope?.name || ''));
+}
+
+function formatDebugVariable(variable, depth, maxValueLength) {
+  const indent = '  '.repeat(depth + 1);
+  const name = sanitizeDebugText(variable?.name || '<unnamed>', maxValueLength);
+  const type = sanitizeDebugText(variable?.type || '', maxValueLength);
+  const value = sanitizeDebugText(variable?.value || '<not available>', maxValueLength);
+  return `${indent}${name}${type ? `: ${type}` : ''} = ${value}`;
+}
+
+async function expandDebugVariables(session, variablesReference, depth, state) {
+  if (!variablesReference || state.count >= state.settings.maxEntries) {
+    if (state.count >= state.settings.maxEntries) state.truncated = true;
+    return;
+  }
+  if (state.seenReferences.has(variablesReference)) {
+    state.lines.push(`${'  '.repeat(depth + 1)}<already expanded>`);
+    return;
+  }
+  state.seenReferences.add(variablesReference);
+
+  let variables;
+  try {
+    const remaining = state.settings.maxEntries - state.count;
+    const response = await session.customRequest('variables', {
+      variablesReference,
+      start: 0,
+      count: remaining
+    });
+    variables = Array.isArray(response?.variables) ? response.variables : [];
+  } catch (error) {
+    state.lines.push(`${'  '.repeat(depth + 1)}<unable to expand: ${sanitizeDebugText(error?.message || error, state.settings.maxValueLength)}>`);
+    return;
+  }
+
+  for (const variable of variables) {
+    if (state.count >= state.settings.maxEntries) {
+      state.truncated = true;
+      break;
+    }
+    state.lines.push(formatDebugVariable(variable, depth, state.settings.maxValueLength));
+    state.count += 1;
+
+    const childReference = Number(variable?.variablesReference || 0);
+    if (!childReference) continue;
+    if (depth >= state.settings.maxDepth) {
+      state.lines.push(`${'  '.repeat(depth + 2)}<max depth reached>`);
+      continue;
+    }
+    await expandDebugVariables(session, childReference, depth + 1, state);
+  }
+}
+
+function frameDescription(frame, index, maxValueLength) {
+  const name = sanitizeDebugText(frame?.name || '<anonymous>', maxValueLength);
+  const source = frame?.source?.path || frame?.source?.name;
+  const location = source
+    ? ` @ ${sanitizeDebugText(source, maxValueLength)}${frame?.line ? `:${frame.line}` : ''}`
+    : '';
+  return `Frame ${index}: ${name}${location}`;
+}
+
+function appendVariableDump(session, text) {
+  if (vscode.debug.activeDebugSession?.id === session.id && vscode.debug.activeDebugConsole) {
+    vscode.debug.activeDebugConsole.appendLine(text);
+    return;
+  }
+  getOutputChannel().appendLine(text);
+}
+
+async function dumpDebugVariablesForSession(session, requestedThreadId, reason = 'manual') {
+  if (debugVariableDumpInProgress.has(session.id)) return;
+  debugVariableDumpInProgress.add(session.id);
+  try {
+    const settings = variableDumpSettings();
+    const threadId = requestedThreadId ?? await activeDebugThreadId(session);
+    const stackResponse = await session.customRequest('stackTrace', {
+      threadId,
+      startFrame: 0,
+      levels: 256
+    });
+    const frames = Array.isArray(stackResponse?.stackFrames) ? stackResponse.stackFrames : [];
+    if (!frames.length) {
+      throw new Error('The debugger did not expose a stack frame. Pause at a Rust source line and try again.');
+    }
+
+    const state = {
+      settings,
+      lines: [`\n=== MikroBUS Rust variables (${reason || 'stopped'}) ===`],
+      count: 0,
+      truncated: false,
+      seenReferences: new Set()
+    };
+    let includedScopes = 0;
+
+    for (let frameIndex = 0; frameIndex < frames.length && state.count < settings.maxEntries; frameIndex += 1) {
+      const frame = frames[frameIndex];
+      let scopesResponse;
+      try {
+        scopesResponse = await session.customRequest('scopes', { frameId: frame.id });
+      } catch (error) {
+        state.lines.push(frameDescription(frame, frameIndex, settings.maxValueLength));
+        state.lines.push(`  <unable to read scopes: ${sanitizeDebugText(error?.message || error, settings.maxValueLength)}>`);
+        continue;
+      }
+      const scopes = (Array.isArray(scopesResponse?.scopes) ? scopesResponse.scopes : [])
+        .filter((scope) => !isExcludedDebugScope(scope))
+        .filter((scope) => frameIndex === 0 || !isGlobalDebugScope(scope));
+      if (!scopes.length) continue;
+
+      state.lines.push(frameDescription(frame, frameIndex, settings.maxValueLength));
+      for (const scope of scopes) {
+        if (state.count >= settings.maxEntries) {
+          state.truncated = true;
+          break;
+        }
+        includedScopes += 1;
+        state.lines.push(`  [${sanitizeDebugText(scope.name || 'Variables', settings.maxValueLength)}]`);
+        await expandDebugVariables(session, Number(scope.variablesReference || 0), 0, state);
+      }
+    }
+
+    if (!includedScopes) {
+      state.lines.push('[No local, static, or global variable scopes were exposed at this stop.]');
+    } else if (!state.count) {
+      state.lines.push('[The exposed variable scopes are empty at this stop.]');
+    }
+    if (state.truncated || state.count >= settings.maxEntries) {
+      state.lines.push(`[Variable dump truncated after ${settings.maxEntries} entries.]`);
+    }
+    state.lines.push(`=== End variables (${state.count} entries) ===`);
+    appendVariableDump(session, state.lines.join('\n'));
+  } finally {
+    debugVariableDumpInProgress.delete(session.id);
+  }
+}
+
+async function dumpDebugVariables() {
+  const session = activeMikrobusDebugSession();
+  const threadId = await activeDebugThreadId(session);
+  await dumpDebugVariablesForSession(session, threadId, 'manual request');
+}
+
+async function debugStepOut() {
+  const session = activeMikrobusDebugSession();
+  const threadId = await activeDebugThreadId(session);
+  const channel = getOutputChannel();
+  channel.appendLine('Step Out requested for the active probe-rs thread.');
+  await session.customRequest('stepOut', { threadId });
+}
+
+async function waitForDebugSessionToStop(sessionId, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!vscode.debug.activeDebugSession || vscode.debug.activeDebugSession.id !== sessionId) return;
+    await delay(50);
+  }
+}
+
+async function restartDebugger() {
+  const session = activeMikrobusDebugSession();
+  const channel = getOutputChannel();
+  try {
+    channel.appendLine('Restart requested through probe-rs DAP.');
+    await session.customRequest('restart', {});
+    return;
+  } catch (error) {
+    channel.appendLine(`probe-rs DAP restart failed (${error.message || error}); relaunching the same debug configuration.`);
+  }
+
+  const configuration = { ...session.configuration };
+  const workspaceFolder = session.workspaceFolder;
+  const source = debugSessionSources.get(session.id);
+  await vscode.debug.stopDebugging(session);
+  await waitForDebugSessionToStop(session.id);
+
+  if (source && fs.existsSync(source)) {
+    const entry = ensureEntryBreakpoint(source);
+    pendingDebugLaunch = {
+      source,
+      ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
+    };
+  }
+
+  const restarted = await vscode.debug.startDebugging(workspaceFolder, configuration);
+  if (!restarted) {
+    pendingDebugLaunch = undefined;
+    throw new Error('The debugger could not be restarted. See the MikroBUS Rust output for details.');
+  }
+}
+
 function cargoTomlString(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
@@ -747,14 +1037,14 @@ function resolveBuiltNamedBinary(binding, setup, binName) {
   throw new Error(`Cargo build completed, but the debug ELF was not found. Expected one of: ${candidates.join(', ')}`);
 }
 
-async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
-  if (!isPathWithin(binding.sdkRoot, source)) {
-    throw new Error(`The active Rust file is outside the bound SDK root: ${binding.sdkRoot}`);
-  }
+async function withTemporaryRustBinary(binding, source, binName, action) {
   const cargoToml = path.join(binding.sdkRoot, 'Cargo.toml');
   const original = readRequired(cargoToml);
-  const relativeSource = path.relative(binding.sdkRoot, source).split(path.sep).join('/');
-  const binName = debugBinName();
+  let manifestSource = path.relative(binding.sdkRoot, source);
+  if (!manifestSource || (process.platform === 'win32' && path.parse(manifestSource).root)) {
+    manifestSource = source;
+  }
+  manifestSource = manifestSource.split(path.sep).join('/');
   const startMarker = '# --- MIKROBUS RUST TEMP DEBUG TARGET BEGIN ---';
   const endMarker = '# --- MIKROBUS RUST TEMP DEBUG TARGET END ---';
   const markerPattern = new RegExp(`\\n?${startMarker.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}[\\s\\S]*?${endMarker.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\n?`, 'g');
@@ -763,17 +1053,39 @@ async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
     '', '', startMarker,
     '[[bin]]',
     `name = ${cargoTomlString(binName)}`,
-    `path = ${cargoTomlString(relativeSource)}`,
+    `path = ${cargoTomlString(manifestSource)}`,
     endMarker, ''
   ].join('\n');
 
   fs.writeFileSync(cargoToml, `${cleanManifest}${temporaryTarget}`, 'utf8');
   try {
-    await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
-    return { programBinary: resolveBuiltNamedBinary(binding, setup, binName), binName };
+    return await action(binName);
   } finally {
     fs.writeFileSync(cargoToml, `${cleanManifest}\n`, 'utf8');
   }
+}
+
+async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
+  const binName = debugBinName();
+  return withTemporaryRustBinary(binding, source, binName, async () => {
+    await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
+    return { programBinary: resolveBuiltNamedBinary(binding, setup, binName), binName };
+  });
+}
+
+async function buildCurrentRustSource(binding, setup, source, channel, flash) {
+  const binName = 'mikrobus_current';
+  return withTemporaryRustBinary(binding, source, binName, async () => {
+    await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
+    if (flash) {
+      await executeChecked(
+        channel,
+        'cargo',
+        ['flash', '--bin', binName, '--chip', setup.mcuName, '--connect-under-reset'],
+        binding.sdkRoot
+      );
+    }
+  });
 }
 
 function findMainEntryLine(sourceText) {
@@ -845,7 +1157,7 @@ async function debugCurrentRustFile(context) {
   const channel = getOutputChannel();
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz · Debug current Rust file ===`);
-  channel.appendLine(`SDK root: ${binding.sdkRoot}`);
+  channel.appendLine(`Reusable setup: ${binding.sdkRoot}`);
 
   const source = getActiveRustSource(binding);
   const editor = vscode.window.activeTextEditor;
@@ -895,7 +1207,7 @@ async function runBoundWorkspaceAction(context, action) {
   if (action === 'erase') {
     const confirmation = await vscode.window.showWarningMessage(
       `Erase all flash memory on ${setup.mcuName}?`,
-      { modal: true, detail: `Workspace: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\n\nThis will erase the MCU flash through probe-rs. The configured setup itself will not be removed.` },
+      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\n\nThis will erase the MCU flash through probe-rs. The configured setup itself will not be removed.` },
       'Erase MCU'
     );
     if (confirmation !== 'Erase MCU') return;
@@ -904,7 +1216,7 @@ async function runBoundWorkspaceAction(context, action) {
   const channel = getOutputChannel();
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz ===`);
-  channel.appendLine(`SDK root: ${binding.sdkRoot}`);
+  channel.appendLine(`Reusable setup: ${binding.sdkRoot}`);
 
   await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -912,14 +1224,17 @@ async function runBoundWorkspaceAction(context, action) {
     cancellable: false
   }, async () => {
     if (action === 'buildFlashCurrent' || action === 'flashCurrent') {
-      await useCurrentRustFileAsMain(context);
-      await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
-      await executeChecked(channel, 'cargo', ['flash', '--chip', setup.mcuName, '--connect-under-reset'], binding.sdkRoot);
+      const source = getActiveRustSource(binding);
+      const editor = vscode.window.activeTextEditor;
+      if (editor) await editor.document.save();
+      await buildCurrentRustSource(binding, setup, source, channel, true);
       return;
     }
     if (action === 'buildCurrent') {
-      await useCurrentRustFileAsMain(context);
-      await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
+      const source = getActiveRustSource(binding);
+      const editor = vscode.window.activeTextEditor;
+      if (editor) await editor.document.save();
+      await buildCurrentRustSource(binding, setup, source, channel, false);
       return;
     }
     if (action === 'build') {
@@ -1052,7 +1367,7 @@ async function handleMcuMessage(message, panel, context) {
       cancellable: false
     }, async (progress) => {
       progress.report({ message: 'Validating MCU and register settings...' });
-      return generateMcuConfiguration(context, payload, progress);
+      return buildPortableSetupWorkspace(context, payload, progress);
     });
 
     const setup = saveConfiguredSetup(context, payload, result);
@@ -1082,7 +1397,7 @@ async function handleMcuMessage(message, panel, context) {
       location: vscode.ProgressLocation.Notification,
       title: `Rebuilding MikroBUS Rust configuration for ${setup.mcuName}...`,
       cancellable: false
-    }, async (progress) => generateMcuConfiguration(context, payload, progress));
+    }, async (progress) => buildPortableSetupWorkspace(context, payload, progress));
     const saved = saveConfiguredSetup(context, payload, result);
     vscode.window.showInformationMessage(`Rebuilt configuration for ${setup.mcuName}.`);
     void panel.webview.postMessage({
@@ -1125,10 +1440,6 @@ async function handleMcuMessage(message, panel, context) {
     if (confirmation !== 'Remove') return;
     const workspaceBinding = readWorkspaceBinding();
     if (workspaceBinding?.setupId === message.id) {
-      if (workspaceBinding.sdkRoot) {
-        fs.rmSync(path.join(workspaceBinding.sdkRoot, '.setup'), { recursive: true, force: true });
-        fs.rmSync(path.join(workspaceBinding.sdkRoot, '.cargo', 'config.toml'), { force: true });
-      }
       fs.rmSync(workspaceBinding.bindingPath, { force: true });
       void updateWorkspaceContext();
     }
@@ -1358,6 +1669,127 @@ function buildRegisterHeader(definition, selectedValues, clockMhz) {
   return lines.join('\n');
 }
 
+function portableSetupIsComplete(sdkRoot) {
+  return [
+    path.join(sdkRoot, 'Cargo.toml'),
+    path.join(sdkRoot, '.cargo', 'config.toml'),
+    path.join(sdkRoot, '.setup', 'core', 'Cargo.toml'),
+    path.join(sdkRoot, '.setup', 'sdk', 'Cargo.toml'),
+    path.join(sdkRoot, 'drv'),
+    path.join(sdkRoot, 'hal'),
+    path.join(sdkRoot, 'targets')
+  ].every((required) => fs.existsSync(required));
+}
+
+function copySdkLayers(sourceSdkRoot, destinationSdkRoot) {
+  const excludedRoots = new Set(['target', '.setup', '.git', '.vscode']);
+  fs.cpSync(sourceSdkRoot, destinationSdkRoot, {
+    recursive: true,
+    filter(source) {
+      const relative = path.relative(sourceSdkRoot, source);
+      if (!relative) return true;
+      const normalized = relative.split(path.sep).join('/');
+      const rootName = normalized.split('/')[0];
+      if (excludedRoots.has(rootName)) return false;
+      if (normalized === '.cargo/config.toml') return false;
+      if (normalized.startsWith('.setup.__mikrobus_')) return false;
+      return true;
+    }
+  });
+}
+
+function replacePortableSetupDirectory(stagingRoot, targetRoot) {
+  const backupRoot = `${targetRoot}.__mikrobus_backup`;
+  fs.rmSync(backupRoot, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(targetRoot), { recursive: true });
+  let backedUp = false;
+  try {
+    if (fs.existsSync(targetRoot)) {
+      fs.renameSync(targetRoot, backupRoot);
+      backedUp = true;
+    }
+    fs.renameSync(stagingRoot, targetRoot);
+    fs.rmSync(backupRoot, { recursive: true, force: true });
+  } catch (error) {
+    if (!fs.existsSync(targetRoot) && backedUp && fs.existsSync(backupRoot)) {
+      fs.renameSync(backupRoot, targetRoot);
+    }
+    throw error;
+  }
+}
+
+function remapGeneratedResult(result, stagingRoot, targetRoot) {
+  const remap = (value) => {
+    if (!value || !isPathWithin(stagingRoot, value)) return value;
+    return path.join(targetRoot, path.relative(stagingRoot, value));
+  };
+  return {
+    ...result,
+    sdkRoot: targetRoot,
+    setupRoot: remap(result.setupRoot),
+    coreHeader: remap(result.coreHeader),
+    cargoConfig: remap(result.cargoConfig)
+  };
+}
+
+function setupIdForPayload(context, payload) {
+  const requested = String(payload.setupId || '').trim();
+  if (requested) return requested;
+  const existing = findConfiguredSetupForMcu(context, payload.mcuName);
+  return existing?.id || setupIdForMcu(payload.mcuName);
+}
+
+async function buildPortableSetupWorkspace(context, payload, progress) {
+  const managedPaths = getManagedPaths(context);
+  const setupId = setupIdForPayload(context, payload);
+  const targetRoot = setupWorkspaceRoot(context, setupId);
+  const stagingRoot = `${targetRoot}.__mikrobus_staging`;
+
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(stagingRoot), { recursive: true });
+  try {
+    progress.report({ message: 'Copying complete SDK layers into the reusable setup...' });
+    copySdkLayers(managedPaths.sdk, stagingRoot);
+    const generated = await generateMcuConfiguration(
+      context,
+      { ...payload, setupId },
+      progress,
+      { sdkRoot: stagingRoot }
+    );
+    progress.report({ message: 'Saving reusable SDK setup...' });
+    replacePortableSetupDirectory(stagingRoot, targetRoot);
+    return remapGeneratedResult(generated, stagingRoot, targetRoot);
+  } catch (error) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function ensurePortableSetupWorkspace(context, setup) {
+  const sdkRoot = resolveSetupSdkRoot(context, setup);
+  if (portableSetupIsComplete(sdkRoot)) {
+    return {
+      ...setup,
+      sdkRoot,
+      setupRoot: path.join(sdkRoot, '.setup'),
+      coreHeader: path.join(sdkRoot, '.setup', 'core', 'src', 'core_header.rs'),
+      cargoConfig: path.join(sdkRoot, '.cargo', 'config.toml')
+    };
+  }
+
+  const payload = {
+    setupId: setup.id,
+    mcuName: setup.mcuName,
+    clockMhz: setup.clockMhz,
+    values: setup.values || {}
+  };
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: `Creating complete reusable setup for ${setup.mcuName}...`,
+    cancellable: false
+  }, async (progress) => buildPortableSetupWorkspace(context, payload, progress));
+}
+
 async function generateMcuConfiguration(context, payload, progress, options = {}) {
   const managedPaths = getManagedPaths(context);
   const paths = { ...managedPaths, sdk: options.sdkRoot ? path.resolve(options.sdkRoot) : managedPaths.sdk };
@@ -1485,6 +1917,7 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       systemLib: metadata.systemLib,
       cfgTarget: `${mcuName.slice(0, 7).toLowerCase()}x.cfg`,
       relativePlatform,
+      sdkRoot: paths.sdk,
       setupRoot,
       coreHeader: path.join(setupRoot, 'core', 'src', 'core_header.rs'),
       cargoConfig: path.join(paths.sdk, '.cargo', 'config.toml'),
@@ -1746,6 +2179,11 @@ module.exports = {
     findCompatibleSdkRoot,
     resolveToolExecutable,
     buildToolEnvironment,
+    sanitizeDebugText,
+    isExcludedDebugScope,
+    isGlobalDebugScope,
+    formatDebugVariable,
+    expandDebugVariables,
     normalizeRustCrateEntryPoint,
     readCargoPackageName,
     resolveBuiltProgramBinary
