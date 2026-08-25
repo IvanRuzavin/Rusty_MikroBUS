@@ -22,6 +22,7 @@ const debugVariableDumpTimers = new Map();
 const debugVariableDumpInProgress = new Set();
 let pendingDebugLaunch;
 let pendingCodegripDebugLaunch;
+let pendingSetupEditId;
 const codegripDebugServers = new Map();
 
 function getManagedRoot(context) {
@@ -359,6 +360,9 @@ function registerMcuConfigurator(context) {
         const pending = pendingCodegripDebugLaunch;
         pendingCodegripDebugLaunch = undefined;
         codegripDebugServers.set(session.id, pending.runtime);
+        if (pending.ownedBreakpoint) {
+          debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
+        }
         void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', true);
       }
     }),
@@ -370,7 +374,10 @@ function registerMcuConfigurator(context) {
     vscode.debug.registerDebugAdapterTrackerFactory('cortex-debug', {
       createDebugAdapterTracker(session) {
         if (session.configuration.__mikrobusCodegrip !== true) return undefined;
-        return createMikrobusDebugTracker(session, false);
+        // CODEGRIP programs the device before Cortex-Debug attaches. Once VS Code
+        // has installed source breakpoints, continue from CODEGRIP's halted state
+        // to the temporary entry breakpoint, matching the probe-rs workflow.
+        return createMikrobusDebugTracker(session, true);
       }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {
@@ -1526,34 +1533,56 @@ async function debugCurrentRustFile(context) {
     }
     await cortexDebug.activate();
     const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
+    const objdumpPath = resolveArmGccExecutable(context, 'arm-none-eabi-objdump');
+    const armToolchainPath = path.dirname(gdbPath);
     const options = codegripOperationOptions(setup, channel);
+    const entry = ensureEntryBreakpoint(source);
     channel.appendLine(`Debug source: ${source}`);
     channel.appendLine(`Debug ELF: ${programBinary}`);
     channel.appendLine(`Resolved ARM GDB: ${gdbPath}`);
+    channel.appendLine(`Resolved ARM objdump: ${objdumpPath}`);
+    channel.appendLine(`ARM toolchain directory: ${armToolchainPath}`);
+    channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
 
     const runtime = await withCodegripHex(context, programBinary, channel, (hexFile) => (
       prepareCodegripDebug({ ...options, hexFile })
     ));
     const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    pendingCodegripDebugLaunch = { token, runtime };
+    pendingCodegripDebugLaunch = {
+      token,
+      runtime,
+      ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
+    };
     try {
+      channel.appendLine(`Attaching Cortex-Debug to CODEGRIP GDB at 127.0.0.1:${runtime.debugPort}.`);
       const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
         type: 'cortex-debug',
-        request: 'launch',
+        // CODEGRIP already programmed the image with debugEnable=true. Cortex-Debug
+        // must only attach to the externally managed CODEGRIP GDB server; using a
+        // launch request makes Cortex-Debug assume responsibility for flash/reset.
+        request: 'attach',
         name: `MikroBUS Rust CODEGRIP: ${setup.mcuName}`,
         servertype: 'external',
         gdbTarget: `127.0.0.1:${runtime.debugPort}`,
         executable: programBinary,
         gdbPath,
+        armToolchainPath,
+        objdumpPath,
+        toolchainPrefix: 'arm-none-eabi',
         cwd: binding.sdkRoot,
         device: setup.mcuName,
         interface: 'swd',
-        overrideLaunchCommands: [
-          'set mem inaccessible-by-default off',
-          'tbreak main',
-          'continue'
+        // External Cortex-Debug servers otherwise inherit OpenOCD-style attach
+        // commands (for example `monitor halt`). CODEGRIP target setup already
+        // requested Halt on Connect, so avoid sending server-specific monitor
+        // commands that CodegripGdbServer may not implement. Cortex-Debug itself
+        // adds `target-select extended-remote <gdbTarget>` before this sequence.
+        overrideAttachCommands: [
+          'set mem inaccessible-by-default off'
         ],
-        showDevDebugOutput: 'none',
+        // Keep raw GDB/MI traffic visible while CODEGRIP support is being brought
+        // up. This makes any remaining GDB remote-protocol error immediately clear.
+        showDevDebugOutput: 'raw',
         __mikrobusCodegrip: true,
         __mikrobusCodegripToken: token
       });
@@ -1561,6 +1590,7 @@ async function debugCurrentRustFile(context) {
       return;
     } catch (error) {
       if (pendingCodegripDebugLaunch?.token === token) pendingCodegripDebugLaunch = undefined;
+      if (entry.owned) vscode.debug.removeBreakpoints([entry.breakpoint]);
       await stopCodegripServer(runtime);
       throw error;
     }
@@ -1713,6 +1743,64 @@ async function openMcuConfigurator(context) {
   }, null, context.subscriptions);
 }
 
+async function editConfiguredSetup(context, id) {
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new Error('A configured setup id is required.');
+  }
+
+  const panelWasOpen = Boolean(mcuPanel);
+  pendingSetupEditId = id;
+  await openMcuConfigurator(context);
+  if (!mcuPanel) {
+    pendingSetupEditId = undefined;
+    throw new Error('The Hardware Configuration view could not be opened.');
+  }
+
+  // An existing webview is already listening for messages, so edit immediately.
+  // A newly created webview consumes pendingSetupEditId from its `ready` message
+  // below, avoiding a race where the detail message is posted before its script loads.
+  if (panelWasOpen) {
+    pendingSetupEditId = undefined;
+    await handleMcuMessage({ type: 'editSetup', id }, mcuPanel, context);
+  }
+}
+
+async function removeConfiguredSetupWithConfirmation(context, id) {
+  const setup = findConfiguredSetup(context, id);
+  if (!setup) throw new Error(`Configured setup '${id}' was not found.`);
+
+  const confirmation = await vscode.window.showWarningMessage(
+    `Remove configured setup for ${setup.mcuName}?`,
+    {
+      modal: true,
+      detail: getActiveSetupId(context) === setup.id
+        ? 'This is the active setup. Its generated sdk/.setup output will also be removed.'
+        : 'The saved MCU/clock/register configuration will be removed.'
+    },
+    'Remove'
+  );
+  if (confirmation !== 'Remove') return false;
+
+  const workspaceBinding = readWorkspaceBinding();
+  if (workspaceBinding?.setupId === id) {
+    fs.rmSync(workspaceBinding.bindingPath, { force: true });
+    void updateWorkspaceContext();
+  }
+  removeConfiguredSetup(context, id);
+
+  if (mcuPanel) {
+    void mcuPanel.webview.postMessage({
+      type: 'setupRemoved',
+      removedId: id,
+      setups: listConfiguredSetups(context),
+      activeSetupId: getActiveSetupId(context),
+      workspace: serializeWorkspaceBinding(readWorkspaceBinding())
+    });
+  }
+  void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
+  return true;
+}
+
 async function sendInitialState(panel, context) {
   if (!panel) return;
 
@@ -1754,6 +1842,11 @@ async function handleMcuMessage(message, panel, context) {
 
   if (message.type === 'ready' || message.type === 'refresh') {
     await sendInitialState(panel, context);
+    if (message.type === 'ready' && pendingSetupEditId) {
+      const editId = pendingSetupEditId;
+      pendingSetupEditId = undefined;
+      await handleMcuMessage({ type: 'editSetup', id: editId }, panel, context);
+    }
     return;
   }
 
@@ -1924,27 +2017,7 @@ async function handleMcuMessage(message, panel, context) {
   }
 
   if (message.type === 'removeSetup' && typeof message.id === 'string') {
-    const setup = findConfiguredSetup(context, message.id);
-    if (!setup) throw new Error(`Configured setup '${message.id}' was not found.`);
-    const confirmation = await vscode.window.showWarningMessage(
-      `Remove configured setup for ${setup.mcuName}?`,
-      { modal: true, detail: getActiveSetupId(context) === setup.id ? 'This is the active setup. Its generated sdk/.setup output will also be removed.' : 'The saved MCU/clock/register configuration will be removed.' },
-      'Remove'
-    );
-    if (confirmation !== 'Remove') return;
-    const workspaceBinding = readWorkspaceBinding();
-    if (workspaceBinding?.setupId === message.id) {
-      fs.rmSync(workspaceBinding.bindingPath, { force: true });
-      void updateWorkspaceContext();
-    }
-    removeConfiguredSetup(context, message.id);
-    void panel.webview.postMessage({
-      type: 'setupRemoved',
-      removedId: message.id,
-      setups: listConfiguredSetups(context),
-      activeSetupId: getActiveSetupId(context),
-      workspace: serializeWorkspaceBinding(readWorkspaceBinding())
-    });
+    await removeConfiguredSetupWithConfirmation(context, message.id);
     return;
   }
 }
@@ -2867,6 +2940,8 @@ function getNonce() {
 module.exports = {
   registerMcuConfigurator,
   openMcuConfigurator,
+  editConfiguredSetup,
+  removeConfiguredSetupWithConfirmation,
   getSetupDashboardState,
   useSetupWithCurrentWorkspace,
   _test: {

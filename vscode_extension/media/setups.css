@@ -40,3 +40,31 @@ h1 { margin: 0; font-size: 18px; }
 footer { display: grid; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--vscode-panel-border); }
 .error { padding: 7px; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-errorForeground); border-radius: 3px; }
 .hidden { display: none !important; }
+
+.setupActions {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto 30px;
+  align-items: stretch !important;
+  gap: 5px !important;
+  margin-top: 8px;
+}
+.setupActions .applyButton { width: auto; min-width: 0; }
+.setupActions .editButton { white-space: nowrap; }
+.removeButton {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+  color: var(--vscode-errorForeground);
+  background: transparent;
+  border-color: color-mix(in srgb, var(--vscode-errorForeground) 55%, transparent);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+}
+.removeButton:hover {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-inputValidation-errorBackground, var(--vscode-errorForeground));
+  border-color: var(--vscode-errorForeground);
+}

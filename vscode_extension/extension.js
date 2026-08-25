@@ -7,6 +7,8 @@ const http = require('http');
 const https = require('https');
 const {
   registerMcuConfigurator,
+  editConfiguredSetup,
+  removeConfiguredSetupWithConfirmation,
   getSetupDashboardState,
   useSetupWithCurrentWorkspace
 } = require('./mcu_configurator');
@@ -172,6 +174,17 @@ async function handleDashboardMessage(message, view, context) {
     if (message.type === 'apply' && typeof message.id === 'string') {
       await useSetupWithCurrentWorkspace(context, message.id);
       postDashboardState(view, context);
+      return;
+    }
+    if (message.type === 'edit' && typeof message.id === 'string') {
+      await editConfiguredSetup(context, message.id);
+      postDashboardState(view, context);
+      return;
+    }
+    if (message.type === 'remove' && typeof message.id === 'string') {
+      await removeConfiguredSetupWithConfirmation(context, message.id);
+      postDashboardState(view, context);
+      return;
     }
   } catch (error) {
     const detail = error?.message || String(error);

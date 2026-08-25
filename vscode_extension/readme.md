@@ -25,6 +25,7 @@ It also retains the complete 0.0.22 programmer integration and earlier setup beh
 - Implements the supplied `CodegripGdbServer` launch contract, dynamic ports, framed JSON control channel, USB/Wi-Fi selection, optional authentication, target options, Intel HEX programming, and external-GDB debugging.
 - Converts Rust ELF files with the ARM GCC package already managed by Development Environment. Existing Development Environment package paths are unchanged.
 - Uses Cortex-Debug only for CODEGRIP's GDB endpoint. The existing probe-rs DAP path remains unchanged for SEGGER J-Link setups.
+- CODEGRIP debug now uses an external-server **attach** session after CODEGRIP programming, explicitly supplies the managed ARM GCC toolchain/objdump path, and avoids Cortex-Debug's OpenOCD-specific default attach commands.
 - Keeps one Rust database and removes the incompatible Nucleo-F412ZG / Nucleo-144 Click Shield relationship.
 - Routes standalone erase through the same `erase` control command used by NECTO Studio, with an optional compatibility override.
 

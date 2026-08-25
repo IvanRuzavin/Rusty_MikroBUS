@@ -71,8 +71,11 @@
       ? (setup.shieldName ? `Shield: ${setup.shieldName}` : 'Shield: None (mikrobus.rs is not generated)')
       : setup.target || '';
 
+    const actions = document.createElement('div');
+    actions.className = 'setupActions';
+
     const apply = document.createElement('button');
-    apply.className = 'primary';
+    apply.className = 'primary applyButton';
     apply.textContent = usedHere ? 'Re-apply setup' : 'Apply to project';
     apply.disabled = !project.hasCargoToml;
     apply.title = project.hasCargoToml ? '' : 'Open a project with Cargo.toml in its root.';
@@ -81,7 +84,26 @@
       apply.textContent = 'Applying…';
       vscode.postMessage({ type: 'apply', id: setup.id });
     });
-    article.append(heading, detail, shield, apply);
+
+    const edit = document.createElement('button');
+    edit.className = 'secondary editButton';
+    edit.textContent = 'Edit';
+    edit.title = 'Edit this configured setup';
+    edit.addEventListener('click', () => {
+      vscode.postMessage({ type: 'edit', id: setup.id });
+    });
+
+    const remove = document.createElement('button');
+    remove.className = 'removeButton';
+    remove.textContent = '×';
+    remove.title = 'Remove configured setup';
+    remove.setAttribute('aria-label', `Remove ${title.textContent || setup.mcuName || 'configured setup'}`);
+    remove.addEventListener('click', () => {
+      vscode.postMessage({ type: 'remove', id: setup.id });
+    });
+
+    actions.append(apply, edit, remove);
+    article.append(heading, detail, shield, actions);
     return article;
   }
 
