@@ -13,6 +13,8 @@
     selectedBoard: undefined,
     shields: [],
     programmers: [],
+    codegripConnection: undefined,
+    codegripScanning: false,
     project: { available: false, hasCargoToml: false },
     workspaceBinding: undefined,
     view: 'start'
@@ -34,6 +36,11 @@
   const registerGrid = document.getElementById('registerGrid');
   const generateButton = document.getElementById('generate');
   const generationStatus = document.getElementById('generationStatus');
+  const programmerSelect = document.getElementById('programmerSelect');
+  const codegripConnectionCard = document.getElementById('codegripConnectionCard');
+  const findCodegripUsb = document.getElementById('findCodegripUsb');
+  const codegripConnectionStatus = document.getElementById('codegripConnectionStatus');
+  const codegripConnectionDetails = document.getElementById('codegripConnectionDetails');
 
   document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   document.getElementById('showSetups').addEventListener('click', showConfiguredSetups);
@@ -46,6 +53,15 @@
   document.getElementById('backToMcusFromSetups').addEventListener('click', showStart);
 
   search.addEventListener('input', filterMcuList);
+  programmerSelect.addEventListener('change', updateProgrammerUi);
+
+  findCodegripUsb.addEventListener('click', () => {
+    if (!state.detail || state.codegripScanning) return;
+    state.codegripScanning = true;
+    generationStatus.textContent = '';
+    updateProgrammerUi();
+    vscode.postMessage({ type: 'discoverCodegripUsb', mcuName: state.detail.name });
+  });
 
   generateButton.addEventListener('click', () => {
     if (!state.detail) return;
@@ -53,6 +69,7 @@
     const clockMhz = document.getElementById('clockMhz').value;
     const shieldSelect = document.getElementById('shieldSelect');
     const shieldUid = shieldSelect.value || undefined;
+    const programmerUid = programmerSelect.value;
 
     generationStatus.textContent = state.currentSetup ? 'Updating and rebuilding configuration...' : 'Building configuration...';
     generateButton.disabled = true;
@@ -68,8 +85,9 @@
         boardName: state.selectedBoard?.name,
         shieldUid,
         shieldName: shieldUid ? selectedOptionLabel(shieldSelect) : undefined,
-        programmerUid: document.getElementById('programmerSelect').value,
-        programmerName: selectedOptionLabel(document.getElementById('programmerSelect'))
+        programmerUid,
+        programmerName: selectedOptionLabel(programmerSelect),
+        codegripConnection: programmerUid === 'MIKROE_CODEGRIP' ? state.codegripConnection : undefined
       }
     });
   });
@@ -120,6 +138,8 @@
       state.selectedBoard = undefined;
       state.shields = [];
       state.programmers = Array.isArray(message.programmers) ? message.programmers : [];
+      state.codegripConnection = message.setup?.codegripConnection;
+      state.codegripScanning = false;
       renderMcuDetail(message.detail, message.setup);
       showView('config');
       return;
@@ -132,13 +152,14 @@
       state.selectedBoard = message.board;
       state.shields = Array.isArray(message.shields) ? message.shields : [];
       state.programmers = Array.isArray(message.programmers) ? message.programmers : [];
+      state.codegripConnection = message.setup?.codegripConnection;
+      state.codegripScanning = false;
       renderMcuDetail(message.mcu, message.setup);
       showView('config');
       return;
     }
 
     if (message.type === 'generationComplete') {
-      generateButton.disabled = false;
       state.setups = Array.isArray(message.setups) ? message.setups : state.setups;
       state.activeSetupId = message.activeSetupId;
       const result = message.result || {};
@@ -155,6 +176,21 @@
       updateTopCounts();
       setSetupsStatus(result.warning ? `Generated with warning: ${result.warning}` : `Generated ${result.mcuName || 'configuration'} successfully.`);
       showConfiguredSetups();
+      return;
+    }
+
+    if (message.type === 'codegripUsbDiscovered') {
+      state.codegripScanning = false;
+      state.codegripConnection = message.device;
+      generationStatus.textContent = `Found ${message.device?.deviceName || 'CODEGRIP'} ${message.device?.serialNumber || ''}.`;
+      updateProgrammerUi();
+      return;
+    }
+
+    if (message.type === 'codegripUsbDiscoveryCancelled') {
+      state.codegripScanning = false;
+      generationStatus.textContent = 'CODEGRIP selection was cancelled.';
+      updateProgrammerUi();
       return;
     }
 
@@ -198,9 +234,10 @@
     }
 
     if (message.type === 'error') {
-      generateButton.disabled = false;
+      state.codegripScanning = false;
       generationStatus.textContent = message.message || 'Configuration failed.';
       setSetupsStatus(message.message || 'Operation failed.', true);
+      updateProgrammerUi();
     }
   });
 
@@ -327,7 +364,6 @@
       shieldSelect.replaceChildren();
     }
 
-    const programmerSelect = document.getElementById('programmerSelect');
     programmerSelect.replaceChildren(...state.programmers.map((programmer) => {
       const option = document.createElement('option');
       option.value = programmer.uid;
@@ -335,7 +371,7 @@
       option.selected = setup?.programmerUid ? setup.programmerUid === programmer.uid : programmer.uid === 'SEGGER_JLINK';
       return option;
     }));
-    generateButton.disabled = state.programmers.length === 0;
+    updateProgrammerUi();
 
     const stateBadge = document.getElementById('setupState');
     if (setup) {
@@ -394,6 +430,40 @@
       registerCards.push(card);
     }
     registerGrid.replaceChildren(...registerCards);
+  }
+
+  function updateProgrammerUi() {
+    const codegripSelected = programmerSelect.value === 'MIKROE_CODEGRIP';
+    codegripConnectionCard.classList.toggle('hidden', !codegripSelected);
+
+    if (codegripSelected) {
+      findCodegripUsb.disabled = state.codegripScanning;
+      findCodegripUsb.textContent = state.codegripScanning ? 'Searching...' : 'Find USB CODEGRIP';
+
+      if (state.codegripScanning) {
+        codegripConnectionStatus.textContent = 'Scanning local USB connections...';
+        codegripConnectionStatus.className = 'connectionStatus scanning';
+        codegripConnectionDetails.classList.add('hidden');
+      } else if (state.codegripConnection) {
+        codegripConnectionStatus.textContent = 'USB CODEGRIP found';
+        codegripConnectionStatus.className = 'connectionStatus connected';
+        document.getElementById('codegripDeviceName').textContent = state.codegripConnection.deviceName || 'CODEGRIP';
+        document.getElementById('codegripSerialNumber').textContent = state.codegripConnection.serialNumber || '—';
+        document.getElementById('codegripHwTokens').textContent = state.codegripConnection.hwTokens || '—';
+        codegripConnectionDetails.classList.remove('hidden');
+      } else {
+        codegripConnectionStatus.textContent = 'No USB CODEGRIP selected';
+        codegripConnectionStatus.className = 'connectionStatus';
+        codegripConnectionDetails.classList.add('hidden');
+      }
+    }
+
+    generateButton.disabled = state.programmers.length === 0
+      || state.codegripScanning
+      || (codegripSelected && !state.codegripConnection);
+    generateButton.title = codegripSelected && !state.codegripConnection
+      ? 'Find a USB CODEGRIP before building this configuration.'
+      : '';
   }
 
   function selectedOptionLabel(select) {

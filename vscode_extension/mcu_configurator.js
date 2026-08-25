@@ -4,6 +4,15 @@ const path = require('path');
 const os = require('os');
 const childProcess = require('child_process');
 const net = require('net');
+const {
+  normalizeConnectionProfile,
+  normalizeDiscoveredDevice,
+  discoverUsbCodegrips,
+  programCodegrip,
+  eraseCodegrip,
+  prepareCodegripDebug,
+  stopCodegripServer
+} = require('./codegrip_backend');
 
 let mcuPanel;
 let outputChannel;
@@ -12,6 +21,8 @@ const debugOwnedBreakpoints = new Map();
 const debugVariableDumpTimers = new Map();
 const debugVariableDumpInProgress = new Set();
 let pendingDebugLaunch;
+let pendingCodegripDebugLaunch;
+const codegripDebugServers = new Map();
 
 function getManagedRoot(context) {
   const configured = vscode.workspace.getConfiguration('mikrobusRust').get('storageRoot', '').trim();
@@ -164,6 +175,9 @@ function saveConfiguredSetup(context, payload, result) {
     shieldName: payload.shieldName || undefined,
     programmerUid: result.programmerUid || payload.programmerUid || 'SEGGER_JLINK',
     programmerName: result.programmerName || payload.programmerName || 'SEGGER J-Link',
+    codegripConnection: result.programmerUid === 'MIKROE_CODEGRIP'
+      ? normalizeDiscoveredDevice(result.codegripConnection || payload.codegripConnection)
+      : undefined,
     sdkRoot: path.relative(getConfiguredSetupPaths(context).root, result.sdkRoot).split(path.sep).join('/'),
     artifactVersion: 1,
     createdAt: existing?.createdAt || now,
@@ -200,6 +214,38 @@ function removeConfiguredSetup(context, id) {
 
   void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
   return setup;
+}
+
+function createMikrobusDebugTracker(session, continueAfterConfiguration) {
+  let configurationDoneRequestSeq;
+  return {
+    onWillReceiveMessage(message) {
+      if (continueAfterConfiguration && message?.type === 'request' && message.command === 'configurationDone') {
+        configurationDoneRequestSeq = message.seq;
+      }
+      if (
+        message?.type === 'request' &&
+        ['continue', 'next', 'stepIn', 'stepOut', 'restart', 'disconnect', 'terminate'].includes(message.command)
+      ) {
+        cancelScheduledVariableDump(session.id);
+      }
+    },
+    onDidSendMessage(message) {
+      if (
+        continueAfterConfiguration &&
+        configurationDoneRequestSeq !== undefined &&
+        message?.type === 'response' &&
+        message.request_seq === configurationDoneRequestSeq &&
+        message.success !== false
+      ) {
+        configurationDoneRequestSeq = undefined;
+        void continueFromResetToEntry(session);
+      }
+      if (message?.type === 'event' && message.event === 'stopped') {
+        scheduleVariableDump(session, message.body?.threadId, message.body?.reason);
+      }
+    }
+  };
 }
 
 function registerMcuConfigurator(context) {
@@ -296,47 +342,47 @@ function registerMcuConfigurator(context) {
       }
     }),
     vscode.debug.onDidStartDebugSession((session) => {
-      if (session.type !== 'mikrobus-rust-debug' || !pendingDebugLaunch) return;
-      const pending = pendingDebugLaunch;
-      pendingDebugLaunch = undefined;
-      if (pending.ownedBreakpoint) {
-        debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
+      if (session.type === 'mikrobus-rust-debug' && pendingDebugLaunch) {
+        const pending = pendingDebugLaunch;
+        pendingDebugLaunch = undefined;
+        if (pending.ownedBreakpoint) {
+          debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
+        }
+        return;
+      }
+      if (
+        session.type === 'cortex-debug' &&
+        session.configuration.__mikrobusCodegrip === true &&
+        pendingCodegripDebugLaunch &&
+        session.configuration.__mikrobusCodegripToken === pendingCodegripDebugLaunch.token
+      ) {
+        const pending = pendingCodegripDebugLaunch;
+        pendingCodegripDebugLaunch = undefined;
+        codegripDebugServers.set(session.id, pending.runtime);
+        void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', true);
       }
     }),
     vscode.debug.registerDebugAdapterTrackerFactory('mikrobus-rust-debug', {
       createDebugAdapterTracker(session) {
-        let configurationDoneRequestSeq;
-        return {
-          onWillReceiveMessage(message) {
-            if (message?.type === 'request' && message.command === 'configurationDone') {
-              configurationDoneRequestSeq = message.seq;
-            }
-            if (
-              message?.type === 'request' &&
-              ['continue', 'next', 'stepIn', 'stepOut', 'restart', 'disconnect', 'terminate'].includes(message.command)
-            ) {
-              cancelScheduledVariableDump(session.id);
-            }
-          },
-          onDidSendMessage(message) {
-            if (
-              configurationDoneRequestSeq !== undefined &&
-              message?.type === 'response' &&
-              message.request_seq === configurationDoneRequestSeq &&
-              message.success !== false
-            ) {
-              configurationDoneRequestSeq = undefined;
-              void continueFromResetToEntry(session);
-            }
-            if (message?.type === 'event' && message.event === 'stopped') {
-              scheduleVariableDump(session, message.body?.threadId, message.body?.reason);
-            }
-          }
-        };
+        return createMikrobusDebugTracker(session, true);
+      }
+    }),
+    vscode.debug.registerDebugAdapterTrackerFactory('cortex-debug', {
+      createDebugAdapterTracker(session) {
+        if (session.configuration.__mikrobusCodegrip !== true) return undefined;
+        return createMikrobusDebugTracker(session, false);
       }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {
       stopDebugServerProcess(session.id);
+      const codegripRuntime = codegripDebugServers.get(session.id);
+      if (codegripRuntime) {
+        codegripDebugServers.delete(session.id);
+        void stopCodegripServer(codegripRuntime);
+        if (codegripDebugServers.size === 0) {
+          void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', false);
+        }
+      }
       cancelScheduledVariableDump(session.id);
       debugVariableDumpInProgress.delete(session.id);
       const breakpoint = debugOwnedBreakpoints.get(session.id);
@@ -344,8 +390,18 @@ function registerMcuConfigurator(context) {
         vscode.debug.removeBreakpoints([breakpoint]);
         debugOwnedBreakpoints.delete(session.id);
       }
-    })
+    }),
+    {
+      dispose() {
+        for (const sessionId of [...debugServerProcesses.keys()]) stopDebugServerProcess(sessionId);
+        for (const runtime of codegripDebugServers.values()) void stopCodegripServer(runtime);
+        codegripDebugServers.clear();
+        if (pendingCodegripDebugLaunch?.runtime) void stopCodegripServer(pendingCodegripDebugLaunch.runtime);
+        pendingCodegripDebugLaunch = undefined;
+      }
+    }
   );
+  void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', false);
   void updateWorkspaceContext();
 }
 
@@ -806,6 +862,158 @@ function resolveToolExecutable(tool) {
   );
 }
 
+function isCodegripProgrammer(setup) {
+  return /codegrip/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
+}
+
+function resolveCodegripExecutable() {
+  const executableName = executableFileName('CodegripGdbServer');
+  const configured = configuredToolPath('codegripServerPath');
+  if (configured) {
+    const candidate = fs.existsSync(configured) && fs.statSync(configured).isDirectory()
+      ? path.join(configured, executableName)
+      : configured;
+    if (!isExecutableFile(candidate)) {
+      throw new Error(`Configured CodegripGdbServer was not found or is not executable: ${candidate}`);
+    }
+    return candidate;
+  }
+
+  const fromPath = findExecutableOnPath('CodegripGdbServer');
+  if (fromPath) return fromPath;
+
+  const nectoCandidate = path.join(
+    os.homedir(),
+    '.MIKROE',
+    'NECTOStudio7',
+    'packages',
+    'programmers',
+    'codegrip',
+    'apps',
+    'bin',
+    executableName
+  );
+  if (isExecutableFile(nectoCandidate)) return nectoCandidate;
+
+  throw new Error(
+    `CodegripGdbServer was not found. Set mikrobusRust.codegripServerPath to the executable or its bin directory. ` +
+    `The detected NECTO location was ${nectoCandidate}.`
+  );
+}
+
+function resolveCodegripPacksPath(serverExecutable) {
+  const configured = configuredToolPath('codegripPacksPath');
+  const candidates = [
+    configured,
+    path.resolve(path.dirname(serverExecutable), '..', '..', 'packs'),
+    path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip', 'packs')
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => {
+    try { return fs.statSync(candidate).isDirectory(); } catch { return false; }
+  });
+  if (found) return found;
+  throw new Error(
+    `CODEGRIP packs were not found. Set mikrobusRust.codegripPacksPath to the packs directory. ` +
+    `Checked: ${candidates.join(', ')}`
+  );
+}
+
+function codegripOperationOptions(setup, channel) {
+  const executable = resolveCodegripExecutable();
+  const packsPath = resolveCodegripPacksPath(executable);
+  const discovered = normalizeDiscoveredDevice(setup?.codegripConnection);
+  if (!discovered) {
+    throw new Error(
+      'This CODEGRIP setup has no discovered USB connection. Reopen Hardware Configuration, select CODEGRIP, ' +
+      'choose Find USB CODEGRIP, and rebuild the setup.'
+    );
+  }
+  const profile = normalizeConnectionProfile(discovered);
+  channel.appendLine(`CODEGRIP USB device: ${discovered.deviceName} (${discovered.serialNumber})`);
+  channel.appendLine(`Programmer profile: ${setup.programmerName || 'MIKROE CODEGRIP'} (${setup.programmerUid || 'MIKROE_CODEGRIP'})`);
+  return {
+    executable,
+    packsPath,
+    mcu: setup.mcuName,
+    profile,
+    eraseCommand: String(vscode.workspace.getConfiguration('mikrobusRust').get('codegripEraseCommand', 'erase') || 'erase').trim(),
+    channel
+  };
+}
+
+function codegripDiscoveryOptions(mcuName, channel) {
+  const executable = resolveCodegripExecutable();
+  return {
+    executable,
+    packsPath: resolveCodegripPacksPath(executable),
+    mcu: mcuName,
+    channel,
+    commandTimeoutMs: 8000
+  };
+}
+
+function resolveArmGccExecutable(context, toolName) {
+  const executableName = executableFileName(toolName);
+  const configured = configuredToolPath('armGccBinPath');
+  if (configured) {
+    let candidate = path.join(configured, executableName);
+    if (fs.existsSync(configured) && fs.statSync(configured).isFile()) {
+      candidate = path.basename(configured).toLowerCase() === executableName.toLowerCase()
+        ? configured
+        : path.join(path.dirname(configured), executableName);
+    }
+    if (!isExecutableFile(candidate)) {
+      throw new Error(`Configured ARM GCC tool was not found or is not executable: ${candidate}`);
+    }
+    return candidate;
+  }
+
+  const fromPath = findExecutableOnPath(toolName);
+  if (fromPath) return fromPath;
+
+  const runnerRoot = path.join(getManagedRoot(context), 'runner');
+  let directories = [];
+  try {
+    directories = fs.readdirSync(runnerRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('xpack-arm-none-eabi-gcc-'))
+      .map((entry) => entry.name)
+      .sort((left, right) => right.localeCompare(left));
+  } catch {
+    // Development Environment may not have installed ARM GCC yet.
+  }
+  for (const directory of directories) {
+    const candidate = path.join(runnerRoot, directory, 'bin', executableName);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+
+  throw new Error(
+    `${toolName} was not found. Install ARM GCC in Development Environment, add it to PATH, or set mikrobusRust.armGccBinPath to its bin directory.`
+  );
+}
+
+async function withCodegripHex(context, programBinary, channel, action) {
+  const objcopy = resolveArmGccExecutable(context, 'arm-none-eabi-objcopy');
+  const hexFile = path.join(
+    os.tmpdir(),
+    `mikrobus-codegrip-${process.pid}-${Date.now()}-${path.basename(programBinary).replace(/[^a-z0-9_.-]+/gi, '-')}.hex`
+  );
+  channel.appendLine(`Resolved ARM objcopy: ${objcopy}`);
+  const code = await runStreaming(objcopy, ['-O', 'ihex', programBinary, hexFile], path.dirname(programBinary), channel);
+  if (code !== 0) throw new Error(`arm-none-eabi-objcopy failed with exit code ${code}. See the MikroBUS Rust output.`);
+  try {
+    return await action(hexFile);
+  } finally {
+    fs.rmSync(hexFile, { force: true });
+  }
+}
+
+async function flashElfWithCodegrip(context, setup, programBinary, channel) {
+  const options = codegripOperationOptions(setup, channel);
+  await withCodegripHex(context, programBinary, channel, async (hexFile) => {
+    await programCodegrip({ ...options, hexFile, debugEnable: false });
+  });
+}
+
 function buildToolEnvironment(executable) {
   const env = { ...process.env };
   const existingPath = env.PATH || env.Path || env.path || '';
@@ -945,7 +1153,9 @@ function stopDebugServerProcess(sessionId) {
 
 function activeMikrobusDebugSession() {
   const session = vscode.debug.activeDebugSession;
-  if (!session || session.type !== 'mikrobus-rust-debug') {
+  const isProbeRs = session?.type === 'mikrobus-rust-debug';
+  const isCodegrip = session?.type === 'cortex-debug' && session.configuration.__mikrobusCodegrip === true;
+  if (!session || (!isProbeRs && !isCodegrip)) {
     throw new Error('No active MikroBUS Rust debug session. Start debugging a Rust file first.');
   }
   return session;
@@ -1211,6 +1421,7 @@ async function buildCurrentRustSource(binding, setup, source, channel, flash) {
   const binName = 'mikrobus_current';
   return withTemporaryRustBinary(binding, source, binName, async () => {
     await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
+    const programBinary = resolveBuiltNamedBinary(binding, setup, binName);
     if (flash) {
       await executeChecked(
         channel,
@@ -1219,6 +1430,7 @@ async function buildCurrentRustSource(binding, setup, source, channel, flash) {
         binding.sdkRoot
       );
     }
+    return { programBinary, binName };
   });
 }
 
@@ -1298,6 +1510,53 @@ async function debugCurrentRustFile(context) {
   if (editor) await editor.document.save();
 
   const { programBinary } = await buildCurrentRustSourceForDebug(binding, setup, source, channel);
+  if (isCodegripProgrammer(setup)) {
+    const cortexDebug = vscode.extensions.getExtension('marus25.cortex-debug');
+    if (!cortexDebug) {
+      throw new Error('CODEGRIP debugging requires the Cortex-Debug extension (marus25.cortex-debug). Install it and reload VS Code.');
+    }
+    await cortexDebug.activate();
+    const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
+    const options = codegripOperationOptions(setup, channel);
+    channel.appendLine(`Debug source: ${source}`);
+    channel.appendLine(`Debug ELF: ${programBinary}`);
+    channel.appendLine(`Resolved ARM GDB: ${gdbPath}`);
+
+    const runtime = await withCodegripHex(context, programBinary, channel, (hexFile) => (
+      prepareCodegripDebug({ ...options, hexFile })
+    ));
+    const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    pendingCodegripDebugLaunch = { token, runtime };
+    try {
+      const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
+        type: 'cortex-debug',
+        request: 'launch',
+        name: `MikroBUS Rust CODEGRIP: ${setup.mcuName}`,
+        servertype: 'external',
+        gdbTarget: `127.0.0.1:${runtime.debugPort}`,
+        executable: programBinary,
+        gdbPath,
+        cwd: binding.sdkRoot,
+        device: setup.mcuName,
+        interface: 'swd',
+        overrideLaunchCommands: [
+          'set mem inaccessible-by-default off',
+          'tbreak main',
+          'continue'
+        ],
+        showDevDebugOutput: 'none',
+        __mikrobusCodegrip: true,
+        __mikrobusCodegripToken: token
+      });
+      if (!started) throw new Error('VS Code did not start the CODEGRIP debug session.');
+      return;
+    } catch (error) {
+      if (pendingCodegripDebugLaunch?.token === token) pendingCodegripDebugLaunch = undefined;
+      await stopCodegripServer(runtime);
+      throw error;
+    }
+  }
+
   const probeRsExecutable = resolveToolExecutable('probe-rs');
   const entry = ensureEntryBreakpoint(source);
   channel.appendLine(`Debug source: ${source}`);
@@ -1339,11 +1598,12 @@ async function debugCurrentRustFile(context) {
 
 async function runBoundWorkspaceAction(context, action) {
   const { binding, setup } = requireWorkspaceBinding(context);
+  const useCodegrip = isCodegripProgrammer(setup);
 
   if (action === 'erase') {
     const confirmation = await vscode.window.showWarningMessage(
       `Erase all flash memory on ${setup.mcuName}?`,
-      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\n\nThis will erase the MCU flash through probe-rs. The configured setup itself will not be removed.` },
+      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\nProgrammer: ${setup.programmerName || setup.programmerUid}\n\nThis will erase the MCU flash through ${useCodegrip ? 'CODEGRIP' : 'probe-rs'}. The configured setup itself will not be removed.` },
       'Erase MCU'
     );
     if (confirmation !== 'Erase MCU') return;
@@ -1363,7 +1623,8 @@ async function runBoundWorkspaceAction(context, action) {
       const source = getActiveRustSource(binding);
       const editor = vscode.window.activeTextEditor;
       if (editor) await editor.document.save();
-      await buildCurrentRustSource(binding, setup, source, channel, true);
+      const result = await buildCurrentRustSource(binding, setup, source, channel, !useCodegrip);
+      if (useCodegrip) await flashElfWithCodegrip(context, setup, result.programBinary, channel);
       return;
     }
     if (action === 'buildCurrent') {
@@ -1378,11 +1639,20 @@ async function runBoundWorkspaceAction(context, action) {
       return;
     }
     if (action === 'flash') {
-      await executeChecked(channel, 'cargo', ['flash', '--chip', setup.mcuName, '--connect-under-reset'], binding.sdkRoot);
+      if (useCodegrip) {
+        await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
+        await flashElfWithCodegrip(context, setup, resolveBuiltProgramBinary(binding, setup), channel);
+      } else {
+        await executeChecked(channel, 'cargo', ['flash', '--chip', setup.mcuName, '--connect-under-reset'], binding.sdkRoot);
+      }
       return;
     }
     if (action === 'erase') {
-      await executeChecked(channel, 'probe-rs', ['erase', '--chip', setup.mcuName], binding.sdkRoot);
+      if (useCodegrip) {
+        await eraseCodegrip(codegripOperationOptions(setup, channel));
+      } else {
+        await executeChecked(channel, 'probe-rs', ['erase', '--chip', setup.mcuName], binding.sdkRoot);
+      }
       return;
     }
     throw new Error(`Unknown workspace action '${action}'.`);
@@ -1525,6 +1795,47 @@ async function handleMcuMessage(message, panel, context) {
     return;
   }
 
+  if (message.type === 'discoverCodegripUsb' && typeof message.mcuName === 'string') {
+    const mcuName = message.mcuName.trim();
+    const paths = getManagedPaths(context);
+    validateDatabaseSchema(paths.database);
+    const supported = readProgrammersForDevice(paths.database, mcuName)
+      .some((programmer) => programmer.uid === 'MIKROE_CODEGRIP');
+    if (!supported) throw new Error(`CODEGRIP is not configured as a supported programmer for ${mcuName}.`);
+    const channel = getOutputChannel();
+    channel.show(true);
+    channel.appendLine(`\n=== ${mcuName} · Find USB CODEGRIP ===`);
+    const discovery = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Searching for USB CODEGRIP devices...',
+      cancellable: false
+    }, () => discoverUsbCodegrips(codegripDiscoveryOptions(mcuName, channel)));
+    let device = discovery.devices[0];
+    if (discovery.devices.length > 1) {
+      const choice = await vscode.window.showQuickPick(
+        discovery.devices.map((candidate) => ({
+          label: candidate.deviceName || 'CODEGRIP',
+          description: candidate.serialNumber,
+          detail: `USB · ${candidate.hwTokens}`,
+          device: candidate
+        })),
+        { placeHolder: 'Select the USB CODEGRIP for this setup' }
+      );
+      device = choice?.device;
+    }
+    if (!device) {
+      void panel.webview.postMessage({ type: 'codegripUsbDiscoveryCancelled' });
+      return;
+    }
+    channel.appendLine(`Selected USB CODEGRIP: ${device.deviceName} (${device.serialNumber})`);
+    void panel.webview.postMessage({
+      type: 'codegripUsbDiscovered',
+      device,
+      discoveryCommand: discovery.command
+    });
+    return;
+  }
+
   if (message.type === 'generateConfiguration') {
     const payload = message.payload || {};
     const result = await vscode.window.withProgress({
@@ -1564,7 +1875,8 @@ async function handleMcuMessage(message, panel, context) {
       shieldUid: setup.shieldUid,
       shieldName: setup.shieldName,
       programmerUid: setup.programmerUid || 'SEGGER_JLINK',
-      programmerName: setup.programmerName || 'SEGGER J-Link'
+      programmerName: setup.programmerName || 'SEGGER J-Link',
+      codegripConnection: setup.codegripConnection
     };
     const result = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -2075,7 +2387,8 @@ async function ensurePortableSetupWorkspace(context, setup) {
     shieldUid: setup.shieldUid,
     shieldName: setup.shieldName,
     programmerUid: setup.programmerUid,
-    programmerName: setup.programmerName
+    programmerName: setup.programmerName,
+    codegripConnection: setup.codegripConnection
   };
   return vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -2108,6 +2421,12 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   const selectedProgrammer = programmers.find((programmer) => programmer.uid === programmerUid);
   if (!selectedProgrammer) {
     throw new Error(`Select a supported programmer for ${mcuName} before generating the configuration.`);
+  }
+  const codegripConnection = selectedProgrammer.uid === 'MIKROE_CODEGRIP'
+    ? normalizeDiscoveredDevice(payload.codegripConnection)
+    : undefined;
+  if (selectedProgrammer.uid === 'MIKROE_CODEGRIP' && !codegripConnection) {
+    throw new Error('Find and select a USB CODEGRIP connection before building this configuration.');
   }
   const familyImpl = readFamilyImplementationMetadata(paths.database, mcuName);
   const definitionPath = findMcuDefinition(paths.core, mcuName);
@@ -2228,6 +2547,7 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       shieldName: payload.shieldName || undefined,
       programmerUid: selectedProgrammer.uid,
       programmerName: selectedProgrammer.name,
+      codegripConnection,
       sdkRoot: paths.sdk,
       setupRoot,
       coreHeader: path.join(setupRoot, 'core', 'src', 'core_header.rs'),
@@ -2453,9 +2773,25 @@ function getMcuHtml(webview, extensionUri) {
         <section class="clockSection card programmerSection">
           <div>
             <h3>Programmer / debugger</h3>
-            <p>The relationship comes from <code>DeviceToProgrammer</code>. The model is ready for CODEGRIP and other programmers.</p>
+            <p>The available programmers come from <code>DeviceToProgrammer</code>.</p>
           </div>
           <label class="clockInput">Programmer<select id="programmerSelect"></select></label>
+        </section>
+
+        <section id="codegripConnectionCard" class="codegripConnectionCard card hidden">
+          <div>
+            <h3>CODEGRIP USB connection</h3>
+            <p>Connect CODEGRIP over USB, then scan for it. The discovered serial number and hardware tokens are stored with this setup.</p>
+          </div>
+          <div class="codegripConnectionActions">
+            <button id="findCodegripUsb" class="secondary">Find USB CODEGRIP</button>
+            <span id="codegripConnectionStatus" class="connectionStatus">No USB CODEGRIP selected</span>
+            <div id="codegripConnectionDetails" class="connectionDetails hidden">
+              <span>Device<strong id="codegripDeviceName">—</strong></span>
+              <span>Serial number<code id="codegripSerialNumber">—</code></span>
+              <span>Hardware tokens<code id="codegripHwTokens">—</code></span>
+            </div>
+          </div>
         </section>
 
         <div class="generateBar">

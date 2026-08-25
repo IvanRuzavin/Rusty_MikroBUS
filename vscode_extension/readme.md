@@ -2,7 +2,24 @@
 
 VS Code support for reusable mikroSDK Rust setups, project build/flash/debug actions, and MCU or board-based hardware configuration.
 
-## Version 0.0.21
+## Version 0.0.23
+
+- Adds **Find USB CODEGRIP** to the MCU/board setup wizard whenever MIKROE CODEGRIP is selected.
+- Discovers the attached local USB device, lets the user choose when several devices are returned, and saves its serial number, hardware tokens, and stable connection fields with the reusable setup.
+- Disables **Build Configuration** for a CODEGRIP setup until a USB device has been discovered.
+- Removes `mikrobusRust.codegripProfilePath` and the manually maintained connection-profile file. Flash, erase, and debug now use the device stored in the setup.
+- Does not change any Development Environment package or tool paths.
+
+Version 0.0.23 retains the complete 0.0.22 programmer integration and earlier setup behavior:
+
+- Adds MIKROE CODEGRIP as a database-selected programmer/debugger alongside SEGGER J-Link.
+- Implements the supplied `CodegripGdbServer` launch contract, dynamic ports, framed JSON control channel, USB/Wi-Fi selection, optional authentication, target options, Intel HEX programming, and external-GDB debugging.
+- Converts Rust ELF files with the ARM GCC package already managed by Development Environment. Existing Development Environment package paths are unchanged.
+- Uses Cortex-Debug only for CODEGRIP's GDB endpoint. The existing probe-rs DAP path remains unchanged for SEGGER J-Link setups.
+- Keeps one Rust database and removes the incompatible Nucleo-F412ZG / Nucleo-144 Click Shield relationship.
+- Routes standalone erase through a configurable CODEGRIP command. The supplied samples do not document that command, so `erase` is the compatibility default and any server rejection is displayed.
+
+It also retains the complete 0.0.21 setup, BSP, board, shieldless-board, project, Windows-debug, and variable-printing behavior:
 
 - Makes shields optional for board-based setups. A board remains buildable when it has no `BoardToShield` relationship.
 - Adds an explicit **No shield (no mikrobus.rs)** choice for every board.
@@ -41,7 +58,7 @@ The extension requires VS Code 1.101 or newer. Its managed packages include the 
 2. Open the **MikroBUS Rust** Activity Bar view.
 3. If no setup exists, choose **Configure my first setup**.
 4. Select **MCU** or **Board**.
-5. Configure the device clock/register values and choose the programmer. Version 0.0.21 exposes only **SEGGER J-Link**.
+5. Configure the device clock/register values and choose **SEGGER J-Link** or **MIKROE CODEGRIP**, according to the relationships in the single Rust database.
 6. For a board setup, optionally select a compatible shield. Choose **No shield** when the board is used by itself.
 7. Build the reusable setup, return to **Configured Setups**, and choose **Apply to project**.
 8. Open the Rust file to run and use the editor-title buttons:
@@ -71,7 +88,7 @@ The Hardware Configuration window starts with two modes:
 
 ### MCU
 
-Select a Rust-supported MCU, configure its clock/register values, then select a compatible programmer. The initial database connects every current MCU to SEGGER J-Link over SWD.
+Select a Rust-supported MCU, configure its clock/register values, then select a compatible programmer. The updated database connects every current MCU to SEGGER J-Link and MIKROE CODEGRIP over SWD.
 
 ### Board
 
@@ -81,8 +98,8 @@ The board data is:
 
 | Board | MCU / Rust SDK target | Shield | Programmer |
 |---|---|---|---|
-| Nucleo-F412ZG | STM32F412ZG | Optional; no database relationship required | SEGGER J-Link / SWD |
-| Nucleo-F429ZI | STM32F429ZI | Click Shield for Nucleo-144 (4 sockets) | SEGGER J-Link / SWD |
+| Nucleo-F412ZG | STM32F412ZG | Optional; no database relationship required | SEGGER J-Link or MIKROE CODEGRIP / SWD |
+| Nucleo-F429ZI | STM32F429ZI | Click Shield for Nucleo-144 (4 sockets) | SEGGER J-Link or MIKROE CODEGRIP / SWD |
 
 Both boards use their native Rust MCU definitions and database entries.
 
@@ -119,7 +136,7 @@ The supplied NECTO database already models boards and board/device relationships
 | `BoardToDevice` | One or more Rust-compatible MCU targets for a board |
 | `BoardToShield` | Shields that can be selected for a board |
 
-The related `Programmer`, `Board`, and `Shield` tables carry stable UIDs, BSP paths, enable flags, and JSON extension fields. Adding CODEGRIP later requires a programmer row and device links; transport-specific execution can then be added without changing board or shield data.
+The related `Programmer`, `Board`, and `Shield` tables carry stable UIDs, BSP paths, enable flags, and JSON extension fields. Version 0.0.22 adds `MIKROE_CODEGRIP` and its device links without changing the schema. Future programmers remain data-driven through the same tables.
 
 All MCU, programmer, board, shield, and relationship tables live in one file:
 
@@ -135,9 +152,35 @@ On the reported Linux installation this resolves to:
 
 The extension opens that database read-only for configuration queries. It does not load another database, copy a schema beside the extension, or modify the database at runtime. Database replacement continues to use the existing Development Environment location.
 
+## CODEGRIP setup and operation
+
+Choose **MIKROE CODEGRIP** while building an MCU or board setup, connect it over USB, and choose **Find USB CODEGRIP**. If more than one local device is returned, select the required serial number. The extension stores the stable USB selector fields with the reusable setup, so the same lightning, debug, and eraser actions automatically use that CODEGRIP.
+
+The extension checks these paths without changing any package location shown in Development Environment:
+
+1. `mikrobusRust.codegripServerPath`, then `PATH`, then `~/.MIKROE/NECTOStudio7/packages/programmers/codegrip/apps/bin/CodegripGdbServer`;
+2. `mikrobusRust.codegripPacksPath`, then the packs directory inferred from that server, then the standard NECTOStudio7 CODEGRIP package;
+3. `mikrobusRust.armGccBinPath`, then `PATH`, then the existing managed `runner/xpack-arm-none-eabi-gcc-*/bin` package.
+
+No connection-profile file is required. Discovery records the communication type, device name, serial number, hardware tokens, device IP, link ports, and SSL state. Process IDs, signal-strength samples, dynamic server ports, and passwords are not persisted.
+
+The supplied CODEGRIP command examples document device selection after connection data is known, but do not name the Suite's discovery command. The extension therefore accepts USB-device results from the known framed control response/notification shapes and tries compatibility discovery command names. The **MikroBUS Rust** output channel lists the attempted command and any server rejection so a different installed server build can be diagnosed without hiding the error.
+
+The server command is:
+
+```text
+CodegripGdbServer --mcu <MCU> --port 0 --cport 0 --packs <packs-directory>
+```
+
+Flash builds the Rust source, converts its ELF to Intel HEX, configures CODEGRIP, and sends `programming` with `debugEnable: false`. Debug sends `programming` with `debugEnable: true`, retains the server, then launches Cortex-Debug against the published GDB port. Debug Console variable printing remains available.
+
+The database exposes CODEGRIP for all 38 MCUs currently present in the Rust SDK database. The installed CODEGRIP packs remain the final authority for a particular MCU. The supplied executable tests explicitly exercise STM32F407ZG; validate each additional physical MCU/probe combination before relying on it in production.
+
+The supplied command set demonstrates erase as part of programming but does not name a standalone erase command. Version 0.0.23 sends `mikrobusRust.codegripEraseCommand`, defaulting to `erase`. If the server rejects it, the returned status and text are shown; set the exact command supported by that server version.
+
 ## Windows debugging
 
-Version 0.0.21 starts probe-rs as:
+The probe-rs backend retained by version 0.0.23 starts probe-rs as:
 
 ```text
 probe-rs dap-server --port <temporary-local-port>
@@ -174,7 +217,7 @@ The extension launches with SWD, connects under reset, flashes the ELF, halts sa
 - static/global scopes exposed on the top frame; and
 - nested children up to the configured limits.
 
-The probe-rs DAP adapter and Rust debug information decide which optimized-away or hardware-only values are available. Values that the adapter does not expose cannot be reconstructed by the extension.
+The selected debug adapter and Rust debug information decide which optimized-away or hardware-only values are available. Values that the adapter does not expose cannot be reconstructed by the extension.
 
 Limits can be tuned with:
 
@@ -196,7 +239,7 @@ Use **MikroBUS Rust: Print Variables to Debug Console** for an on-demand dump wh
 | `MikroBUS Rust: Apply Setup to Current Workspace` | Apply a saved reusable setup |
 | `MikroBUS Rust: Build Current Rust File` | Build the active Rust source |
 | `MikroBUS Rust: Build & Flash Current Rust File` | Build and flash the active Rust source |
-| `MikroBUS Rust: Debug Current Rust File` | Start probe-rs DAP debugging |
+| `MikroBUS Rust: Debug Current Rust File` | Start probe-rs DAP or CODEGRIP external-GDB debugging, according to the setup |
 | `MikroBUS Rust: Erase Configured MCU` | Erase the selected MCU |
 | `MikroBUS Rust: Print Variables to Debug Console` | Dump visible variables while paused |
 
@@ -204,6 +247,7 @@ Use **MikroBUS Rust: Print Variables to Debug Console** for an on-demand dump wh
 
 ```text
 npm run check
+npm test
 npx @vscode/vsce package --allow-missing-repository --skip-license
 ```
 
@@ -212,4 +256,5 @@ The release verification also exercises the database migration, board/shield que
 ## References
 
 - probe-rs debugger: https://probe.rs/docs/tools/debugger/
+- Cortex-Debug external server support: https://github.com/Marus/cortex-debug
 - VS Code debug adapter API: https://code.visualstudio.com/api/references/vscode-api

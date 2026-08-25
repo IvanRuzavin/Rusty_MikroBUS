@@ -266,7 +266,32 @@ button.selectionCard:hover { background: var(--vscode-list-hoverBackground); bor
 .selectionCard span { color: var(--vscode-descriptionForeground); line-height: 1.5; }
 .boardTable { min-width: 720px; }
 .programmerSection { margin-top: 24px; }
+.codegripConnectionCard {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(320px, 1.25fr);
+  gap: 28px;
+  align-items: start;
+  padding: 16px 18px;
+  margin-bottom: 24px;
+}
+.codegripConnectionCard h3 { margin: 0 0 4px; font-size: 15px; }
+.codegripConnectionCard p { margin: 0; color: var(--vscode-descriptionForeground); line-height: 1.45; }
+.codegripConnectionActions { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; }
+.connectionStatus { color: var(--vscode-descriptionForeground); font-size: 12px; }
+.connectionStatus.scanning { color: var(--vscode-charts-yellow, var(--vscode-notificationsWarningIcon-foreground)); }
+.connectionStatus.connected { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+.connectionDetails {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 2px;
+}
+.connectionDetails span { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--vscode-descriptionForeground); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.connectionDetails strong, .connectionDetails code { color: var(--vscode-foreground); font-size: 12px; text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
 
 @media (max-width: 700px) {
   .selectionCards { grid-template-columns: 1fr; }
+  .codegripConnectionCard { grid-template-columns: 1fr; }
+  .connectionDetails { grid-template-columns: 1fr; }
 }
