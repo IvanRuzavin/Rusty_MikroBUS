@@ -3,21 +3,30 @@
 
   const state = {
     mcus: [],
+    boards: [],
     filtered: [],
     setups: [],
     activeSetupId: undefined,
     detail: undefined,
     currentSetup: undefined,
+    selectionMode: undefined,
+    selectedBoard: undefined,
+    shields: [],
+    programmers: [],
+    project: { available: false, hasCargoToml: false },
     workspaceBinding: undefined,
-    view: 'catalog'
+    view: 'start'
   };
 
   const missingState = document.getElementById('missingState');
   const workspace = document.getElementById('workspace');
+  const startView = document.getElementById('startView');
   const catalogView = document.getElementById('catalogView');
+  const boardCatalogView = document.getElementById('boardCatalogView');
   const configView = document.getElementById('configView');
   const setupsView = document.getElementById('setupsView');
   const mcuTableBody = document.getElementById('mcuTableBody');
+  const boardTableBody = document.getElementById('boardTableBody');
   const setupTableBody = document.getElementById('setupTableBody');
   const mcuCount = document.getElementById('mcuCount');
   const setupCount = document.getElementById('setupCount');
@@ -27,15 +36,14 @@
   const generationStatus = document.getElementById('generationStatus');
 
   document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
-  document.getElementById('openSetup').addEventListener('click', () => vscode.postMessage({ type: 'openSetup' }));
   document.getElementById('showSetups').addEventListener('click', showConfiguredSetups);
   document.getElementById('showSetupsFromConfig').addEventListener('click', showConfiguredSetups);
-  document.getElementById('backToMcus').addEventListener('click', showCatalog);
-  document.getElementById('backToMcusFromSetups').addEventListener('click', showCatalog);
-  document.getElementById('workspaceBuild').addEventListener('click', () => workspaceAction('buildCurrent'));
-  document.getElementById('workspaceFlash').addEventListener('click', () => workspaceAction('flashCurrent'));
-  document.getElementById('workspaceDebug').addEventListener('click', () => workspaceAction('debugCurrent'));
-  document.getElementById('workspaceErase').addEventListener('click', () => workspaceAction('erase'));
+  document.getElementById('chooseMcuMode').addEventListener('click', showCatalog);
+  document.getElementById('chooseBoardMode').addEventListener('click', showBoardCatalog);
+  document.getElementById('backToStartFromMcus').addEventListener('click', showStart);
+  document.getElementById('backToStartFromBoards').addEventListener('click', showStart);
+  document.getElementById('backToMcus').addEventListener('click', showSelectionCatalog);
+  document.getElementById('backToMcusFromSetups').addEventListener('click', showStart);
 
   search.addEventListener('input', filterMcuList);
 
@@ -43,6 +51,8 @@
     if (!state.detail) return;
     const values = collectRegisterValues();
     const clockMhz = document.getElementById('clockMhz').value;
+    const shieldSelect = document.getElementById('shieldSelect');
+    const shieldUid = shieldSelect.value || undefined;
 
     generationStatus.textContent = state.currentSetup ? 'Updating and rebuilding configuration...' : 'Building configuration...';
     generateButton.disabled = true;
@@ -52,7 +62,14 @@
         setupId: state.currentSetup?.id,
         mcuName: state.detail.name,
         clockMhz,
-        values
+        values,
+        selectionMode: state.selectionMode || 'mcu',
+        boardUid: state.selectedBoard?.uid,
+        boardName: state.selectedBoard?.name,
+        shieldUid,
+        shieldName: shieldUid ? selectedOptionLabel(shieldSelect) : undefined,
+        programmerUid: document.getElementById('programmerSelect').value,
+        programmerName: selectedOptionLabel(document.getElementById('programmerSelect'))
       }
     });
   });
@@ -74,7 +91,7 @@
       code.textContent = message.managedRoot || '';
       const button = document.createElement('button');
       button.textContent = 'Open Environment Setup';
-      button.addEventListener('click', () => vscode.postMessage({ type: 'openSetup' }));
+      button.addEventListener('click', () => vscode.postMessage({ type: 'openEnvironment' }));
       missingState.append(title, p, code, button);
       return;
     }
@@ -83,19 +100,39 @@
       missingState.classList.add('hidden');
       workspace.classList.remove('hidden');
       state.mcus = Array.isArray(message.mcus) ? message.mcus : [];
+      state.boards = Array.isArray(message.boards) ? message.boards : [];
       state.setups = Array.isArray(message.setups) ? message.setups : [];
       state.activeSetupId = message.activeSetupId;
       state.workspaceBinding = message.workspace;
+      state.project = message.project || { available: false, hasCargoToml: false };
       filterMcuList();
+      renderBoardTable();
       renderConfiguredSetups();
       updateTopCounts();
+      if (state.view === 'start') showStart();
       return;
     }
 
     if (message.type === 'mcuDetail') {
       state.detail = message.detail;
       state.currentSetup = message.setup;
+      state.selectionMode = 'mcu';
+      state.selectedBoard = undefined;
+      state.shields = [];
+      state.programmers = Array.isArray(message.programmers) ? message.programmers : [];
       renderMcuDetail(message.detail, message.setup);
+      showView('config');
+      return;
+    }
+
+    if (message.type === 'boardDetail') {
+      state.detail = message.mcu;
+      state.currentSetup = message.setup;
+      state.selectionMode = 'board';
+      state.selectedBoard = message.board;
+      state.shields = Array.isArray(message.shields) ? message.shields : [];
+      state.programmers = Array.isArray(message.programmers) ? message.programmers : [];
+      renderMcuDetail(message.mcu, message.setup);
       showView('config');
       return;
     }
@@ -113,6 +150,7 @@
       document.getElementById('setupState').textContent = 'Saved setup';
       document.getElementById('setupState').className = 'statusBadge configured';
       filterMcuList();
+      renderBoardTable();
       renderConfiguredSetups();
       updateTopCounts();
       setSetupsStatus(result.warning ? `Generated with warning: ${result.warning}` : `Generated ${result.mcuName || 'configuration'} successfully.`);
@@ -124,6 +162,7 @@
       state.workspaceBinding = message.workspace;
       state.setups = Array.isArray(message.setups) ? message.setups : state.setups;
       renderConfiguredSetups();
+      renderBoardTable();
       updateTopCounts();
       setSetupsStatus(message.workspace ? `${message.workspace.mcuName} is now used by the current Rust workspace.` : 'Workspace binding updated.');
       showConfiguredSetups();
@@ -140,6 +179,7 @@
       state.activeSetupId = message.activeSetupId;
       renderConfiguredSetups();
       filterMcuList();
+      renderBoardTable();
       updateTopCounts();
       setSetupsStatus(`Rebuilt ${message.result?.mcuName || 'configuration'} successfully.`);
       return;
@@ -151,6 +191,7 @@
       state.workspaceBinding = message.workspace;
       renderConfiguredSetups();
       filterMcuList();
+      renderBoardTable();
       updateTopCounts();
       setSetupsStatus('Configured setup removed.');
       return;
@@ -219,6 +260,40 @@
     vscode.postMessage({ type: 'selectMcu', name });
   }
 
+  function renderBoardTable() {
+    document.getElementById('boardCount').textContent = String(state.boards.length);
+    boardTableBody.replaceChildren(...state.boards.map((board) => {
+      const row = document.createElement('tr');
+      row.tabIndex = 0;
+      row.className = 'clickableRow';
+      const open = () => requestBoard(board.uid, board.name);
+      row.addEventListener('click', open);
+      row.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          open();
+        }
+      });
+      appendCell(row, board.name || board.uid, 'mcuNameCell');
+      appendCell(row, board.vendor || '—');
+      appendCodeCell(row, board.mcuName || '—');
+      const saved = state.setups.find((setup) => setup.selectionMode === 'board' && setup.boardUid === board.uid);
+      const statusCell = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = saved ? 'statusBadge configured' : 'statusBadge available';
+      badge.textContent = saved ? 'Configured' : 'Available';
+      statusCell.append(badge);
+      row.append(statusCell);
+      return row;
+    }));
+  }
+
+  function requestBoard(uid, name) {
+    generationStatus.textContent = '';
+    showLoading(`Loading ${name || uid}...`);
+    vscode.postMessage({ type: 'selectBoard', uid });
+  }
+
   function renderMcuDetail(detail, setup) {
     document.getElementById('selectedName').textContent = detail.name || '';
     document.getElementById('selectedVendor').textContent = detail.vendor || '—';
@@ -226,6 +301,41 @@
     document.getElementById('selectedTarget').textContent = detail.target || '—';
     document.getElementById('selectedSystem').textContent = detail.systemLib || '—';
     document.getElementById('clockMhz').value = setup?.clockMhz ?? detail.clock ?? '';
+
+    const boardCard = document.getElementById('boardSelectionCard');
+    const shieldSelect = document.getElementById('shieldSelect');
+    if (state.selectionMode === 'board' && state.selectedBoard) {
+      boardCard.classList.remove('hidden');
+      document.getElementById('selectedBoardName').textContent = state.selectedBoard.name || state.selectedBoard.uid;
+      const shieldHint = state.shields.length === 0
+        ? 'No compatible shield is configured. This setup will not generate mikrobus.rs.'
+        : 'Shield selection is optional. Choose No shield to apply the board without generating mikrobus.rs.';
+      document.getElementById('selectedBoardDevice').textContent = `Hardware MCU ${state.selectedBoard.config?.hardwareDevice || '—'} · Rust compatibility MCU ${detail.name || '—'} · ${shieldHint}`;
+      const noShieldOption = document.createElement('option');
+      noShieldOption.value = '';
+      noShieldOption.textContent = 'No shield (no mikrobus.rs)';
+      noShieldOption.selected = setup ? !setup.shieldUid : !state.shields.some((shield) => shield.isDefault);
+      shieldSelect.replaceChildren(noShieldOption, ...state.shields.map((shield) => {
+        const option = document.createElement('option');
+        option.value = shield.uid;
+        option.textContent = `${shield.name} (${shield.mikrobusCount} mikroBUS)`;
+        option.selected = setup?.shieldUid ? setup.shieldUid === shield.uid : Boolean(shield.isDefault);
+        return option;
+      }));
+    } else {
+      boardCard.classList.add('hidden');
+      shieldSelect.replaceChildren();
+    }
+
+    const programmerSelect = document.getElementById('programmerSelect');
+    programmerSelect.replaceChildren(...state.programmers.map((programmer) => {
+      const option = document.createElement('option');
+      option.value = programmer.uid;
+      option.textContent = `${programmer.name} · ${programmer.interface || programmer.transport || ''}`;
+      option.selected = setup?.programmerUid ? setup.programmerUid === programmer.uid : programmer.uid === 'SEGGER_JLINK';
+      return option;
+    }));
+    generateButton.disabled = state.programmers.length === 0;
 
     const stateBadge = document.getElementById('setupState');
     if (setup) {
@@ -286,6 +396,11 @@
     registerGrid.replaceChildren(...registerCards);
   }
 
+  function selectedOptionLabel(select) {
+    const text = select?.selectedOptions?.[0]?.textContent || '';
+    return text.split(' · ')[0].replace(/ \(\d+ mikroBUS\)$/, '').trim() || undefined;
+  }
+
   function collectRegisterValues() {
     const values = {};
     registerGrid.querySelectorAll('select[data-field-id]').forEach((select) => {
@@ -310,7 +425,7 @@
     table.classList.remove('hidden');
     setupTableBody.replaceChildren(...state.setups.map((setup) => {
       const row = document.createElement('tr');
-      appendCell(row, setup.mcuName || '—', 'mcuNameCell');
+      appendCell(row, setup.selectionMode === 'board' ? (setup.boardName || setup.boardUid || setup.mcuName) : (setup.mcuName || '—'), 'mcuNameCell');
       appendCell(row, [setup.vendor, setup.family].filter(Boolean).join(' / ') || '—');
       appendCell(row, `${setup.clockMhz ?? '—'} MHz`);
       appendCodeCell(row, setup.target || '—');
@@ -327,11 +442,16 @@
 
       const actionsCell = document.createElement('td');
       actionsCell.className = 'actionsCell';
+      const applyButton = actionButton(usedHere ? 'Re-apply to workspace' : 'Apply to workspace', () => {
+        setSetupsStatus(`Applying ${setup.mcuName} to current Rust workspace...`);
+        vscode.postMessage({ type: 'useSetupWithWorkspace', id: setup.id });
+      }, usedHere ? 'primaryAction' : '');
+      applyButton.disabled = !state.project.hasCargoToml;
+      applyButton.title = state.project.hasCargoToml
+        ? ''
+        : 'Open a project with Cargo.toml in the workspace root before applying a setup.';
       actionsCell.append(
-        actionButton(usedHere ? 'Re-apply to workspace' : 'Apply to workspace', () => {
-          setSetupsStatus(`Applying ${setup.mcuName} to current Rust workspace...`);
-          vscode.postMessage({ type: 'useSetupWithWorkspace', id: setup.id });
-        }, usedHere ? 'primaryAction' : ''),
+        applyButton,
         actionButton('Edit clock/settings', () => {
           showLoading(`Loading ${setup.mcuName}...`);
           vscode.postMessage({ type: 'editSetup', id: setup.id });
@@ -358,14 +478,9 @@
     document.getElementById('workspaceBindingPath').textContent = `Reusable setup: ${state.workspaceBinding.sdkRoot || '—'} · Project: ${state.workspaceBinding.openedRoot || state.workspaceBinding.workspaceName || '—'}`;
   }
 
-  function workspaceAction(action) {
-    setSetupsStatus(`${action === 'buildFlashCurrent' ? 'Building and flashing current Rust file' : action}...`);
-    vscode.postMessage({ type: 'workspaceAction', action });
-  }
-
   function setupForMcu(mcuName) {
     const key = String(mcuName || '').toLowerCase();
-    return state.setups.find((setup) => String(setup.mcuName || '').toLowerCase() === key);
+    return state.setups.find((setup) => setup.selectionMode !== 'board' && String(setup.mcuName || '').toLowerCase() === key);
   }
 
   function actionButton(label, action, extraClass = '') {
@@ -406,11 +521,34 @@
   }
 
   function showCatalog() {
+    state.selectionMode = 'mcu';
     state.detail = undefined;
     state.currentSetup = undefined;
     generationStatus.textContent = '';
     showView('catalog');
     search.focus();
+  }
+
+  function showBoardCatalog() {
+    state.selectionMode = 'board';
+    state.detail = undefined;
+    state.currentSetup = undefined;
+    generationStatus.textContent = '';
+    renderBoardTable();
+    showView('boards');
+  }
+
+  function showStart() {
+    state.selectionMode = undefined;
+    state.detail = undefined;
+    state.currentSetup = undefined;
+    generationStatus.textContent = '';
+    showView('start');
+  }
+
+  function showSelectionCatalog() {
+    if (state.selectionMode === 'board') showBoardCatalog();
+    else showCatalog();
   }
 
   function showLoading(text) {
@@ -420,7 +558,9 @@
 
   function showView(view) {
     state.view = view;
+    startView.classList.toggle('hidden', view !== 'start');
     catalogView.classList.toggle('hidden', view !== 'catalog');
+    boardCatalogView.classList.toggle('hidden', view !== 'boards');
     configView.classList.toggle('hidden', view !== 'config');
     setupsView.classList.toggle('hidden', view !== 'setups');
     document.getElementById('loadingView').classList.toggle('hidden', view !== 'loading');

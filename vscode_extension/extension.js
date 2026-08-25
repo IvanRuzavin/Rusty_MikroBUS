@@ -5,7 +5,11 @@ const os = require('os');
 const childProcess = require('child_process');
 const http = require('http');
 const https = require('https');
-const { registerMcuConfigurator } = require('./mcu_configurator');
+const {
+  registerMcuConfigurator,
+  getSetupDashboardState,
+  useSetupWithCurrentWorkspace
+} = require('./mcu_configurator');
 
 const VERSIONS = {
   probeRs: '0.32.0',
@@ -20,6 +24,7 @@ const URLS = {
     stlink: 'https://download.mikroe.com/setups/drivers/mikroprog/arm/st-link-usb-drivers.rar'
   },
   jlink: 'https://www.segger.com/downloads/jlink/',
+  bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
   rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
   probeRsShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.sh`,
   probeRsPowerShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.ps1`,
@@ -27,6 +32,7 @@ const URLS = {
 };
 
 let setupView;
+let environmentPanel;
 
 class MikrobusSetupViewProvider {
   constructor(context) {
@@ -41,10 +47,10 @@ class MikrobusSetupViewProvider {
       localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')]
     };
 
-    webviewView.webview.html = getSetupHtml(webviewView.webview, this.context.extensionUri);
+    webviewView.webview.html = getDashboardHtml(webviewView.webview, this.context.extensionUri);
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      await handleSetupMessage(message, webviewView, this.context);
+      await handleDashboardMessage(message, webviewView, this.context);
     }, null, this.context.subscriptions);
 
     webviewView.onDidDispose(() => {
@@ -53,7 +59,7 @@ class MikrobusSetupViewProvider {
       }
     }, null, this.context.subscriptions);
 
-    postStatus(webviewView, scanPackages(this.context), this.context);
+    postDashboardState(webviewView, this.context);
   }
 }
 
@@ -72,7 +78,20 @@ function activate(context) {
   const openSetup = vscode.commands.registerCommand('mikrobusRust.openSetup', async () => {
     await revealSetupView();
   });
-  context.subscriptions.push(openSetup);
+  const openEnvironment = vscode.commands.registerCommand('mikrobusRust.openEnvironmentSetup', async () => {
+    await openEnvironmentSetup(context);
+  });
+  const refreshSetupView = vscode.commands.registerCommand('mikrobusRust.refreshSetupView', async () => {
+    postDashboardState(setupView, context);
+  });
+  context.subscriptions.push(
+    openSetup,
+    openEnvironment,
+    refreshSetupView,
+    vscode.workspace.onDidChangeWorkspaceFolders(() => postDashboardState(setupView, context)),
+    vscode.workspace.onDidCreateFiles(() => postDashboardState(setupView, context)),
+    vscode.workspace.onDidDeleteFiles(() => postDashboardState(setupView, context))
+  );
 
   void maybeShowFirstRunSetup(context);
 }
@@ -90,7 +109,7 @@ async function maybeShowFirstRunSetup(context) {
   await context.globalState.update(key, version);
 
   if (missing.length > 0) {
-    await revealSetupView();
+    await openEnvironmentSetup(context);
   }
 }
 
@@ -109,6 +128,63 @@ async function revealSetupView() {
   }
 }
 
+async function openEnvironmentSetup(context) {
+  if (environmentPanel) {
+    environmentPanel.reveal(vscode.ViewColumn.Active);
+    postStatus(environmentPanel, scanPackages(context), context);
+    return;
+  }
+  environmentPanel = vscode.window.createWebviewPanel(
+    'mikrobusRust.environmentSetup',
+    'MikroBUS Rust: Development Environment',
+    vscode.ViewColumn.Active,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')]
+    }
+  );
+  environmentPanel.webview.html = getEnvironmentSetupHtml(environmentPanel.webview, context.extensionUri);
+  environmentPanel.webview.onDidReceiveMessage(async (message) => {
+    await handleSetupMessage(message, environmentPanel, context);
+  }, null, context.subscriptions);
+  environmentPanel.onDidDispose(() => {
+    environmentPanel = undefined;
+  }, null, context.subscriptions);
+  postStatus(environmentPanel, scanPackages(context), context);
+}
+
+async function handleDashboardMessage(message, view, context) {
+  if (!message || typeof message.type !== 'string') return;
+  try {
+    if (message.type === 'ready' || message.type === 'refresh') {
+      postDashboardState(view, context);
+      return;
+    }
+    if (message.type === 'configure') {
+      await vscode.commands.executeCommand('mikrobusRust.configureMcu');
+      return;
+    }
+    if (message.type === 'environment') {
+      await openEnvironmentSetup(context);
+      return;
+    }
+    if (message.type === 'apply' && typeof message.id === 'string') {
+      await useSetupWithCurrentWorkspace(context, message.id);
+      postDashboardState(view, context);
+    }
+  } catch (error) {
+    const detail = error?.message || String(error);
+    vscode.window.showErrorMessage(`MikroBUS Rust: ${detail}`);
+    void view?.webview.postMessage({ type: 'dashboardError', message: detail });
+  }
+}
+
+function postDashboardState(view, context) {
+  if (!view) return;
+  void view.webview.postMessage({ type: 'dashboardState', ...getSetupDashboardState(context) });
+}
+
 async function handleSetupMessage(message, view, context) {
   if (!message || typeof message.type !== 'string') {
     return;
@@ -121,32 +197,32 @@ async function handleSetupMessage(message, view, context) {
 
   if (message.type === 'install' && typeof message.id === 'string') {
     await handleInstallRequest(message.id, context);
-    if (setupView) {
-      postStatus(setupView, scanPackages(context), context);
+    if (environmentPanel) {
+      postStatus(environmentPanel, scanPackages(context), context);
     }
     return;
   }
 
   if (message.type === 'update' && typeof message.id === 'string') {
     await handleUpdateRequest(message.id, context);
-    if (setupView) {
-      postStatus(setupView, scanPackages(context), context);
+    if (environmentPanel) {
+      postStatus(environmentPanel, scanPackages(context), context);
     }
     return;
   }
 
   if (message.type === 'uninstall' && typeof message.id === 'string') {
     await handleUninstallRequest(message.id, context);
-    if (setupView) {
-      postStatus(setupView, scanPackages(context), context);
+    if (environmentPanel) {
+      postStatus(environmentPanel, scanPackages(context), context);
     }
     return;
   }
 
   if (message.type === 'updateManagedAll') {
     await updateAllManagedPackages(context);
-    if (setupView) {
-      postStatus(setupView, scanPackages(context), context);
+    if (environmentPanel) {
+      postStatus(environmentPanel, scanPackages(context), context);
     }
     return;
   }
@@ -216,6 +292,12 @@ function getPackageDefinitions() {
       id: 'database',
       name: 'MikroBUS Rust Database',
       description: 'database_mikro_sdk_rust.db used to enumerate MCUs and family metadata.',
+      kind: 'managed'
+    },
+    {
+      id: 'bsp',
+      name: 'Board Support Package',
+      description: 'Independent board and shield configuration package used to generate project mikrobus.rs files.',
       kind: 'managed'
     },
     {
@@ -343,6 +425,7 @@ function getExpectedPaths(context) {
     openocd: path.join(managedRoot, 'runner', `xpack-openocd-${VERSIONS.openocd}`),
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
     database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
+    bsp: path.join(managedRoot, 'bsp'),
     sdk: path.join(managedRoot, 'sdk'),
     core: path.join(managedRoot, 'core')
   };
@@ -548,6 +631,18 @@ function detectManaged(id, expected) {
     return fileStatus(expected.database, expected.database, 'Application database found.');
   }
 
+  if (id === 'bsp') {
+    const boards = path.join(expected.bsp, 'boards');
+    const shields = path.join(expected.bsp, 'shields');
+    const present = directoryHasContent(boards) && directoryHasContent(shields);
+    return {
+      status: present ? 'installed' : 'missing',
+      detail: present ? 'Board and shield BSP directories found.' : 'BSP boards or shields directory is missing or empty.',
+      expectedPath: expected.bsp,
+      version: ''
+    };
+  }
+
   if (id === 'sdk') {
     const present = directoryHasContent(expected.sdk);
     return {
@@ -631,7 +726,7 @@ function getInstallAction(id, context) {
     return asset ? managedAction('Install automatically') : undefined;
   }
 
-  if (['database', 'sdk', 'core'].includes(id)) {
+  if (['database', 'bsp', 'sdk', 'core'].includes(id)) {
     return managedAction('Install automatically');
   }
 
@@ -639,7 +734,7 @@ function getInstallAction(id, context) {
 }
 
 function getUpdateAction(id, context) {
-  if (['openocd', 'armGcc', 'database', 'sdk', 'core'].includes(id)) {
+  if (['openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
     return managedAction(id === 'openocd' || id === 'armGcc' ? 'Update / reinstall' : 'Update');
   }
 
@@ -685,7 +780,7 @@ function getUpdateAction(id, context) {
 }
 
 function getUninstallAction(id, context) {
-  if (['openocd', 'armGcc', 'database', 'sdk', 'core'].includes(id)) {
+  if (['openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
     return { type: 'managed-uninstall', label: 'Uninstall' };
   }
 
@@ -927,6 +1022,7 @@ async function uninstallManagedPackage(id, context) {
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
+    bsp: expected.bsp,
     sdk: expected.sdk,
     core: expected.core
   };
@@ -997,7 +1093,7 @@ async function installManagedPackage(id, context, progress, token) {
       await installXpackPackage(id, expected, tempRoot, progress, token);
     } else if (id === 'database') {
       await installDatabase(expected, tempRoot, progress, token);
-    } else if (id === 'sdk' || id === 'core') {
+    } else if (id === 'sdk' || id === 'core' || id === 'bsp') {
       await installRustyArchive(id, expected, tempRoot, progress, token);
     } else {
       throw new Error(`No managed installer is defined for ${id}.`);
@@ -1093,11 +1189,18 @@ async function installDatabase(expected, tempRoot, progress, token) {
 }
 
 async function installRustyArchive(id, expected, tempRoot, progress, token) {
-  const target = id === 'sdk' ? expected.sdk : expected.core;
+  const targets = { sdk: expected.sdk, core: expected.core, bsp: expected.bsp };
+  const target = targets[id];
   const assetName = `${id}.7z`;
 
-  progress.report({ message: `Resolving latest Rusty_MikroBUS release asset ${assetName}...` });
-  const assetUrl = await resolveLatestRustyAsset(assetName, token);
+  const assetUrl = id === 'bsp'
+    ? URLS.bsp
+    : await resolveLatestRustyAsset(assetName, token);
+  progress.report({
+    message: id === 'bsp'
+      ? `Using Rusty_MikroBUS v0.0.1 asset ${assetName}...`
+      : `Resolved latest Rusty_MikroBUS release asset ${assetName}...`
+  });
   const archivePath = path.join(tempRoot, assetName);
   const extractRoot = path.join(tempRoot, 'payload');
   await fs.promises.mkdir(extractRoot, { recursive: true });
@@ -1305,7 +1408,7 @@ async function extractArchive(archivePath, destination, token) {
 
     if (candidates.length === 0) {
       throw new Error(process.platform === 'linux'
-        ? 'A 7-Zip extractor is required for sdk.7z/core.7z. Install the Linux Build Prerequisites card first.'
+        ? `A 7-Zip extractor is required for ${path.basename(archivePath)}. Install the Linux Build Prerequisites card first.`
         : 'A 7-Zip-capable extractor was not found. Install 7-Zip or use a Windows version that provides tar.exe with 7z support.');
     }
 
@@ -1478,6 +1581,7 @@ function expectedPathFor(id, expected) {
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
+    bsp: expected.bsp,
     sdk: expected.sdk,
     core: expected.core
   };
@@ -1636,7 +1740,45 @@ function getPlatformLabel() {
   return `${names[process.platform] || process.platform} ${os.arch()}`;
 }
 
-function getSetupHtml(webview, extensionUri) {
+function getDashboardHtml(webview, extensionUri) {
+  const nonce = getNonce();
+  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'setups.css'));
+  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'setups.js'));
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <link rel="stylesheet" href="${styleUri}">
+  <title>MikroBUS Rust Configured Setups</title>
+</head>
+<body>
+  <main class="dashboard">
+    <header>
+      <div><p class="eyebrow">MIKROBUS RUST</p><h1>Configured setups</h1></div>
+      <button id="refresh" class="iconButton" title="Refresh">↻</button>
+    </header>
+    <section id="projectState" class="projectState"></section>
+    <p id="error" class="error hidden"></p>
+    <section id="setupList" class="setupList"></section>
+    <section id="emptyState" class="empty hidden">
+      <div class="chipIcon">µ</div>
+      <h2>No configured setups</h2>
+      <p>Create a reusable MCU or board setup first.</p>
+      <button id="configureFirst" class="primary">Configure my first setup</button>
+    </section>
+    <footer>
+      <button id="configure" class="secondary">Configure MCU or Board</button>
+      <button id="environment" class="secondary">Development environment</button>
+    </footer>
+  </main>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+}
+
+function getEnvironmentSetupHtml(webview, extensionUri) {
   const nonce = getNonce();
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'setup.css'));
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'setup.js'));
@@ -1658,7 +1800,7 @@ function getSetupHtml(webview, extensionUri) {
         <h1>Development environment setup</h1>
         <p class="subtitle">The extension detects the current host platform and checks the packages required by the Rust MikroBUS workflow.</p>
       </div>
-      <div class="heroActions"><button id="configureMcu" class="secondary">Configure MCU</button><button id="updateManaged" class="secondary">Update managed</button><button id="refresh" class="secondary">Refresh</button></div>
+      <div class="heroActions"><button id="configureMcu" class="secondary">Configure MCU or Board</button><button id="updateManaged" class="secondary">Update managed</button><button id="refresh" class="secondary">Refresh</button></div>
     </header>
 
     <section class="summary" aria-live="polite">
@@ -1672,7 +1814,7 @@ function getSetupHtml(webview, extensionUri) {
     <section id="packageGrid" class="grid" aria-label="Package status"></section>
 
     <footer>
-      <p>Installed packages now expose update and uninstall actions. OpenOCD, ARM GCC, database, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
+      <p>Installed packages now expose update and uninstall actions. OpenOCD, ARM GCC, database, BSP, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

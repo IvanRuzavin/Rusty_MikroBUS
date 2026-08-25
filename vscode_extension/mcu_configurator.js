@@ -9,7 +9,6 @@ let mcuPanel;
 let outputChannel;
 const debugServerProcesses = new Map();
 const debugOwnedBreakpoints = new Map();
-const debugSessionSources = new Map();
 const debugVariableDumpTimers = new Map();
 const debugVariableDumpInProgress = new Set();
 let pendingDebugLaunch;
@@ -27,6 +26,7 @@ function getManagedPaths(context) {
   return {
     root,
     database: path.join(root, 'database', 'database_mikro_sdk_rust.db'),
+    bsp: path.join(root, 'bsp'),
     sdk: path.join(root, 'sdk'),
     core: path.join(root, 'core')
   };
@@ -139,8 +139,12 @@ function saveConfiguredSetup(context, payload, result) {
   const requestedId = typeof payload.setupId === 'string' && payload.setupId.trim() ? payload.setupId.trim() : undefined;
   const existing = requestedId
     ? registry.setups.find((setup) => setup.id === requestedId)
-    : registry.setups.find((setup) => String(setup.mcuName || '').toLowerCase() === String(result.mcuName || '').toLowerCase());
-  const id = existing?.id || requestedId || setupIdForMcu(result.mcuName);
+    : payload.selectionMode === 'board' && payload.boardUid
+      ? registry.setups.find((setup) => setup.selectionMode === 'board' && setup.boardUid === payload.boardUid && setup.shieldUid === payload.shieldUid)
+      : registry.setups.find((setup) => setup.selectionMode !== 'board' && String(setup.mcuName || '').toLowerCase() === String(result.mcuName || '').toLowerCase());
+  const id = existing?.id || requestedId || (payload.selectionMode === 'board'
+    ? setupIdForMcu(`${payload.boardUid}-${payload.shieldUid || 'no-shield'}`)
+    : setupIdForMcu(result.mcuName));
 
   const record = {
     id,
@@ -153,6 +157,13 @@ function saveConfiguredSetup(context, payload, result) {
     relativePlatform: result.relativePlatform,
     clockMhz: result.clockMhz,
     values: payload.values && typeof payload.values === 'object' ? payload.values : {},
+    selectionMode: payload.selectionMode === 'board' ? 'board' : 'mcu',
+    boardUid: payload.boardUid || undefined,
+    boardName: payload.boardName || undefined,
+    shieldUid: payload.shieldUid || undefined,
+    shieldName: payload.shieldName || undefined,
+    programmerUid: result.programmerUid || payload.programmerUid || 'SEGGER_JLINK',
+    programmerName: result.programmerName || payload.programmerName || 'SEGGER J-Link',
     sdkRoot: path.relative(getConfiguredSetupPaths(context).root, result.sdkRoot).split(path.sep).join('/'),
     artifactVersion: 1,
     createdAt: existing?.createdAt || now,
@@ -165,6 +176,7 @@ function saveConfiguredSetup(context, payload, result) {
   else registry.setups.push(record);
   writeConfiguredSetupRegistry(context, registry);
   setActiveSetupId(context, id);
+  void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
   return { ...record, active: true };
 }
 
@@ -186,6 +198,7 @@ function removeConfiguredSetup(context, id) {
     fs.rmSync(sdkRoot, { recursive: true, force: true });
   }
 
+  void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
   return setup;
 }
 
@@ -218,12 +231,6 @@ function registerMcuConfigurator(context) {
     vscode.commands.registerCommand('mikrobusRust.debugCurrentFile', async () => {
       await debugCurrentRustFile(context);
     }),
-    vscode.commands.registerCommand('mikrobusRust.debugStepOut', async () => {
-      await debugStepOut();
-    }),
-    vscode.commands.registerCommand('mikrobusRust.restartDebugger', async () => {
-      await restartDebugger();
-    }),
     vscode.commands.registerCommand('mikrobusRust.dumpDebugVariables', async () => {
       await dumpDebugVariables();
     }),
@@ -236,9 +243,13 @@ function registerMcuConfigurator(context) {
         const cwd = session.configuration.cwd || session.workspaceFolder?.uri?.fsPath || process.cwd();
         const channel = getOutputChannel();
         channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+        channel.appendLine(`probe-rs version: ${probeRsVersion(probeRsExecutable) || 'unknown'}`);
 
-        if (process.platform === 'win32') {
-          channel.appendLine('Starting probe-rs DAP through stdin/stdout transport (Windows).');
+        const transport = process.platform === 'win32'
+          ? vscode.workspace.getConfiguration('mikrobusRust').get('windowsDebugTransport', 'tcp')
+          : 'tcp';
+        if (process.platform === 'win32' && transport === 'stdio') {
+          channel.appendLine('Starting probe-rs DAP through stdin/stdout transport (Windows opt-in).');
           return new vscode.DebugAdapterExecutable(
             probeRsExecutable,
             ['dap-server'],
@@ -250,7 +261,7 @@ function registerMcuConfigurator(context) {
         }
 
         const port = await findAvailableDebugPort();
-        channel.appendLine(`Starting probe-rs DAP server on 127.0.0.1:${port}`);
+        channel.appendLine(`Starting probe-rs DAP TCP server on 127.0.0.1:${port}${process.platform === 'win32' ? ' (Windows default)' : ''}.`);
 
         const child = childProcess.spawn(
           probeRsExecutable,
@@ -265,7 +276,11 @@ function registerMcuConfigurator(context) {
         debugServerProcesses.set(session.id, child);
         child.stdout.on('data', (data) => channel.append(`[probe-rs] ${data.toString()}`));
         child.stderr.on('data', (data) => channel.append(`[probe-rs] ${data.toString()}`));
-        child.on('error', (error) => channel.appendLine(`[probe-rs] failed to start: ${error.message}`));
+        child.on('spawn', () => channel.appendLine(`[probe-rs] DAP process started (PID ${child.pid}).`));
+        child.on('error', (error) => {
+          child.__mikrobusStartError = error;
+          channel.appendLine(`[probe-rs] failed to start: ${error.message}`);
+        });
         child.on('close', (code) => {
           channel.appendLine(`[probe-rs] DAP server exited with code ${code ?? -1}`);
           debugServerProcesses.delete(session.id);
@@ -284,7 +299,6 @@ function registerMcuConfigurator(context) {
       if (session.type !== 'mikrobus-rust-debug' || !pendingDebugLaunch) return;
       const pending = pendingDebugLaunch;
       pendingDebugLaunch = undefined;
-      debugSessionSources.set(session.id, pending.source);
       if (pending.ownedBreakpoint) {
         debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
       }
@@ -325,7 +339,6 @@ function registerMcuConfigurator(context) {
       stopDebugServerProcess(session.id);
       cancelScheduledVariableDump(session.id);
       debugVariableDumpInProgress.delete(session.id);
-      debugSessionSources.delete(session.id);
       const breakpoint = debugOwnedBreakpoints.get(session.id);
       if (breakpoint) {
         vscode.debug.removeBreakpoints([breakpoint]);
@@ -386,9 +399,43 @@ function resolveCurrentWorkspaceTarget() {
   const workspaceFolder = activeUri?.scheme === 'file'
     ? (vscode.workspace.getWorkspaceFolder(activeUri) || folders[0])
     : folders[0];
+  const openedRoot = workspaceFolder.uri.fsPath;
+  const cargoToml = path.join(openedRoot, 'Cargo.toml');
   return {
     workspaceFolder,
-    openedRoot: workspaceFolder.uri.fsPath
+    openedRoot,
+    cargoToml,
+    hasCargoToml: fs.existsSync(cargoToml)
+  };
+}
+
+function getCurrentProjectState() {
+  try {
+    const workspace = resolveCurrentWorkspaceTarget();
+    return {
+      available: true,
+      workspaceName: workspace.workspaceFolder.name,
+      openedRoot: workspace.openedRoot,
+      cargoToml: workspace.cargoToml,
+      hasCargoToml: workspace.hasCargoToml,
+      note: workspace.hasCargoToml
+        ? 'Ready to apply a configured setup.'
+        : 'Open a project that has Cargo.toml in the workspace root before applying a setup.'
+    };
+  } catch (error) {
+    return {
+      available: false,
+      hasCargoToml: false,
+      note: error?.message || String(error)
+    };
+  }
+}
+
+function getSetupDashboardState(context) {
+  return {
+    setups: listConfiguredSetups(context),
+    project: getCurrentProjectState(),
+    workspace: serializeWorkspaceBinding(readWorkspaceBinding())
   };
 }
 
@@ -454,6 +501,13 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
     mcuName: setup.mcuName,
     clockMhz: setup.clockMhz,
     target: setup.target,
+    selectionMode: setup.selectionMode || 'mcu',
+    boardUid: setup.boardUid,
+    boardName: setup.boardName,
+    shieldUid: setup.shieldUid,
+    shieldName: setup.shieldName,
+    programmerUid: setup.programmerUid,
+    programmerName: setup.programmerName,
     sdkRoot,
     configuredAt: new Date().toISOString(),
     setupRoot: path.resolve(generationResult.setupRoot)
@@ -461,6 +515,7 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
   fs.writeFileSync(bindingPath, JSON.stringify(binding, null, 2) + '\n', 'utf8');
   updateWorkspaceRustAnalyzer(workspace.workspaceFolder, sdkRoot, setup.target);
   void updateWorkspaceContext();
+  void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
   return { ...binding, sdkRoot, bindingPath, workspaceFolder: workspace.workspaceFolder };
 }
 
@@ -488,17 +543,24 @@ async function useSetupWithCurrentWorkspace(context, setupId) {
   const setup = await chooseSetupIfNeeded(context, setupId);
   if (!setup) return undefined;
   const workspace = resolveCurrentWorkspaceTarget();
+  if (!workspace.hasCargoToml) {
+    throw new Error(`Cannot apply a setup because Cargo.toml is not present in the project root: ${workspace.openedRoot}`);
+  }
   const result = await ensurePortableSetupWorkspace(context, setup);
 
+  let generatedMikrobus;
+  if (shouldGenerateWorkspaceMikrobus(setup)) {
+    generatedMikrobus = generateWorkspaceMikrobusFile(context, workspace, setup);
+  }
   const binding = writeWorkspaceBinding(workspace, setup, result);
+  const mikrobusMessage = generatedMikrobus
+    ? ` Generated ${generatedMikrobus}.`
+    : setup.selectionMode === 'board' && !setup.shieldUid
+      ? ' No shield is selected, so mikrobus.rs was not generated.'
+      : '';
   vscode.window.showInformationMessage(
-    `${setup.mcuName} (${setup.clockMhz} MHz) is now applied to ${workspace.openedRoot}. The project does not need its own SDK tree.`,
-    'Build & Flash current .rs'
-  ).then(async (choice) => {
-    if (choice === 'Build & Flash current .rs') {
-      await runBoundWorkspaceAction(context, 'buildFlashCurrent');
-    }
-  });
+    `${setup.mcuName} (${setup.clockMhz} MHz) is now applied to ${workspace.openedRoot}. The project does not need its own SDK tree.${mikrobusMessage}`
+  );
 
   if (mcuPanel) {
     void mcuPanel.webview.postMessage({
@@ -510,6 +572,101 @@ async function useSetupWithCurrentWorkspace(context, setupId) {
   return binding;
 }
 
+function shouldGenerateWorkspaceMikrobus(setup) {
+  return setup?.selectionMode === 'board' && Boolean(setup.boardUid) && Boolean(setup.shieldUid);
+}
+
+function readBoardShieldBsp(databasePath, boardUid, shieldUid) {
+  return withDatabase(databasePath, (db) => {
+    const row = db.prepare(`
+      SELECT Board.BSP_PATH AS boardBspPath, Shield.BSP_PATH AS shieldBspPath,
+             Board.NAME AS boardName, Shield.NAME AS shieldName
+      FROM BoardToShield
+      JOIN Board ON Board.UID = BoardToShield.BOARD_UID
+      JOIN Shield ON Shield.UID = BoardToShield.SHIELD_UID
+      WHERE Board.UID = ? AND Shield.UID = ?
+      LIMIT 1
+    `).get(boardUid, shieldUid);
+    if (!row) throw new Error(`The selected board/shield relationship is no longer present in the Rust database.`);
+    return normalizeSqlRow(row);
+  });
+}
+
+function resolveBoardPin(boardConfig, reference) {
+  const match = String(reference || '').match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
+  if (!match) return undefined;
+  return boardConfig?.headers?.[match[1]]?.[match[2]] || undefined;
+}
+
+function buildMikrobusRust(boardConfig, shieldConfig, boardName, shieldName) {
+  const lines = [
+    `//! Generated MikroBUS mapping for ${boardName} with ${shieldName}.`,
+    '//! Generated by MikroBUS Rust Tools. Re-apply the setup to regenerate this file.',
+    '',
+    '#![allow(dead_code)]',
+    '',
+    'use drv_name::*;',
+    ''
+  ];
+  const sockets = Object.entries(shieldConfig?.mikrobus || {}).sort(([left], [right]) => Number(left) - Number(right));
+  for (const [socket, signals] of sockets) {
+    lines.push(`// mikroBUS ${socket}`);
+    for (const [signal, reference] of Object.entries(signals)) {
+      const pin = resolveBoardPin(boardConfig, reference);
+      if (pin) lines.push(`pub const MIKROBUS_${socket}_${signal}: pin_name_t = ${pin};`);
+      else lines.push(`// MIKROBUS_${socket}_${signal} is not routed (${reference}).`);
+    }
+    lines.push('');
+  }
+  return `${lines.join('\n').trimEnd()}\n`;
+}
+
+function findWorkspaceMainRust(workspace) {
+  const candidates = [
+    path.join(workspace.openedRoot, 'main.rs'),
+    path.join(workspace.openedRoot, 'src', 'main.rs')
+  ];
+  const active = vscode.window.activeTextEditor?.document?.uri?.fsPath;
+  if (active && path.basename(active).toLowerCase() === 'main.rs' && isPathWithin(workspace.openedRoot, active)) {
+    candidates.unshift(active);
+  }
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function generateWorkspaceMikrobusFile(context, workspace, setup) {
+  const paths = getManagedPaths(context);
+  validateDatabaseSchema(paths.database);
+  const bsp = readBoardShieldBsp(paths.database, setup.boardUid, setup.shieldUid);
+  const boardPath = resolveManagedBspFile(paths, bsp.boardBspPath);
+  const shieldPath = resolveManagedBspFile(paths, bsp.shieldBspPath);
+  const mainRust = findWorkspaceMainRust(workspace);
+  if (!mainRust) throw new Error('The board setup was applied, but main.rs was not found in the project root or src directory.');
+  const boardConfig = JSON.parse(readRequired(boardPath));
+  const shieldConfig = JSON.parse(readRequired(shieldPath));
+  const destination = path.join(path.dirname(mainRust), 'mikrobus.rs');
+  fs.writeFileSync(destination, buildMikrobusRust(boardConfig, shieldConfig, bsp.boardName, bsp.shieldName), 'utf8');
+  return path.relative(workspace.openedRoot, destination).split(path.sep).join('/');
+}
+
+function resolveManagedBspFile(paths, configuredPath) {
+  const portablePath = String(configuredPath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!portablePath) throw new Error('The Rust database contains an empty BSP path.');
+
+  // Database paths are stored as bsp/boards/... and bsp/shields/.... The
+  // independently managed package itself is installed at <managed root>/bsp.
+  const packageRelativePath = portablePath.toLowerCase().startsWith('bsp/')
+    ? portablePath.slice(4)
+    : portablePath;
+  const resolved = path.resolve(paths.bsp, packageRelativePath);
+  if (!isPathWithin(paths.bsp, resolved)) {
+    throw new Error(`Refusing to read a BSP file outside the managed BSP package: ${configuredPath}`);
+  }
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`Required BSP file was not found: ${resolved}. Update the Board Support Package in Development Environment.`);
+  }
+  return resolved;
+}
+
 function serializeWorkspaceBinding(binding) {
   if (!binding) return undefined;
   return {
@@ -517,6 +674,13 @@ function serializeWorkspaceBinding(binding) {
     mcuName: binding.mcuName,
     clockMhz: binding.clockMhz,
     target: binding.target,
+    selectionMode: binding.selectionMode,
+    boardUid: binding.boardUid,
+    boardName: binding.boardName,
+    shieldUid: binding.shieldUid,
+    shieldName: binding.shieldName,
+    programmerUid: binding.programmerUid,
+    programmerName: binding.programmerName,
     sdkRoot: binding.sdkRoot,
     bindingPath: binding.bindingPath,
     workspaceName: binding.workspaceFolder?.name,
@@ -737,9 +901,12 @@ async function waitForDebugServer(port, child, timeoutMs) {
   // versions accept a single DAP client, so a readiness connection can steal
   // the session from VS Code. Give the child a short startup window instead
   // and fail early if it exits.
-  const startupWindow = Math.min(timeoutMs, 500);
+  const startupWindow = Math.min(timeoutMs, process.platform === 'win32' ? 1200 : 500);
   const startedAt = Date.now();
   while (Date.now() - startedAt < startupWindow) {
+    if (child.__mikrobusStartError) {
+      throw new Error(`probe-rs dap-server could not be started: ${child.__mikrobusStartError.message}`);
+    }
     if (child.exitCode !== null) {
       throw new Error(`probe-rs dap-server exited before VS Code could connect (exit code ${child.exitCode}).`);
     }
@@ -747,6 +914,21 @@ async function waitForDebugServer(port, child, timeoutMs) {
   }
   if (child.exitCode !== null) {
     throw new Error(`probe-rs dap-server exited before VS Code could connect (exit code ${child.exitCode}).`);
+  }
+}
+
+function probeRsVersion(executable) {
+  try {
+    const result = childProcess.spawnSync(executable, ['--version'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      shell: false,
+      timeout: 5000,
+      env: buildToolEnvironment(executable)
+    });
+    return String(result.stdout || result.stderr || '').trim();
+  } catch {
+    return '';
   }
 }
 
@@ -969,54 +1151,6 @@ async function dumpDebugVariables() {
   await dumpDebugVariablesForSession(session, threadId, 'manual request');
 }
 
-async function debugStepOut() {
-  const session = activeMikrobusDebugSession();
-  const threadId = await activeDebugThreadId(session);
-  const channel = getOutputChannel();
-  channel.appendLine('Step Out requested for the active probe-rs thread.');
-  await session.customRequest('stepOut', { threadId });
-}
-
-async function waitForDebugSessionToStop(sessionId, timeoutMs = 5000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (!vscode.debug.activeDebugSession || vscode.debug.activeDebugSession.id !== sessionId) return;
-    await delay(50);
-  }
-}
-
-async function restartDebugger() {
-  const session = activeMikrobusDebugSession();
-  const channel = getOutputChannel();
-  try {
-    channel.appendLine('Restart requested through probe-rs DAP.');
-    await session.customRequest('restart', {});
-    return;
-  } catch (error) {
-    channel.appendLine(`probe-rs DAP restart failed (${error.message || error}); relaunching the same debug configuration.`);
-  }
-
-  const configuration = { ...session.configuration };
-  const workspaceFolder = session.workspaceFolder;
-  const source = debugSessionSources.get(session.id);
-  await vscode.debug.stopDebugging(session);
-  await waitForDebugSessionToStop(session.id);
-
-  if (source && fs.existsSync(source)) {
-    const entry = ensureEntryBreakpoint(source);
-    pendingDebugLaunch = {
-      source,
-      ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
-    };
-  }
-
-  const restarted = await vscode.debug.startDebugging(workspaceFolder, configuration);
-  if (!restarted) {
-    pendingDebugLaunch = undefined;
-    throw new Error('The debugger could not be restarted. See the MikroBUS Rust output for details.');
-  }
-}
-
 function cargoTomlString(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
@@ -1169,6 +1303,7 @@ async function debugCurrentRustFile(context) {
   channel.appendLine(`Debug source: ${source}`);
   channel.appendLine(`Debug ELF: ${programBinary}`);
   channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
+  channel.appendLine(`Programmer profile: ${setup.programmerName || 'SEGGER J-Link'} (${setup.programmerUid || 'SEGGER_JLINK'})`);
   channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
 
   pendingDebugLaunch = {
@@ -1182,6 +1317,7 @@ async function debugCurrentRustFile(context) {
     name: `MikroBUS Rust: ${setup.mcuName}`,
     cwd: binding.sdkRoot,
     chip: setup.mcuName,
+    wireProtocol: 'Swd',
     connectUnderReset: true,
     flashingConfig: {
       flashingEnabled: true,
@@ -1270,7 +1406,7 @@ async function openMcuConfigurator(context) {
 
   mcuPanel = vscode.window.createWebviewPanel(
     'mikrobusRust.mcuConfigurator',
-    'MikroBUS Rust: MCU Configuration',
+    'MikroBUS Rust: Hardware Configuration',
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
@@ -1304,6 +1440,7 @@ async function sendInitialState(panel, context) {
   const paths = getManagedPaths(context);
   const missing = [];
   if (!fs.existsSync(paths.database)) missing.push('database');
+  if (!fs.existsSync(paths.bsp)) missing.push('bsp');
   if (!fs.existsSync(paths.core)) missing.push('core');
   if (!fs.existsSync(paths.sdk)) missing.push('sdk');
 
@@ -1316,14 +1453,18 @@ async function sendInitialState(panel, context) {
     return;
   }
 
+  validateDatabaseSchema(paths.database);
   const mcus = readMcuList(paths.database);
+  const boards = readBoardList(paths.database);
   const setups = listConfiguredSetups(context);
   void panel.webview.postMessage({
     type: 'mcuList',
     mcus,
+    boards,
     setups,
     activeSetupId: getActiveSetupId(context),
     workspace: serializeWorkspaceBinding(readWorkspaceBinding()),
+    project: getCurrentProjectState(),
     managedRoot: paths.root,
     count: mcus.length
   });
@@ -1342,11 +1483,30 @@ async function handleMcuMessage(message, panel, context) {
     return;
   }
 
+  if (message.type === 'openEnvironment') {
+    await vscode.commands.executeCommand('mikrobusRust.openEnvironmentSetup');
+    return;
+  }
+
   if (message.type === 'selectMcu' && typeof message.name === 'string') {
     const paths = getManagedPaths(context);
+    validateDatabaseSchema(paths.database);
     const detail = loadMcuDetail(paths, message.name);
+    const programmers = readProgrammersForDevice(paths.database, message.name);
     const setup = findConfiguredSetupForMcu(context, message.name);
-    void panel.webview.postMessage({ type: 'mcuDetail', detail, setup: setup ? { ...setup, active: setup.id === getActiveSetupId(context) } : undefined });
+    void panel.webview.postMessage({ type: 'mcuDetail', detail, programmers, setup: setup ? { ...setup, active: setup.id === getActiveSetupId(context) } : undefined });
+    return;
+  }
+
+  if (message.type === 'selectBoard' && typeof message.uid === 'string') {
+    const paths = getManagedPaths(context);
+    const boardDetail = loadBoardDetail(paths, message.uid);
+    const setup = listConfiguredSetups(context).find((item) => item.boardUid === message.uid);
+    void panel.webview.postMessage({
+      type: 'boardDetail',
+      ...boardDetail,
+      setup: setup ? { ...setup, active: setup.id === getActiveSetupId(context) } : undefined
+    });
     return;
   }
 
@@ -1354,8 +1514,14 @@ async function handleMcuMessage(message, panel, context) {
     const setup = findConfiguredSetup(context, message.id);
     if (!setup) throw new Error(`Configured setup '${message.id}' was not found.`);
     const paths = getManagedPaths(context);
+    if (setup.selectionMode === 'board' && setup.boardUid) {
+      const boardDetail = loadBoardDetail(paths, setup.boardUid);
+      void panel.webview.postMessage({ type: 'boardDetail', ...boardDetail, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
+      return;
+    }
     const detail = loadMcuDetail(paths, setup.mcuName);
-    void panel.webview.postMessage({ type: 'mcuDetail', detail, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
+    const programmers = readProgrammersForDevice(paths.database, setup.mcuName);
+    void panel.webview.postMessage({ type: 'mcuDetail', detail, programmers, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
     return;
   }
 
@@ -1391,7 +1557,14 @@ async function handleMcuMessage(message, panel, context) {
       setupId: setup.id,
       mcuName: setup.mcuName,
       clockMhz: setup.clockMhz,
-      values: setup.values || {}
+      values: setup.values || {},
+      selectionMode: setup.selectionMode || 'mcu',
+      boardUid: setup.boardUid,
+      boardName: setup.boardName,
+      shieldUid: setup.shieldUid,
+      shieldName: setup.shieldName,
+      programmerUid: setup.programmerUid || 'SEGGER_JLINK',
+      programmerName: setup.programmerName || 'SEGGER J-Link'
     };
     const result = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -1473,6 +1646,112 @@ function withDatabase(databasePath, callback) {
   } finally {
     db.close();
   }
+}
+
+function validateDatabaseSchema(databasePath) {
+  if (!fs.existsSync(databasePath)) {
+    throw new Error(`Rust database was not found at the configured Development Environment path: ${databasePath}`);
+  }
+  const requiredTables = [
+    'Family',
+    'MCU',
+    'Programmer',
+    'Board',
+    'Shield',
+    'DeviceToProgrammer',
+    'BoardToDevice',
+    'BoardToShield'
+  ];
+  const available = withDatabase(databasePath, (db) => new Set(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name))
+  ));
+  const missing = requiredTables.filter((table) => !available.has(table));
+  if (missing.length > 0) {
+    throw new Error(
+      `The single Rust database at ${databasePath} is missing required table(s): ${missing.join(', ')}. ` +
+      'Update that database file in Development Environment; the extension does not use a secondary database or schema file.'
+    );
+  }
+}
+
+function parseDatabaseJson(value) {
+  try {
+    return JSON.parse(String(value || '{}'));
+  } catch {
+    return {};
+  }
+}
+
+function readBoardList(databasePath) {
+  return withDatabase(databasePath, (db) => db.prepare(`
+    SELECT
+      Board.UID AS uid,
+      Board.NAME AS name,
+      Board.VENDOR AS vendor,
+      Board.BSP_PATH AS bspPath,
+      Board.CONFIG_JSON AS configJson,
+      BoardToDevice.DEVICE_NAME AS mcuName
+    FROM Board
+    JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
+    WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
+    ORDER BY Board.NAME COLLATE NOCASE
+  `).all().map((row) => {
+    const normalized = normalizeSqlRow(row);
+    return { ...normalized, config: parseDatabaseJson(normalized.configJson) };
+  }));
+}
+
+function readProgrammersForDevice(databasePath, mcuName) {
+  return withDatabase(databasePath, (db) => db.prepare(`
+    SELECT
+      Programmer.UID AS uid,
+      Programmer.NAME AS name,
+      Programmer.VENDOR AS vendor,
+      Programmer.KIND AS kind,
+      Programmer.TRANSPORT AS transport,
+      Programmer.CONFIG_JSON AS configJson,
+      DeviceToProgrammer.INTERFACE AS interface,
+      DeviceToProgrammer.PRIORITY AS priority
+    FROM DeviceToProgrammer
+    JOIN Programmer ON Programmer.UID = DeviceToProgrammer.PROGRAMMER_UID
+    WHERE DeviceToProgrammer.DEVICE_NAME = ? AND Programmer.ENABLED = 1
+    ORDER BY DeviceToProgrammer.PRIORITY, Programmer.NAME COLLATE NOCASE
+  `).all(mcuName).map((row) => {
+    const normalized = normalizeSqlRow(row);
+    return { ...normalized, config: parseDatabaseJson(normalized.configJson) };
+  }));
+}
+
+function readShieldsForBoard(databasePath, boardUid) {
+  return withDatabase(databasePath, (db) => db.prepare(`
+    SELECT
+      Shield.UID AS uid,
+      Shield.NAME AS name,
+      Shield.VENDOR AS vendor,
+      Shield.BSP_PATH AS bspPath,
+      Shield.MIKROBUS_COUNT AS mikrobusCount,
+      BoardToShield.IS_DEFAULT AS isDefault,
+      Shield.CONFIG_JSON AS configJson
+    FROM BoardToShield
+    JOIN Shield ON Shield.UID = BoardToShield.SHIELD_UID
+    WHERE BoardToShield.BOARD_UID = ? AND Shield.ENABLED = 1
+    ORDER BY BoardToShield.IS_DEFAULT DESC, Shield.NAME COLLATE NOCASE
+  `).all(boardUid).map((row) => {
+    const normalized = normalizeSqlRow(row);
+    return { ...normalized, config: parseDatabaseJson(normalized.configJson) };
+  }));
+}
+
+function loadBoardDetail(paths, boardUid) {
+  validateDatabaseSchema(paths.database);
+  const board = readBoardList(paths.database).find((item) => item.uid === boardUid);
+  if (!board) throw new Error(`Board '${boardUid}' is not present in the Rust database.`);
+  return {
+    board,
+    mcu: loadMcuDetail(paths, board.mcuName),
+    shields: readShieldsForBoard(paths.database, boardUid),
+    programmers: readProgrammersForDevice(paths.database, board.mcuName)
+  };
 }
 
 function readMcuList(databasePath) {
@@ -1735,7 +2014,15 @@ function remapGeneratedResult(result, stagingRoot, targetRoot) {
 function setupIdForPayload(context, payload) {
   const requested = String(payload.setupId || '').trim();
   if (requested) return requested;
-  const existing = findConfiguredSetupForMcu(context, payload.mcuName);
+  if (payload.selectionMode === 'board' && payload.boardUid) {
+    const existing = listConfiguredSetups(context).find((setup) =>
+      setup.selectionMode === 'board' && setup.boardUid === payload.boardUid && setup.shieldUid === payload.shieldUid
+    );
+    return existing?.id || setupIdForMcu(`${payload.boardUid}-${payload.shieldUid || 'no-shield'}`);
+  }
+  const existing = listConfiguredSetups(context).find((setup) =>
+    setup.selectionMode !== 'board' && String(setup.mcuName || '').toLowerCase() === String(payload.mcuName || '').toLowerCase()
+  );
   return existing?.id || setupIdForMcu(payload.mcuName);
 }
 
@@ -1781,7 +2068,14 @@ async function ensurePortableSetupWorkspace(context, setup) {
     setupId: setup.id,
     mcuName: setup.mcuName,
     clockMhz: setup.clockMhz,
-    values: setup.values || {}
+    values: setup.values || {},
+    selectionMode: setup.selectionMode || 'mcu',
+    boardUid: setup.boardUid,
+    boardName: setup.boardName,
+    shieldUid: setup.shieldUid,
+    shieldName: setup.shieldName,
+    programmerUid: setup.programmerUid,
+    programmerName: setup.programmerName
   };
   return vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -1800,11 +2094,21 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   if (!mcuName) throw new Error('Select an MCU before generating the configuration.');
   if (!Number.isInteger(clockMhz) || clockMhz <= 0) throw new Error('Clock must be a positive integer in MHz.');
 
-  for (const required of [paths.database, paths.sdk, paths.core]) {
+  for (const required of [paths.database, paths.bsp, paths.sdk, paths.core]) {
     if (!fs.existsSync(required)) throw new Error(`Required managed package is missing: ${required}`);
   }
 
+  validateDatabaseSchema(paths.database);
+  progress.report({ message: 'Installing managed board and shield BSP configuration files...' });
+  copyDirectoryRequired(paths.bsp, path.join(paths.sdk, 'bsp'));
+
   const metadata = readMcuMetadata(paths.database, mcuName);
+  const programmerUid = String(payload.programmerUid || 'SEGGER_JLINK').trim();
+  const programmers = readProgrammersForDevice(paths.database, mcuName);
+  const selectedProgrammer = programmers.find((programmer) => programmer.uid === programmerUid);
+  if (!selectedProgrammer) {
+    throw new Error(`Select a supported programmer for ${mcuName} before generating the configuration.`);
+  }
   const familyImpl = readFamilyImplementationMetadata(paths.database, mcuName);
   const definitionPath = findMcuDefinition(paths.core, mcuName);
   if (!definitionPath) throw new Error(`MCU definition JSON not found for ${mcuName}.`);
@@ -1917,6 +2221,13 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       systemLib: metadata.systemLib,
       cfgTarget: `${mcuName.slice(0, 7).toLowerCase()}x.cfg`,
       relativePlatform,
+      selectionMode: payload.selectionMode === 'board' ? 'board' : 'mcu',
+      boardUid: payload.boardUid || undefined,
+      boardName: payload.boardName || undefined,
+      shieldUid: payload.shieldUid || undefined,
+      shieldName: payload.shieldName || undefined,
+      programmerUid: selectedProgrammer.uid,
+      programmerName: selectedProgrammer.name,
       sdkRoot: paths.sdk,
       setupRoot,
       coreHeader: path.join(setupRoot, 'core', 'src', 'core_header.rs'),
@@ -1998,27 +2309,47 @@ function getMcuHtml(webview, extensionUri) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
-  <title>MikroBUS Rust MCU Configuration</title>
+  <title>MikroBUS Rust Hardware Configuration</title>
 </head>
 <body>
   <div id="app" class="app">
     <header class="topbar">
       <div>
         <div class="eyebrow">MIKROBUS RUST</div>
-        <h1>MCU Configuration</h1>
-        <p>Choose a device, configure its clock/registers, and manage previously built MCU setups.</p>
+        <h1>Hardware Configuration</h1>
+        <p>Configure a bare MCU or a board with an optional shield, then manage reusable Rust SDK setups.</p>
       </div>
       <div class="topActions">
         <button id="showSetups" class="secondary">Configured setups <span id="setupCount" class="buttonCount">0</span></button>
         <button id="refresh" class="secondary">Refresh database</button>
-        <button id="openSetup" class="secondary">Environment setup</button>
       </div>
     </header>
 
     <div id="missingState" class="missing hidden"></div>
 
     <main id="workspace" class="workspace hidden">
-      <section id="catalogView" class="pageView">
+      <section id="startView" class="pageView selectionStart">
+        <div class="viewHeader">
+          <div>
+            <div class="eyebrow">NEW CONFIGURATION</div>
+            <h2>What do you want to configure?</h2>
+            <p>Start from a bare MCU, or select a board and optionally add a compatible shield for MikroBUS mapping.</p>
+          </div>
+        </div>
+        <div class="selectionCards">
+          <button id="chooseMcuMode" class="selectionCard">
+            <strong>MCU</strong>
+            <span>Choose a supported device, configure clock/registers, and select a programmer.</span>
+          </button>
+          <button id="chooseBoardMode" class="selectionCard">
+            <strong>Board</strong>
+            <span>Choose a board, optionally add a shield, then configure its compatible MCU and programmer.</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="catalogView" class="pageView hidden">
+        <div class="viewNav managerNav"><button id="backToStartFromMcus" class="secondary">← MCU or Board</button></div>
         <div class="viewHeader">
           <div>
             <div class="eyebrow">AVAILABLE DEVICES</div>
@@ -2051,6 +2382,24 @@ function getMcuHtml(webview, extensionUri) {
         </div>
       </section>
 
+      <section id="boardCatalogView" class="pageView hidden">
+        <div class="viewNav managerNav"><button id="backToStartFromBoards" class="secondary">← MCU or Board</button></div>
+        <div class="viewHeader">
+          <div>
+            <div class="eyebrow">AVAILABLE BOARDS</div>
+            <h2>Board catalog</h2>
+            <p>Select a board to choose its optional shield, clock settings, and programmer.</p>
+          </div>
+          <div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div>
+        </div>
+        <div class="tableShell">
+          <table class="dataTable boardTable">
+            <thead><tr><th>Board</th><th>Vendor</th><th>Rust compatibility MCU</th><th>Status</th></tr></thead>
+            <tbody id="boardTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="loadingView" class="loadingView hidden">
         <div class="chipIcon">µ</div>
         <h2 id="loadingText">Loading MCU...</h2>
@@ -2058,7 +2407,7 @@ function getMcuHtml(webview, extensionUri) {
 
       <section id="configView" class="pageView hidden">
         <div class="viewNav">
-          <button id="backToMcus" class="secondary">← All MCUs</button>
+          <button id="backToMcus" class="secondary">← Selection</button>
           <button id="showSetupsFromConfig" class="secondary">Configured setups</button>
         </div>
 
@@ -2086,11 +2435,27 @@ function getMcuHtml(webview, extensionUri) {
           <label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
         </section>
 
+        <section id="boardSelectionCard" class="clockSection card hidden">
+          <div>
+            <h3 id="selectedBoardName">Board and optional shield</h3>
+            <p id="selectedBoardDevice"></p>
+          </div>
+          <label class="clockInput">Shield (optional)<select id="shieldSelect"></select></label>
+        </section>
+
         <section>
           <div class="sectionHeading">
             <div><h3>Clock / configuration registers</h3><p>Options come directly from the selected MCU JSON. Hidden fields keep their JSON initialization value.</p></div>
           </div>
           <div id="registerGrid" class="registerGrid"></div>
+        </section>
+
+        <section class="clockSection card programmerSection">
+          <div>
+            <h3>Programmer / debugger</h3>
+            <p>The relationship comes from <code>DeviceToProgrammer</code>. The model is ready for CODEGRIP and other programmers.</p>
+          </div>
+          <label class="clockInput">Programmer<select id="programmerSelect"></select></label>
         </section>
 
         <div class="generateBar">
@@ -2101,7 +2466,7 @@ function getMcuHtml(webview, extensionUri) {
 
       <section id="setupsView" class="pageView hidden">
         <div class="viewNav managerNav">
-          <button id="backToMcusFromSetups" class="secondary">← All MCUs</button>
+          <button id="backToMcusFromSetups" class="secondary">← MCU or Board</button>
         </div>
         <div class="viewHeader setupsHeader">
           <div>
@@ -2116,12 +2481,6 @@ function getMcuHtml(webview, extensionUri) {
             <h3 id="workspaceBindingTitle">No setup selected</h3>
             <p id="workspaceBindingPath"></p>
           </div>
-          <div class="workspaceActions">
-            <button id="workspaceBuild" class="secondary">Build current .rs</button>
-            <button id="workspaceFlash" class="primary">Build &amp; Flash current .rs</button>
-            <button id="workspaceDebug" class="primary">Debug current .rs (F5)</button>
-            <button id="workspaceErase" class="secondary">Erase MCU</button>
-          </div>
         </div>
         <div id="setupsStatus" class="managerStatus"></div>
         <div id="setupEmpty" class="emptyManager hidden">
@@ -2133,7 +2492,7 @@ function getMcuHtml(webview, extensionUri) {
           <table class="dataTable setupTable">
             <thead>
               <tr>
-                <th>MCU</th>
+                <th>Setup</th>
                 <th>Vendor / family</th>
                 <th>Clock</th>
                 <th>Rust target</th>
@@ -2163,6 +2522,8 @@ function getNonce() {
 module.exports = {
   registerMcuConfigurator,
   openMcuConfigurator,
+  getSetupDashboardState,
+  useSetupWithCurrentWorkspace,
   _test: {
     getManagedPaths,
     readMcuList,
@@ -2184,6 +2545,13 @@ module.exports = {
     isGlobalDebugScope,
     formatDebugVariable,
     expandDebugVariables,
+    validateDatabaseSchema,
+    readBoardList,
+    readProgrammersForDevice,
+    readShieldsForBoard,
+    buildMikrobusRust,
+    shouldGenerateWorkspaceMikrobus,
+    resolveManagedBspFile,
     normalizeRustCrateEntryPoint,
     readCargoPackageName,
     resolveBuiltProgramBinary

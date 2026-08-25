@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Rust Tools",
   "description": "Cross-platform Rust MikroBUS VS Code tools with MCU setup management, package install/update/uninstall lifecycle controls, workspace build/flash actions, and built-in probe-rs DAP debugging.",
-  "version": "0.0.15",
+  "version": "0.0.21",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -14,6 +14,7 @@
     "onStartupFinished",
     "onView:mikrobusRust.setupView",
     "onCommand:mikrobusRust.openSetup",
+    "onCommand:mikrobusRust.openEnvironmentSetup",
     "onCommand:mikrobusRust.configureMcu",
     "onWebviewPanel:mikrobusRust.mcuConfigurator",
     "onCommand:mikrobusRust.useSetupWithWorkspace",
@@ -25,8 +26,6 @@
     "onCommand:mikrobusRust.buildCurrentFile",
     "onCommand:mikrobusRust.flashCurrentFile",
     "onCommand:mikrobusRust.debugCurrentFile",
-    "onCommand:mikrobusRust.debugStepOut",
-    "onCommand:mikrobusRust.restartDebugger",
     "onCommand:mikrobusRust.dumpDebugVariables",
     "onDebug:mikrobus-rust-debug"
   ],
@@ -35,11 +34,17 @@
     "commands": [
       {
         "command": "mikrobusRust.openSetup",
-        "title": "MikroBUS Rust: Open Setup"
+        "title": "MikroBUS Rust: Open Configured Setups"
+      },
+      {
+        "command": "mikrobusRust.openEnvironmentSetup",
+        "title": "MikroBUS Rust: Development Environment",
+        "icon": "$(tools)"
       },
       {
         "command": "mikrobusRust.configureMcu",
-        "title": "MikroBUS Rust: Configure MCU"
+        "title": "MikroBUS Rust: Configure MCU or Board",
+        "icon": "$(circuit-board)"
       },
       {
         "command": "mikrobusRust.useSetupWithWorkspace",
@@ -64,32 +69,31 @@
       {
         "command": "mikrobusRust.eraseWorkspaceMcu",
         "title": "MikroBUS Rust: Erase Configured MCU",
-        "icon": "$(trash)"
+        "icon": {
+          "light": "media/eraser-light.svg",
+          "dark": "media/eraser-dark.svg"
+        }
       },
       {
         "command": "mikrobusRust.buildCurrentFile",
         "title": "MikroBUS Rust: Build Current Rust File",
-        "icon": "$(tools)"
+        "icon": {
+          "light": "media/hammer-light.svg",
+          "dark": "media/hammer-dark.svg"
+        }
       },
       {
         "command": "mikrobusRust.flashCurrentFile",
         "title": "MikroBUS Rust: Build & Flash Current Rust File",
-        "icon": "$(cloud-upload)"
+        "icon": {
+          "light": "media/lightning-light.svg",
+          "dark": "media/lightning-dark.svg"
+        }
       },
       {
         "command": "mikrobusRust.debugCurrentFile",
         "title": "MikroBUS Rust: Debug Current Rust File",
         "icon": "$(debug-alt)"
-      },
-      {
-        "command": "mikrobusRust.debugStepOut",
-        "title": "MikroBUS Rust: Step Out",
-        "icon": "$(debug-step-out)"
-      },
-      {
-        "command": "mikrobusRust.restartDebugger",
-        "title": "MikroBUS Rust: Restart Debugger",
-        "icon": "$(debug-restart)"
       },
       {
         "command": "mikrobusRust.dumpDebugVariables",
@@ -119,6 +123,16 @@
           "type": "string",
           "default": "",
           "description": "Optional absolute path to probe-rs. Leave empty to resolve it from PATH, CARGO_HOME/bin or ~/.cargo/bin."
+        },
+        "mikrobusRust.windowsDebugTransport": {
+          "type": "string",
+          "enum": ["tcp", "stdio"],
+          "enumDescriptions": [
+            "Start a standalone probe-rs DAP TCP server. This is the tested Windows default.",
+            "Launch probe-rs as a stdin/stdout child adapter. Use only for diagnostics."
+          ],
+          "default": "tcp",
+          "description": "probe-rs DAP transport used on Windows."
         },
         "mikrobusRust.dumpVariablesOnStop": {
           "type": "boolean",
@@ -162,7 +176,7 @@
         {
           "type": "webview",
           "id": "mikrobusRust.setupView",
-          "name": "Environment Setup"
+          "name": "Configured Setups"
         }
       ]
     },
@@ -172,6 +186,11 @@
           "command": "mikrobusRust.configureMcu",
           "when": "view == mikrobusRust.setupView",
           "group": "navigation"
+        },
+        {
+          "command": "mikrobusRust.openEnvironmentSetup",
+          "when": "view == mikrobusRust.setupView",
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
@@ -198,16 +217,6 @@
       ],
       "debug/toolBar": [
         {
-          "command": "mikrobusRust.debugStepOut",
-          "when": "debugType == mikrobus-rust-debug",
-          "group": "navigation@45"
-        },
-        {
-          "command": "mikrobusRust.restartDebugger",
-          "when": "debugType == mikrobus-rust-debug",
-          "group": "navigation@46"
-        },
-        {
           "command": "mikrobusRust.dumpDebugVariables",
           "when": "debugType == mikrobus-rust-debug",
           "group": "navigation@47"
@@ -231,17 +240,6 @@
         "command": "mikrobusRust.debugCurrentFile",
         "key": "f5",
         "when": "editorLangId == rust && mikrobusRust.workspaceBound"
-      },
-      {
-        "command": "mikrobusRust.debugStepOut",
-        "key": "shift+f11",
-        "when": "inDebugMode && debugType == mikrobus-rust-debug"
-      },
-      {
-        "command": "mikrobusRust.restartDebugger",
-        "key": "ctrl+shift+f5",
-        "mac": "cmd+shift+f5",
-        "when": "inDebugMode && debugType == mikrobus-rust-debug"
       }
     ],
     "debuggers": [
@@ -270,6 +268,12 @@
                 "type": "boolean",
                 "default": true
               },
+              "wireProtocol": {
+                "type": "string",
+                "enum": ["Swd", "Jtag"],
+                "default": "Swd",
+                "description": "Debug wire protocol passed to probe-rs."
+              },
               "flashingConfig": {
                 "type": "object"
               },
@@ -283,7 +287,7 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check mcu_configurator.js && node --check media/setup.js && node --check media/mcu.js",
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check media/setup.js && node --check media/mcu.js && node --check media/setups.js",
     "build": "npx @vscode/vsce package"
   },
   "license": "UNLICENSED"

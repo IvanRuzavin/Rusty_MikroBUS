@@ -8,7 +8,7 @@ This example toggles three GPIO outputs once per second:
 | 2 | `GPIO_B7` |
 | 3 | `GPIO_B14` |
 
-The folder intentionally contains no copied mikroSDK tree and no machine-specific `Cargo.toml`. The MikroBUS Rust VS Code extension builds the active `main.rs` through the reusable MCU setup.
+The folder contains a lightweight root `Cargo.toml`, but no copied mikroSDK tree or machine-specific SDK dependency paths. The MikroBUS Rust VS Code extension builds the active `main.rs` through the reusable MCU setup.
 
 ## Build and run
 

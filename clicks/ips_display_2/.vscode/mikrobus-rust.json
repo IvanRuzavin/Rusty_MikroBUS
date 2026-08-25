@@ -1,10 +1,17 @@
 {
   "version": 1,
-  "setupId": "stm32f412re",
-  "mcuName": "STM32F412RE",
+  "setupId": "nucleo_144_with_stm32f412zg-nucleo_144_click_shield",
+  "mcuName": "STM32F412ZG",
   "clockMhz": 100,
   "target": "thumbv7em-none-eabi",
-  "sdkRoot": "c:\\Users\\IvanRus\\AppData\\Roaming\\Code\\User\\globalStorage\\mikroe-dev.mikrobus-rust-tools\\configured-setups\\workspaces\\stm32f412re",
-  "configuredAt": "2026-08-24T17:47:14.271Z",
-  "setupRoot": "c:\\Users\\IvanRus\\AppData\\Roaming\\Code\\User\\globalStorage\\mikroe-dev.mikrobus-rust-tools\\configured-setups\\workspaces\\stm32f412re\\.setup"
+  "selectionMode": "board",
+  "boardUid": "NUCLEO_144_WITH_STM32F412ZG",
+  "boardName": "Nucleo-F412ZG",
+  "shieldUid": "NUCLEO_144_CLICK_SHIELD",
+  "shieldName": "Click Shield for Nucleo-144",
+  "programmerUid": "SEGGER_JLINK",
+  "programmerName": "SEGGER J-Link",
+  "sdkRoot": "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/nucleo_144_with_stm32f412zg-nucleo_144_click_shield",
+  "configuredAt": "2026-08-25T07:16:39.961Z",
+  "setupRoot": "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/nucleo_144_with_stm32f412zg-nucleo_144_click_shield/.setup"
 }

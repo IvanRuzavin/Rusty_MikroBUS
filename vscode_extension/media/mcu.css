@@ -157,7 +157,7 @@ code { overflow-wrap: anywhere; }
 .clockSection h3, .sectionHeading h3 { margin: 0 0 4px; font-size: 15px; }
 .clockSection p, .sectionHeading p { margin: 0; color: var(--vscode-descriptionForeground); }
 .clockInput { display: flex; flex-direction: column; gap: 5px; min-width: 180px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-.clockInput input, .field select {
+.clockInput input, .clockInput select, .field select {
   color: var(--vscode-input-foreground);
   background: var(--vscode-dropdown-background);
   border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
@@ -165,7 +165,7 @@ code { overflow-wrap: anywhere; }
   border-radius: 3px;
   outline: none;
 }
-.clockInput input:focus, .field select:focus { border-color: var(--vscode-focusBorder); }
+.clockInput input:focus, .clockInput select:focus, .field select:focus { border-color: var(--vscode-focusBorder); }
 .sectionHeading { margin-bottom: 12px; }
 .registerGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .registerCard { padding: 14px; min-width: 0; }
@@ -244,4 +244,29 @@ code { overflow-wrap: anywhere; }
 @media (max-width: 980px) {
   .workspaceBindingCard { flex-direction: column; align-items: stretch; }
   .workspaceActions { justify-content: flex-start; }
+}
+
+.selectionStart { max-width: 980px; margin: 0 auto; }
+.selectionCards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+button.selectionCard {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorWidget-background);
+  border-color: var(--vscode-panel-border);
+}
+button.selectionCard:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+.selectionCard strong { font-size: 23px; color: var(--vscode-textLink-foreground); }
+.selectionCard span { color: var(--vscode-descriptionForeground); line-height: 1.5; }
+.boardTable { min-width: 720px; }
+.programmerSection { margin-top: 24px; }
+
+@media (max-width: 700px) {
+  .selectionCards { grid-template-columns: 1fr; }
 }

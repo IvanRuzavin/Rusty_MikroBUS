@@ -7,24 +7,24 @@ use panic_halt as _;
 use system::init_clock::delay_1sec;
 
 mod ips_display_2;
-mod mikrobus_1;
+mod mikrobus;
 
 use ips_display_2::{
     Config, IpsDisplay2, Point, COLOR_BLACK, COLOR_BLUE, COLOR_CYAN, COLOR_LIME,
     COLOR_MAGENTA, COLOR_RED, COLOR_YELLOW,
 };
-use mikrobus_1::*;
+use mikrobus::*;
 
 #[unsafe(no_mangle)]
 fn main() -> ! {
     let config = Config {
-        sck: MIKROBUS_1_SCK,
-        miso: MIKROBUS_1_MISO,
-        mosi: MIKROBUS_1_MOSI,
-        cs: MIKROBUS_1_CS,
-        rst: MIKROBUS_1_RST,
-        dc: MIKROBUS_1_INT,
-        backlight: MIKROBUS_1_AN,
+        sck: MIKROBUS_3_SCK,
+        miso: MIKROBUS_3_MISO,
+        mosi: MIKROBUS_3_MOSI,
+        cs: MIKROBUS_3_CS,
+        rst: MIKROBUS_3_RST,
+        dc: MIKROBUS_3_INT,
+        backlight: MIKROBUS_3_AN,
         spi_speed: 5_000_000,
     };
 
