@@ -882,30 +882,39 @@ function resolveCodegripExecutable() {
   const fromPath = findExecutableOnPath('CodegripGdbServer');
   if (fromPath) return fromPath;
 
-  const nectoCandidate = path.join(
-    os.homedir(),
-    '.MIKROE',
-    'NECTOStudio7',
-    'packages',
-    'programmers',
-    'codegrip',
-    'apps',
-    'bin',
-    executableName
+  const codegripPackageRoot = path.join(
+    os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip'
   );
+  const nectoCandidate = process.platform === 'win32'
+    ? path.join(codegripPackageRoot, 'apps', 'CodegripGdbServer.exe')
+    : process.platform === 'darwin'
+      ? path.join(codegripPackageRoot, 'apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
+      : path.join(codegripPackageRoot, 'apps', 'bin', 'CodegripGdbServer');
   if (isExecutableFile(nectoCandidate)) return nectoCandidate;
 
   throw new Error(
-    `CodegripGdbServer was not found. Set mikrobusRust.codegripServerPath to the executable or its bin directory. ` +
+    `CodegripGdbServer was not found. Set mikrobusRust.codegripServerPath to the executable or its directory. ` +
     `The detected NECTO location was ${nectoCandidate}.`
   );
 }
 
+function inferCodegripPackageRoot(serverExecutable) {
+  let current = path.resolve(path.dirname(serverExecutable));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (path.basename(current).toLowerCase() === 'codegrip') return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return undefined;
+}
+
 function resolveCodegripPacksPath(serverExecutable) {
   const configured = configuredToolPath('codegripPacksPath');
+  const inferredRoot = inferCodegripPackageRoot(serverExecutable);
   const candidates = [
     configured,
-    path.resolve(path.dirname(serverExecutable), '..', '..', 'packs'),
+    inferredRoot ? path.join(inferredRoot, 'packs') : undefined,
     path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip', 'packs')
   ].filter(Boolean);
   const found = candidates.find((candidate) => {

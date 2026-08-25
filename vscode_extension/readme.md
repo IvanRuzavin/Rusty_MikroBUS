@@ -2,7 +2,16 @@
 
 VS Code support for reusable mikroSDK Rust setups, project build/flash/debug actions, and MCU or board-based hardware configuration.
 
-## Version 0.0.23
+## Version 0.0.24
+
+- Aligns the CODEGRIP control protocol with NECTO Studio: `scan` + `communication_type`, direct `response` payloads, command-correlated replies, and `linkPasswordDebug` authentication.
+- Preserves the complete device object returned by CODEGRIP discovery and sends it back unchanged to `selectDevice`, matching NECTO Studio.
+- Uses NECTO Studio server lifecycle flags (`--portCore2 0`, `--stop gdb`, `--stop control`) and waits for the server initialization/port sequence before connecting.
+- Loads `getAllOptions` from the installed CODEGRIP server and applies the same default target settings used by NECTO Studio, using the option groups actually advertised by the server.
+- Uses NECTO Studio's two-phase debug flow: program with `debugEnable: true`, close that server, start a fresh GDB server configured to live through the debug session, then attach Cortex-Debug.
+- Resolves the standard NECTO CODEGRIP server path correctly on Linux, Windows, and macOS.
+
+Version 0.0.24 retains the 0.0.23 USB setup flow:
 
 - Adds **Find USB CODEGRIP** to the MCU/board setup wizard whenever MIKROE CODEGRIP is selected.
 - Discovers the attached local USB device, lets the user choose when several devices are returned, and saves its serial number, hardware tokens, and stable connection fields with the reusable setup.
@@ -10,14 +19,14 @@ VS Code support for reusable mikroSDK Rust setups, project build/flash/debug act
 - Removes `mikrobusRust.codegripProfilePath` and the manually maintained connection-profile file. Flash, erase, and debug now use the device stored in the setup.
 - Does not change any Development Environment package or tool paths.
 
-Version 0.0.23 retains the complete 0.0.22 programmer integration and earlier setup behavior:
+It also retains the complete 0.0.22 programmer integration and earlier setup behavior:
 
 - Adds MIKROE CODEGRIP as a database-selected programmer/debugger alongside SEGGER J-Link.
 - Implements the supplied `CodegripGdbServer` launch contract, dynamic ports, framed JSON control channel, USB/Wi-Fi selection, optional authentication, target options, Intel HEX programming, and external-GDB debugging.
 - Converts Rust ELF files with the ARM GCC package already managed by Development Environment. Existing Development Environment package paths are unchanged.
 - Uses Cortex-Debug only for CODEGRIP's GDB endpoint. The existing probe-rs DAP path remains unchanged for SEGGER J-Link setups.
 - Keeps one Rust database and removes the incompatible Nucleo-F412ZG / Nucleo-144 Click Shield relationship.
-- Routes standalone erase through a configurable CODEGRIP command. The supplied samples do not document that command, so `erase` is the compatibility default and any server rejection is displayed.
+- Routes standalone erase through the same `erase` control command used by NECTO Studio, with an optional compatibility override.
 
 It also retains the complete 0.0.21 setup, BSP, board, shieldless-board, project, Windows-debug, and variable-printing behavior:
 
@@ -158,25 +167,25 @@ Choose **MIKROE CODEGRIP** while building an MCU or board setup, connect it over
 
 The extension checks these paths without changing any package location shown in Development Environment:
 
-1. `mikrobusRust.codegripServerPath`, then `PATH`, then `~/.MIKROE/NECTOStudio7/packages/programmers/codegrip/apps/bin/CodegripGdbServer`;
+1. `mikrobusRust.codegripServerPath`, then `PATH`, then the platform-specific standard NECTO Studio CODEGRIP package path;
 2. `mikrobusRust.codegripPacksPath`, then the packs directory inferred from that server, then the standard NECTOStudio7 CODEGRIP package;
 3. `mikrobusRust.armGccBinPath`, then `PATH`, then the existing managed `runner/xpack-arm-none-eabi-gcc-*/bin` package.
 
-No connection-profile file is required. Discovery records the communication type, device name, serial number, hardware tokens, device IP, link ports, and SSL state. Process IDs, signal-strength samples, dynamic server ports, and passwords are not persisted.
+No connection-profile file is required. Discovery stores the complete USB device object returned by the server (including the stable selection fields) so `selectDevice` receives the same payload shape that NECTO Studio uses. Dynamic local control/GDB ports are not persisted.
 
-The supplied CODEGRIP command examples document device selection after connection data is known, but do not name the Suite's discovery command. The extension therefore accepts USB-device results from the known framed control response/notification shapes and tries compatibility discovery command names. The **MikroBUS Rust** output channel lists the attempted command and any server rejection so a different installed server build can be diagnosed without hiding the error.
+USB discovery now follows the NECTO Studio implementation directly: the control client sends `scan` with `communication_type: "usb"` and an empty `addresses` array, then reads `response.devices` from the `cmdResponse`.
 
 The server command is:
 
 ```text
-CodegripGdbServer --mcu <MCU> --port 0 --cport 0 --packs <packs-directory>
+CodegripGdbServer --mcu <MCU> --packs <packs-directory> --stop gdb --stop control --port 0 --cport 0 --portCore2 0
 ```
 
-Flash builds the Rust source, converts its ELF to Intel HEX, configures CODEGRIP, and sends `programming` with `debugEnable: false`. Debug sends `programming` with `debugEnable: true`, retains the server, then launches Cortex-Debug against the published GDB port. Debug Console variable printing remains available.
+Flash builds the Rust source, converts its ELF to Intel HEX, applies the target options, selects/authenticates the discovered device, and sends `programming` with `debugEnable: false`. Debug first performs a separate `programming` operation with `debugEnable: true`, then starts a fresh CODEGRIP server with `--stop gdb`, configures the same target/device, closes the control socket, and launches Cortex-Debug against the published GDB port. Debug Console variable printing remains available.
 
 The database exposes CODEGRIP for all 38 MCUs currently present in the Rust SDK database. The installed CODEGRIP packs remain the final authority for a particular MCU. The supplied executable tests explicitly exercise STM32F407ZG; validate each additional physical MCU/probe combination before relying on it in production.
 
-The supplied command set demonstrates erase as part of programming but does not name a standalone erase command. Version 0.0.23 sends `mikrobusRust.codegripEraseCommand`, defaulting to `erase`. If the server rejects it, the returned status and text are shown; set the exact command supported by that server version.
+Standalone erase sends the same `erase` command used by the NECTO Studio CODEGRIP client. `mikrobusRust.codegripEraseCommand` remains available only as a compatibility override for a different server build.
 
 ## Windows debugging
 

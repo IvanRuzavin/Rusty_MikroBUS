@@ -52,21 +52,11 @@ function normalizeConnectionProfile(rawProfile) {
     speed: String(firstDefined(rawProfile, ['speed', 'Speed'], '')).trim(),
     resetType: String(firstDefined(rawProfile, ['resetType', 'Reset Type'], 'Hardware reset')).trim() || 'Hardware reset',
     connection: String(firstDefined(rawProfile, ['connection', 'Connection'], 'Under reset')).trim() || 'Under reset',
-    haltOnConnect: String(firstDefined(rawProfile, ['haltOnConnect', 'Halt on Connect'], 'Enabled')).trim() || 'Enabled'
-  };
-}
-
-function selectDeviceParameters(profile) {
-  return {
-    communicationType: profile.communicationType,
-    serialNumber: profile.serialNumber,
-    ip: profile.ip,
-    hwTokens: profile.hwTokens,
-    linkPortDebug: profile.linkPortDebug,
-    linkPortConfig: profile.linkPortConfig,
-    sslEnable: profile.sslEnable,
-    linkPasswordDebug: profile.linkPasswordDebug,
-    linkPasswordConfig: profile.linkPasswordConfig
+    haltOnConnect: String(firstDefined(rawProfile, ['haltOnConnect', 'Halt on Connect'], 'Enabled')).trim() || 'Enabled',
+    remotePassword: String(firstDefined(rawProfile, ['remotePassword', 'remote_password', 'password'], '')),
+    selectedDevice: rawProfile.rawDevice && typeof rawProfile.rawDevice === 'object'
+      ? { ...rawProfile.rawDevice }
+      : { ...rawProfile }
   };
 }
 
@@ -74,15 +64,26 @@ function responseStatusIsSuccess(status) {
   return status === 0 || status === '0';
 }
 
-function responseDescription(response) {
-  const data = response?.response?.data;
-  if (typeof data === 'string') return data.trim();
-  if (data === undefined || data === null) return '';
-  try {
-    return JSON.stringify(data);
-  } catch {
-    return String(data);
+function responseDescription(message) {
+  const response = message?.response;
+  if (typeof response === 'string') return response.trim();
+  if (response === undefined || response === null) return '';
+  if (typeof response?.statusMsg === 'string' && response.statusMsg.trim()) {
+    return response.statusMsg.trim();
   }
+  if (typeof response?.data === 'string' && response.data.trim()) {
+    return response.data.trim();
+  }
+  try {
+    return JSON.stringify(response);
+  } catch {
+    return String(response);
+  }
+}
+
+function commandResponseFailed(message) {
+  const status = message?.response?.status;
+  return status !== undefined && status !== null && !responseStatusIsSuccess(status);
 }
 
 class CodegripControlClient {
@@ -158,16 +159,31 @@ class CodegripControlClient {
         this.onNotification(message);
         continue;
       }
-      const request = this.pending.shift();
-      if (!request) continue;
-      clearTimeout(request.timer);
-      const status = message?.response?.status;
-      if (!responseStatusIsSuccess(status)) {
-        const detail = responseDescription(message);
-        request.reject(new Error(`CODEGRIP command '${request.command}' failed with status ${status ?? 'unknown'}${detail ? `: ${detail}` : ''}.`));
+
+      // NECTO's CODEGRIP protocol includes the command name in every
+      // cmdResponse. Prefer matching by command, but fall back to FIFO for
+      // older server builds that omit it.
+      const responseCommand = String(message?.command || '');
+      let requestIndex = responseCommand
+        ? this.pending.findIndex((item) => item.command === responseCommand)
+        : 0;
+      if (requestIndex < 0) {
+        this.onNotification(message);
         continue;
       }
-      request.resolve(message?.response?.data);
+      const [request] = this.pending.splice(requestIndex, 1);
+      if (!request) continue;
+      clearTimeout(request.timer);
+
+      // scan/getAllOptions responses do not carry a status field at all.
+      // Treat status as an error only when the server actually supplied it.
+      if (commandResponseFailed(message)) {
+        const status = message?.response?.status;
+        const detail = responseDescription(message);
+        request.reject(new Error(`CODEGRIP command '${request.command}' failed with status ${status}${detail ? `: ${detail}` : ''}.`));
+        continue;
+      }
+      request.resolve(message?.response);
     }
   }
 
@@ -212,24 +228,26 @@ class CodegripControlClient {
 
 function normalizeDiscoveredDevice(rawDevice) {
   if (!rawDevice || typeof rawDevice !== 'object' || Array.isArray(rawDevice)) return undefined;
-  const source = rawDevice.selectedDevice || rawDevice.selected_device || rawDevice.device || rawDevice;
+  const source = rawDevice.rawDevice || rawDevice.selectedDevice || rawDevice.selected_device || rawDevice.device || rawDevice;
   if (!source || typeof source !== 'object' || Array.isArray(source)) return undefined;
+
   const communicationType = String(firstDefined(source, ['communicationType', 'Communication Type'], '')).trim().toLowerCase();
   const serialNumber = String(firstDefined(source, ['serialNumber', 'Serial'], '')).trim();
-  const hwTokens = String(firstDefined(source, ['hwTokens', 'Hardware tokens', 'Hardware Tokens'], '')).trim();
-  if (communicationType !== 'usb' || !serialNumber || !hwTokens) return undefined;
-  return {
+  if (communicationType !== 'usb' || !serialNumber) return undefined;
+
+  const normalized = {
+    ...source,
     communicationType: 'usb',
     deviceName: String(firstDefined(source, ['deviceName', 'Name'], 'CODEGRIP')).trim() || 'CODEGRIP',
     serialNumber,
-    hwTokens,
     ip: String(firstDefined(source, ['ip', 'Ip Address', 'IP Address'], '0.0.0.2')).trim() || '0.0.0.2',
-    linkPortDebug: asPort(firstDefined(source, ['linkPortDebug', 'debugPort'], 0)),
-    linkPortConfig: asPort(firstDefined(source, ['linkPortConfig', 'configPort'], 0)),
     sslEnable: asBoolean(firstDefined(source, ['sslEnable', 'ssl'], false)),
-    linkPasswordDebug: '',
-    linkPasswordConfig: ''
+    rawDevice: { ...source }
   };
+
+  const hwTokens = firstDefined(source, ['hwTokens', 'Hardware tokens', 'Hardware Tokens'], undefined);
+  if (hwTokens !== undefined && hwTokens !== null) normalized.hwTokens = hwTokens;
+  return normalized;
 }
 
 function extractDiscoveredDevices(value) {
@@ -246,7 +264,7 @@ function extractDiscoveredDevices(value) {
     seenObjects.add(item);
     const normalized = normalizeDiscoveredDevice(item);
     if (normalized) {
-      const key = `${normalized.serialNumber}\u0000${normalized.hwTokens}`;
+      const key = `${normalized.communicationType}\u0000${normalized.serialNumber}\u0000${normalized.ip || ''}`;
       if (!seenDevices.has(key)) {
         seenDevices.add(key);
         devices.push(normalized);
@@ -261,56 +279,31 @@ function extractDiscoveredDevices(value) {
 }
 
 async function discoverUsbCodegrips(options) {
-  const runtime = await startCodegripServer(options);
-  const notifications = [];
+  const runtime = await startCodegripServer({ ...options, closeMode: 'always' });
   const control = new CodegripControlClient(runtime.controlPort, {
     timeoutMs: options.commandTimeoutMs || 30000,
     onProgress(progress, response) {
       if (progress !== undefined) options.channel?.appendLine(`CODEGRIP USB scan progress: ${progress}%`);
-      if (response) notifications.push(response);
-    },
-    onNotification(message) {
-      notifications.push(message);
+      if (response?.info) options.channel?.appendLine(`CODEGRIP: ${response.info}`);
     }
   });
   runtime.control = control;
-  const attempts = [];
-  const commands = [
-    ['scanDevices', { communicationType: 'usb' }],
-    ['getDevices', { communicationType: 'usb' }],
-    ['getConnectedDevices', { communicationType: 'usb' }],
-    ['getAvailableDevices', { communicationType: 'usb' }],
-    ['getDeviceList', { communicationType: 'usb' }],
-    ['discoverDevices', { communicationType: 'usb' }],
-    ['listDevices', { communicationType: 'usb' }],
-    ['scanUsbDevices', {}],
-    ['selectDevice', { communicationType: 'usb' }]
-  ];
   try {
     await control.connect();
-    for (const [command, parameters] of commands) {
-      options.channel?.appendLine(`CODEGRIP USB discovery: ${command}`);
-      try {
-        const result = await control.send(command, parameters);
-        let devices = extractDiscoveredDevices([result, notifications]);
-        if (devices.length) return { devices, command };
-        if (/scan|discover/i.test(command)) {
-          await new Promise((resolve) => setTimeout(resolve, 600));
-          devices = extractDiscoveredDevices(notifications);
-          if (devices.length) return { devices, command };
-        }
-        attempts.push(`${command}: no USB devices returned`);
-      } catch (error) {
-        const detail = String(error.message || error).replace(/\s+/g, ' ').slice(0, 220);
-        attempts.push(`${command}: ${detail}`);
-        if (/timed out/i.test(detail)) break;
-      }
+    options.channel?.appendLine('CODEGRIP USB discovery: scan');
+    const response = await control.send('scan', {
+      communication_type: 'usb',
+      addresses: []
+    });
+    const devices = extractDiscoveredDevices(response)
+      .filter((device) => device.communicationType === 'usb');
+    if (!devices.length) {
+      throw new Error(
+        'No USB CODEGRIP was returned by CodegripGdbServer. Connect CODEGRIP by USB, ' +
+        'close any NECTO/CODEGRIP Suite session currently using it, and retry.'
+      );
     }
-    throw new Error(
-      'No USB CODEGRIP was returned by the installed CodegripGdbServer discovery API. ' +
-      'Connect CODEGRIP by USB, close NECTO/CODEGRIP Suite sessions using it, and retry. ' +
-      `Discovery attempts: ${attempts.join(' | ')}`
-    );
+    return { devices, command: 'scan' };
   } finally {
     await stopCodegripServer(runtime);
   }
@@ -323,7 +316,16 @@ function startCodegripServer(options) {
   if (!fs.existsSync(packsPath) || !fs.statSync(packsPath).isDirectory()) {
     throw new Error(`CODEGRIP packs directory was not found: ${packsPath}`);
   }
-  const args = ['--mcu', String(mcu), '--port', '0', '--cport', '0', '--packs', packsPath];
+  const args = ['--mcu', String(mcu), '--packs', packsPath];
+  const closeMode = String(options.closeMode || 'always');
+  if (closeMode === 'always') {
+    args.push('--stop', 'gdb', '--stop', 'control');
+  } else if (closeMode === 'debug') {
+    args.push('--stop', 'gdb');
+  } else if (closeMode === 'control') {
+    args.push('--stop', 'control');
+  }
+  args.push('--port', '0', '--cport', '0', '--portCore2', '0');
   channel?.appendLine(`Resolved CODEGRIP server: ${executable}`);
   channel?.appendLine(`CODEGRIP packs: ${packsPath}`);
   channel?.appendLine(`Starting CODEGRIP for ${mcu} with dynamic control/debug ports.`);
@@ -337,24 +339,37 @@ function startCodegripServer(options) {
     });
     let controlPort;
     let debugPort;
+    let debugSecondPort;
+    let initializationFinished = false;
     let outputBuffer = '';
     let settled = false;
     let timer;
+    let finishTimer;
     const finishIfReady = () => {
-      if (settled || !controlPort || !debugPort) return;
-      settled = true;
-      clearTimeout(timer);
-      channel?.appendLine(`CODEGRIP control port: ${controlPort}`);
-      channel?.appendLine(`CODEGRIP debug port: ${debugPort}`);
-      resolve({ child, controlPort, debugPort });
+      if (settled || finishTimer || !initializationFinished || !controlPort || !debugPort) return;
+      // The current server prints the second-core port immediately after the
+      // primary debug port. Give the merged stream one short turn to consume
+      // that line before publishing the runtime.
+      finishTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        channel?.appendLine(`CODEGRIP control port: ${controlPort}`);
+        channel?.appendLine(`CODEGRIP debug port: ${debugPort}`);
+        if (debugSecondPort) channel?.appendLine(`CODEGRIP second debug port: ${debugSecondPort}`);
+        resolve({ child, controlPort, debugPort, debugSecondPort });
+      }, 25);
     };
     const consumeLine = (line) => {
       const trimmed = line.trim();
       if (trimmed) channel?.appendLine(`[CODEGRIP] ${trimmed}`);
+      if (/Mikroe servers:\s*Initialization finished\./i.test(line)) initializationFinished = true;
       const controlMatch = line.match(/Control port:\s*(\d+)/i);
       const debugMatch = line.match(/Debug port:\s*(\d+)/i);
+      const debugSecondMatch = line.match(/Debug second port:\s*(\d+)/i);
       if (controlMatch) controlPort = Number(controlMatch[1]);
       if (debugMatch) debugPort = Number(debugMatch[1]);
+      if (debugSecondMatch) debugSecondPort = Number(debugSecondMatch[1]);
       finishIfReady();
     };
     const consume = (data) => {
@@ -364,7 +379,9 @@ function startCodegripServer(options) {
       for (const line of lines) consumeLine(line);
     };
     child.stdout?.on('data', consume);
-    child.stderr?.on('data', (data) => channel?.append(`[CODEGRIP stderr] ${data.toString()}`));
+    // NECTO merges stdout/stderr before parsing server status. Do the same so
+    // port publication is detected regardless of which stream the server uses.
+    child.stderr?.on('data', consume);
     child.once('error', (error) => {
       if (settled) {
         channel?.appendLine(`[CODEGRIP] process error: ${error.message}`);
@@ -372,6 +389,7 @@ function startCodegripServer(options) {
       }
       settled = true;
       clearTimeout(timer);
+      clearTimeout(finishTimer);
       reject(error);
     });
     child.once('close', (code) => {
@@ -380,11 +398,13 @@ function startCodegripServer(options) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(finishTimer);
       reject(new Error(`CodegripGdbServer exited before publishing its ports (exit code ${code ?? -1}).`));
     });
     timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      clearTimeout(finishTimer);
       try { child.kill(); } catch { /* already stopped */ }
       reject(new Error(`CodegripGdbServer did not publish control/debug ports within ${timeoutMs} ms.`));
     }, timeoutMs);
@@ -412,26 +432,92 @@ async function stopCodegripServer(runtime) {
   });
 }
 
-async function configureControlClient(control, profile, channel) {
+function nectoDefaultOptionValues(mcu) {
+  const name = String(mcu || '');
+  const values = new Map([
+    ['Connection', 'Normal'],
+    ['Erase Type', 'Sector erase'],
+    ['Halt on Connect', 'Disabled'],
+    ['Protocol', 'SWD'],
+    ['Reset Type', 'Hardware reset'],
+    ['Speed', '4 MHz'],
+    ['Verify Type', 'CRC'],
+    ['Verify after Write', 'Enabled']
+  ]);
+
+  if (/^PIC32.+$/.test(name)) values.set('Protocol', '2-wire EJTAG');
+  if (/^(PIC32|MK|TM4C|GD32).+$/.test(name)) values.set('Erase Type', 'Mass erase');
+  if (/^STM32.+$/.test(name)) values.set('Erase Type', 'Erase and unlock');
+  if (/^(MK|STM32|GD32).+$/.test(name)) values.set('Connection', 'Under reset');
+  if (/^(MK|TM4C|STM32|GD32).+$/.test(name)) values.set('Halt on Connect', 'Enabled');
+  return values;
+}
+
+function flattenServerOptions(response) {
+  const groups = Array.isArray(response) ? response : [];
+  const result = [];
+  for (const groupEntry of groups) {
+    const group = String(groupEntry?.group || '');
+    const options = Array.isArray(groupEntry?.options) ? groupEntry.options : [];
+    for (const optionEntry of options) {
+      const option = String(optionEntry?.option || '');
+      if (!group || !option) continue;
+      result.push({
+        group,
+        option,
+        values: Array.isArray(optionEntry?.values) ? optionEntry.values.map(String) : []
+      });
+    }
+  }
+  return result;
+}
+
+function selectDeviceParameters(profile) {
+  if (profile?.selectedDevice && typeof profile.selectedDevice === 'object') {
+    return { ...profile.selectedDevice };
+  }
+  return {
+    communicationType: profile.communicationType,
+    serialNumber: profile.serialNumber,
+    ip: profile.ip,
+    hwTokens: profile.hwTokens,
+    linkPortDebug: profile.linkPortDebug,
+    linkPortConfig: profile.linkPortConfig,
+    sslEnable: profile.sslEnable,
+    linkPasswordDebug: profile.linkPasswordDebug,
+    linkPasswordConfig: profile.linkPasswordConfig
+  };
+}
+
+async function configureControlClient(control, profile, channel, mcu) {
   const run = async (command, parameters) => {
     channel?.appendLine(`CODEGRIP control: ${command}`);
     return control.send(command, parameters);
   };
-  await run('selectDevice', selectDeviceParameters(profile));
-  if (profile.linkPasswordConfig) {
-    await run('authenticate', { linkPasswordConfig: profile.linkPasswordConfig });
-  }
-  const options = [
-    ['Protocol', profile.protocol],
-    ['Speed', profile.speed],
-    ['Reset Type', profile.resetType],
-    ['Connection', profile.connection],
-    ['Halt on Connect', profile.haltOnConnect]
-  ];
-  for (const [option, value] of options) {
+
+  // NECTO obtains the option schema from the server and stores the selected
+  // values with their real server group names. The extension has no separate
+  // CODEGRIP target-options UI yet, so apply NECTO's defaults to every option
+  // that the installed server actually advertises.
+  const allOptions = await run('getAllOptions', {});
+  const desired = nectoDefaultOptionValues(mcu);
+  for (const serverOption of flattenServerOptions(allOptions)) {
+    const value = desired.get(serverOption.option);
     if (!value) continue;
-    await run('setOptionValue', { group: 'Target Connection', option, value });
+    if (serverOption.values.length && !serverOption.values.includes(value)) {
+      channel?.appendLine(`CODEGRIP: skipping ${serverOption.option}=${value}; value is not advertised by this server/MCU.`);
+      continue;
+    }
+    await run('setOptionValue', {
+      group: serverOption.group,
+      option: serverOption.option,
+      value
+    });
   }
+
+  // Keep the same ordering used by Codegrip::setOptions() in NECTO.
+  await run('selectDevice', selectDeviceParameters(profile));
+  await run('authenticate', { linkPasswordDebug: profile.remotePassword || '' });
 }
 
 async function openConfiguredCodegrip(options) {
@@ -445,7 +531,7 @@ async function openConfiguredCodegrip(options) {
   runtime.control = control;
   try {
     await control.connect();
-    await configureControlClient(control, options.profile, options.channel);
+    await configureControlClient(control, options.profile, options.channel, options.mcu);
     return runtime;
   } catch (error) {
     await stopCodegripServer(runtime);
@@ -454,48 +540,46 @@ async function openConfiguredCodegrip(options) {
 }
 
 async function programCodegrip(options) {
-  const runtime = await openConfiguredCodegrip(options);
+  const runtime = await openConfiguredCodegrip({ ...options, closeMode: 'always' });
   try {
     const hex = fs.readFileSync(options.hexFile, 'utf8');
     options.channel?.appendLine(`CODEGRIP control: programming (${options.debugEnable ? 'debug enabled' : 'program only'})`);
-    await runtime.control.send('programming', {
+    const response = await runtime.control.send('programming', {
       debugEnable: Boolean(options.debugEnable),
-      fileType: 'hex',
       hex
     });
+    if (response?.status !== undefined && !responseStatusIsSuccess(response.status)) {
+      throw new Error(`CODEGRIP programming failed with status ${response.status}${response.statusMsg ? `: ${response.statusMsg}` : ''}.`);
+    }
   } finally {
     await stopCodegripServer(runtime);
   }
 }
 
 async function eraseCodegrip(options) {
-  const runtime = await openConfiguredCodegrip(options);
+  const runtime = await openConfiguredCodegrip({ ...options, closeMode: 'always' });
   try {
     const command = String(options.eraseCommand || 'erase').trim() || 'erase';
     options.channel?.appendLine(`CODEGRIP control: ${command} (erase)`);
-    await runtime.control.send(command, {});
+    const response = await runtime.control.send(command, {});
+    if (response?.status !== undefined && !responseStatusIsSuccess(response.status)) {
+      throw new Error(`CODEGRIP erase failed with status ${response.status}${response.statusMsg ? `: ${response.statusMsg}` : ''}.`);
+    }
   } finally {
     await stopCodegripServer(runtime);
   }
 }
 
 async function prepareCodegripDebug(options) {
-  const runtime = await openConfiguredCodegrip(options);
-  try {
-    const hex = fs.readFileSync(options.hexFile, 'utf8');
-    options.channel?.appendLine('CODEGRIP control: programming (debug enabled)');
-    await runtime.control.send('programming', {
-      debugEnable: true,
-      fileType: 'hex',
-      hex
-    });
-    runtime.control.close();
-    runtime.control = undefined;
-    return runtime;
-  } catch (error) {
-    await stopCodegripServer(runtime);
-    throw error;
-  }
+  // NECTO performs debug in two phases:
+  //   1. program with debugEnable=true using a normal control-server lifetime;
+  //   2. start a fresh server with CloseAfterDebug and configure the target.
+  await programCodegrip({ ...options, debugEnable: true });
+
+  const runtime = await openConfiguredCodegrip({ ...options, closeMode: 'debug' });
+  runtime.control.close();
+  runtime.control = undefined;
+  return runtime;
 }
 
 module.exports = {
@@ -515,6 +599,9 @@ module.exports = {
     asBoolean,
     asPort,
     responseStatusIsSuccess,
-    responseDescription
+    responseDescription,
+    commandResponseFailed,
+    nectoDefaultOptionValues,
+    flattenServerOptions
   }
 };
