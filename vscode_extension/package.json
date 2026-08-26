@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Rust Tools",
   "description": "Cross-platform Rust MikroBUS VS Code tools with reusable MCU/board setups and automatic USB CODEGRIP discovery.",
-  "version": "0.0.28",
+  "version": "0.1.0",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -321,5 +321,10 @@
     "build": "npx @vscode/vsce package"
   },
   "license": "UNLICENSED",
-  "icon": "media/mikrobus-rust.png"
+  "icon": "media/mikrobus-rust.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IvanRuzavin/Rusty_MikroBUS.git"
+  },
+  "homepage": "https://github.com/IvanRuzavin/Rusty_MikroBUS#readme"
 }
