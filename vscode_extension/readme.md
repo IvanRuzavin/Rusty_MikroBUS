@@ -1,6 +1,22 @@
+
+## 0.0.28
+
+- Board configuration now supports both direct-MCU boards (`BoardToDevice`) and MCU-card boards (`BoardToCard` + `CardToMCU`), including UNI-DS v8.
+- Card-based board details show the selected/default MCU card and hardware MCU.
+- Updated MikroBUS + Rust extension branding/icon.
+
 # MikroBUS Rust Tools
 
 VS Code support for reusable mikroSDK Rust setups, project build/flash/debug actions, and MCU or board-based hardware configuration.
+
+
+## 0.0.27
+
+- Adds **MIKROE CODEGRIP** to the Development Environment as an extension-managed tool on Linux x64.
+- Downloads `codegrip.7z` from Rusty_MikroBUS v0.0.1 and installs it under `<managed root>/runner/codegrip`.
+- Verifies both `apps/bin/CodegripGdbServer` and the `packs` tree and restores the executable bit after extraction.
+- Resolves the extension-managed CODEGRIP installation before PATH/NECTO fallbacks for USB discovery, programming, erase, and debugging.
+- Keeps `mikrobusRust.codegripServerPath` and `mikrobusRust.codegripPacksPath` as explicit overrides.
 
 ## Version 0.0.24
 
@@ -60,7 +76,7 @@ It also retains the complete 0.0.21 setup, BSP, board, shieldless-board, project
 
 Install the packaged `.vsix` with **Extensions: Install from VSIX...**, then reload VS Code.
 
-The extension requires VS Code 1.101 or newer. Its managed packages include the Rust database, BSP, SDK, core, ARM GCC, and OpenOCD. Rust, probe-rs, J-Link, and platform drivers are detected or installed through the Development Environment window.
+The extension requires VS Code 1.101 or newer. Its managed packages include CODEGRIP (Linux x64), the Rust database, BSP, SDK, core, ARM GCC, and OpenOCD. Rust, probe-rs, J-Link, and platform drivers are detected or installed through the Development Environment window.
 
 ## Normal workflow
 
@@ -166,10 +182,10 @@ The extension opens that database read-only for configuration queries. It does n
 
 Choose **MIKROE CODEGRIP** while building an MCU or board setup, connect it over USB, and choose **Find USB CODEGRIP**. If more than one local device is returned, select the required serial number. The extension stores the stable USB selector fields with the reusable setup, so the same lightning, debug, and eraser actions automatically use that CODEGRIP.
 
-The extension checks these paths without changing any package location shown in Development Environment:
+CODEGRIP is now managed from Development Environment on Linux x64 and is installed under `<managed root>/runner/codegrip`. Runtime resolution uses:
 
-1. `mikrobusRust.codegripServerPath`, then `PATH`, then the platform-specific standard NECTO Studio CODEGRIP package path;
-2. `mikrobusRust.codegripPacksPath`, then the packs directory inferred from that server, then the standard NECTOStudio7 CODEGRIP package;
+1. `mikrobusRust.codegripServerPath`, then the managed `runner/codegrip` server, then `PATH`, then the platform-specific standard NECTO Studio CODEGRIP package path;
+2. `mikrobusRust.codegripPacksPath`, then the packs directory inferred from the resolved server, then managed `runner/codegrip/packs`, then the standard NECTOStudio7 CODEGRIP package;
 3. `mikrobusRust.armGccBinPath`, then `PATH`, then the existing managed `runner/xpack-arm-none-eabi-gcc-*/bin` package.
 
 No connection-profile file is required. Discovery stores the complete USB device object returned by the server (including the stable selection fields) so `selectDevice` receives the same payload shape that NECTO Studio uses. Dynamic local control/GDB ports are not persisted.

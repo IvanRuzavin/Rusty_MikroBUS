@@ -873,7 +873,7 @@ function isCodegripProgrammer(setup) {
   return /codegrip/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
 }
 
-function resolveCodegripExecutable() {
+function resolveCodegripExecutable(context) {
   const executableName = executableFileName('CodegripGdbServer');
   const configured = configuredToolPath('codegripServerPath');
   if (configured) {
@@ -884,6 +884,20 @@ function resolveCodegripExecutable() {
       throw new Error(`Configured CodegripGdbServer was not found or is not executable: ${candidate}`);
     }
     return candidate;
+  }
+
+  if (context) {
+    const managedRoot = path.join(getManagedRoot(context), 'runner', 'codegrip');
+    const managedCandidates = process.platform === 'win32'
+      ? [
+          path.join(managedRoot, 'apps', 'CodegripGdbServer.exe'),
+          path.join(managedRoot, 'apps', 'bin', 'CodegripGdbServer.exe')
+        ]
+      : process.platform === 'darwin'
+        ? [path.join(managedRoot, 'apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')]
+        : [path.join(managedRoot, 'apps', 'bin', 'CodegripGdbServer')];
+    const managedCandidate = managedCandidates.find(isExecutableFile);
+    if (managedCandidate) return managedCandidate;
   }
 
   const fromPath = findExecutableOnPath('CodegripGdbServer');
@@ -900,8 +914,8 @@ function resolveCodegripExecutable() {
   if (isExecutableFile(nectoCandidate)) return nectoCandidate;
 
   throw new Error(
-    `CodegripGdbServer was not found. Set mikrobusRust.codegripServerPath to the executable or its directory. ` +
-    `The detected NECTO location was ${nectoCandidate}.`
+    `CodegripGdbServer was not found. Install MIKROE CODEGRIP from Development Environment, or set ` +
+    `mikrobusRust.codegripServerPath to the executable or its directory. The detected NECTO location was ${nectoCandidate}.`
   );
 }
 
@@ -916,12 +930,13 @@ function inferCodegripPackageRoot(serverExecutable) {
   return undefined;
 }
 
-function resolveCodegripPacksPath(serverExecutable) {
+function resolveCodegripPacksPath(serverExecutable, context) {
   const configured = configuredToolPath('codegripPacksPath');
   const inferredRoot = inferCodegripPackageRoot(serverExecutable);
   const candidates = [
     configured,
     inferredRoot ? path.join(inferredRoot, 'packs') : undefined,
+    context ? path.join(getManagedRoot(context), 'runner', 'codegrip', 'packs') : undefined,
     path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip', 'packs')
   ].filter(Boolean);
   const found = candidates.find((candidate) => {
@@ -934,9 +949,9 @@ function resolveCodegripPacksPath(serverExecutable) {
   );
 }
 
-function codegripOperationOptions(setup, channel) {
-  const executable = resolveCodegripExecutable();
-  const packsPath = resolveCodegripPacksPath(executable);
+function codegripOperationOptions(context, setup, channel) {
+  const executable = resolveCodegripExecutable(context);
+  const packsPath = resolveCodegripPacksPath(executable, context);
   const discovered = normalizeDiscoveredDevice(setup?.codegripConnection);
   if (!discovered) {
     throw new Error(
@@ -957,11 +972,11 @@ function codegripOperationOptions(setup, channel) {
   };
 }
 
-function codegripDiscoveryOptions(mcuName, channel) {
-  const executable = resolveCodegripExecutable();
+function codegripDiscoveryOptions(context, mcuName, channel) {
+  const executable = resolveCodegripExecutable(context);
   return {
     executable,
-    packsPath: resolveCodegripPacksPath(executable),
+    packsPath: resolveCodegripPacksPath(executable, context),
     mcu: mcuName,
     channel,
     commandTimeoutMs: 8000
@@ -1024,7 +1039,7 @@ async function withCodegripHex(context, programBinary, channel, action) {
 }
 
 async function flashElfWithCodegrip(context, setup, programBinary, channel) {
-  const options = codegripOperationOptions(setup, channel);
+  const options = codegripOperationOptions(context, setup, channel);
   await withCodegripHex(context, programBinary, channel, async (hexFile) => {
     await programCodegrip({ ...options, hexFile, debugEnable: false });
   });
@@ -1535,7 +1550,7 @@ async function debugCurrentRustFile(context) {
     const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
     const objdumpPath = resolveArmGccExecutable(context, 'arm-none-eabi-objdump');
     const armToolchainPath = path.dirname(gdbPath);
-    const options = codegripOperationOptions(setup, channel);
+    const options = codegripOperationOptions(context, setup, channel);
     const entry = ensureEntryBreakpoint(source);
     channel.appendLine(`Debug source: ${source}`);
     channel.appendLine(`Debug ELF: ${programBinary}`);
@@ -1688,7 +1703,7 @@ async function runBoundWorkspaceAction(context, action) {
     }
     if (action === 'erase') {
       if (useCodegrip) {
-        await eraseCodegrip(codegripOperationOptions(setup, channel));
+        await eraseCodegrip(codegripOperationOptions(context, setup, channel));
       } else {
         await executeChecked(channel, 'probe-rs', ['erase', '--chip', setup.mcuName], binding.sdkRoot);
       }
@@ -1911,7 +1926,7 @@ async function handleMcuMessage(message, panel, context) {
       location: vscode.ProgressLocation.Notification,
       title: 'Searching for USB CODEGRIP devices...',
       cancellable: false
-    }, () => discoverUsbCodegrips(codegripDiscoveryOptions(mcuName, channel)));
+    }, () => discoverUsbCodegrips(codegripDiscoveryOptions(context, mcuName, channel)));
     let device = discovery.devices[0];
     if (discovery.devices.length > 1) {
       const choice = await vscode.window.showQuickPick(
@@ -2077,22 +2092,87 @@ function parseDatabaseJson(value) {
 }
 
 function readBoardList(databasePath) {
-  return withDatabase(databasePath, (db) => db.prepare(`
-    SELECT
-      Board.UID AS uid,
-      Board.NAME AS name,
-      Board.VENDOR AS vendor,
-      Board.BSP_PATH AS bspPath,
-      Board.CONFIG_JSON AS configJson,
-      BoardToDevice.DEVICE_NAME AS mcuName
-    FROM Board
-    JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
-    WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
-    ORDER BY Board.NAME COLLATE NOCASE
-  `).all().map((row) => {
-    const normalized = normalizeSqlRow(row);
-    return { ...normalized, config: parseDatabaseJson(normalized.configJson) };
-  }));
+  return withDatabase(databasePath, (db) => {
+    const availableTables = new Set(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name))
+    );
+    const supportsMcuCards = ['BoardToCard', 'MCUCard', 'CardToMCU'].every((table) => availableTables.has(table));
+
+    const rows = supportsMcuCards
+      ? db.prepare(`
+          SELECT
+            Board.UID AS uid,
+            Board.NAME AS name,
+            Board.VENDOR AS vendor,
+            Board.BSP_PATH AS bspPath,
+            Board.CONFIG_JSON AS configJson,
+            BoardToDevice.DEVICE_NAME AS mcuName,
+            NULL AS mcuCardUid,
+            NULL AS mcuCardName,
+            NULL AS mcuCardConfigJson
+          FROM Board
+          JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
+          WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
+
+          UNION ALL
+
+          SELECT
+            Board.UID AS uid,
+            Board.NAME AS name,
+            Board.VENDOR AS vendor,
+            Board.BSP_PATH AS bspPath,
+            Board.CONFIG_JSON AS configJson,
+            CardToMCU.DEVICE_NAME AS mcuName,
+            MCUCard.UID AS mcuCardUid,
+            MCUCard.NAME AS mcuCardName,
+            MCUCard.CONFIG_JSON AS mcuCardConfigJson
+          FROM Board
+          JOIN BoardToCard ON BoardToCard.BOARD_UID = Board.UID
+          JOIN MCUCard ON MCUCard.UID = BoardToCard.CARD_UID
+          JOIN CardToMCU ON CardToMCU.CARD_UID = MCUCard.UID
+          WHERE Board.ENABLED = 1
+            AND MCUCard.ENABLED = 1
+            AND BoardToCard.IS_DEFAULT = 1
+            AND CardToMCU.IS_DEFAULT = 1
+            AND NOT EXISTS (
+              SELECT 1
+              FROM BoardToDevice
+              WHERE BoardToDevice.BOARD_UID = Board.UID
+                AND BoardToDevice.IS_DEFAULT = 1
+            )
+
+          ORDER BY name COLLATE NOCASE
+        `).all()
+      : db.prepare(`
+          SELECT
+            Board.UID AS uid,
+            Board.NAME AS name,
+            Board.VENDOR AS vendor,
+            Board.BSP_PATH AS bspPath,
+            Board.CONFIG_JSON AS configJson,
+            BoardToDevice.DEVICE_NAME AS mcuName,
+            NULL AS mcuCardUid,
+            NULL AS mcuCardName,
+            NULL AS mcuCardConfigJson
+          FROM Board
+          JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
+          WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
+          ORDER BY Board.NAME COLLATE NOCASE
+        `).all();
+
+    return rows.map((row) => {
+      const normalized = normalizeSqlRow(row);
+      const config = parseDatabaseJson(normalized.configJson);
+      const mcuCardConfig = parseDatabaseJson(normalized.mcuCardConfigJson);
+      return {
+        ...normalized,
+        config: {
+          ...config,
+          hardwareDevice: config.hardwareDevice || mcuCardConfig.hardwareDevice || normalized.mcuName
+        }
+      };
+    });
+  });
 }
 
 function readProgrammersForDevice(databasePath, mcuName) {
@@ -2959,6 +3039,10 @@ module.exports = {
     removeConfiguredSetup,
     findCompatibleSdkRoot,
     resolveToolExecutable,
+    resolveCodegripExecutable,
+    resolveCodegripPacksPath,
+    codegripOperationOptions,
+    codegripDiscoveryOptions,
     buildToolEnvironment,
     sanitizeDebugText,
     isExcludedDebugScope,

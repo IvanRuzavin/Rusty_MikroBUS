@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Rust Tools",
   "description": "Cross-platform Rust MikroBUS VS Code tools with reusable MCU/board setups and automatic USB CODEGRIP discovery.",
-  "version": "0.0.26",
+  "version": "0.0.28",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -130,12 +130,12 @@
         "mikrobusRust.codegripServerPath": {
           "type": "string",
           "default": "",
-          "description": "Optional absolute path to CodegripGdbServer or its bin directory. Leave empty to resolve it from PATH or the standard NECTOStudio7 CODEGRIP package."
+          "description": "Optional absolute path to CodegripGdbServer or its bin directory. Leave empty to use the extension-managed CODEGRIP package first, then PATH or the standard NECTOStudio7 CODEGRIP package."
         },
         "mikrobusRust.codegripPacksPath": {
           "type": "string",
           "default": "",
-          "description": "Optional absolute path to the CODEGRIP packs directory. Leave empty to infer it from CodegripGdbServer or the standard NECTOStudio7 package."
+          "description": "Optional absolute path to the CODEGRIP packs directory. Leave empty to use packs from the resolved extension-managed, PATH, or NECTO CODEGRIP package."
         },
         "mikrobusRust.codegripEraseCommand": {
           "type": "string",
@@ -320,5 +320,6 @@
     "test": "node test/codegrip_backend.test.js",
     "build": "npx @vscode/vsce package"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "icon": "media/mikrobus-rust.png"
 }

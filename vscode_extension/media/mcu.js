@@ -347,7 +347,10 @@
       const shieldHint = state.shields.length === 0
         ? 'No compatible shield is configured. This setup will not generate mikrobus.rs.'
         : 'Shield selection is optional. Choose No shield to apply the board without generating mikrobus.rs.';
-      document.getElementById('selectedBoardDevice').textContent = `Hardware MCU ${state.selectedBoard.config?.hardwareDevice || '—'} · Rust compatibility MCU ${detail.name || '—'} · ${shieldHint}`;
+      const cardHint = state.selectedBoard.mcuCardName
+        ? `MCU card ${state.selectedBoard.mcuCardName} · `
+        : '';
+      document.getElementById('selectedBoardDevice').textContent = `${cardHint}Hardware MCU ${state.selectedBoard.config?.hardwareDevice || '—'} · Rust compatibility MCU ${detail.name || '—'} · ${shieldHint}`;
       const noShieldOption = document.createElement('option');
       noShieldOption.value = '';
       noShieldOption.textContent = 'No shield (no mikrobus.rs)';

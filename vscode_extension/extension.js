@@ -16,7 +16,8 @@ const {
 const VERSIONS = {
   probeRs: '0.32.0',
   openocd: '0.12.0-7',
-  armGcc: '14.2.1-1.1'
+  armGcc: '14.2.1-1.1',
+  codegrip: '0.0.1'
 };
 
 const URLS = {
@@ -26,6 +27,7 @@ const URLS = {
     stlink: 'https://download.mikroe.com/setups/drivers/mikroprog/arm/st-link-usb-drivers.rar'
   },
   jlink: 'https://www.segger.com/downloads/jlink/',
+  codegrip: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/codegrip.7z',
   bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
   rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
   probeRsShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.sh`,
@@ -290,6 +292,12 @@ function scanPackages(context) {
 function getPackageDefinitions() {
   const commonManaged = [
     {
+      id: 'codegrip',
+      name: 'MIKROE CODEGRIP',
+      description: `CODEGRIP server and MCU packs from Rusty_MikroBUS v${VERSIONS.codegrip}, used for USB discovery, programming, erase, and GDB debugging.`,
+      kind: 'managed'
+    },
+    {
       id: 'openocd',
       name: 'OpenOCD Runner',
       description: `xPack OpenOCD ${VERSIONS.openocd}, matching the current PyQt application.`,
@@ -435,6 +443,7 @@ function getExpectedPaths(context) {
     jlinkLinuxRoot: '/opt/SEGGER',
     stlinkDriverRoot: path.join(windowsDir, 'System32', 'DriverStore', 'FileRepository'),
     udevRules: '/etc/udev/rules.d/69-probe-rs.rules',
+    codegrip: path.join(managedRoot, 'runner', 'codegrip'),
     openocd: path.join(managedRoot, 'runner', `xpack-openocd-${VERSIONS.openocd}`),
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
     database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
@@ -628,6 +637,43 @@ function detectJLink(expected) {
 }
 
 function detectManaged(id, expected) {
+  if (id === 'codegrip') {
+    const server = process.platform === 'win32'
+      ? path.join(expected.codegrip, 'apps', 'CodegripGdbServer.exe')
+      : process.platform === 'darwin'
+        ? path.join(expected.codegrip, 'apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
+        : path.join(expected.codegrip, 'apps', 'bin', 'CodegripGdbServer');
+    const packs = path.join(expected.codegrip, 'packs');
+
+    if (process.platform !== 'linux' || os.arch() !== 'x64') {
+      return unsupportedResult(
+        `The managed CODEGRIP v${VERSIONS.codegrip} archive is currently Linux x64 only. You can still use mikrobusRust.codegripServerPath/codegripPacksPath for another installation.`,
+        expected.codegrip
+      );
+    }
+
+    let executable = false;
+    try {
+      const stat = fs.statSync(server);
+      executable = stat.isFile();
+      if (executable) fs.accessSync(server, fs.constants.X_OK);
+    } catch {
+      executable = false;
+    }
+    const packsPresent = directoryHasContent(packs);
+    const present = executable && packsPresent;
+    return {
+      status: present ? 'installed' : 'missing',
+      detail: present
+        ? 'Managed CodegripGdbServer and MCU packs found.'
+        : !executable
+          ? 'Managed CodegripGdbServer is missing or not executable.'
+          : 'Managed CODEGRIP packs directory is missing or empty.',
+      expectedPath: expected.codegrip,
+      version: `Rusty_MikroBUS v${VERSIONS.codegrip}`
+    };
+  }
+
   if (id === 'openocd') {
     const exe = process.platform === 'win32' ? 'openocd.exe' : 'openocd';
     const executable = path.join(expected.openocd, 'bin', exe);
@@ -729,6 +775,12 @@ function getInstallAction(id, context) {
     if (id === 'jlink') return externalAction('Open SEGGER download', URLS.jlink);
   }
 
+  if (id === 'codegrip') {
+    return process.platform === 'linux' && os.arch() === 'x64'
+      ? managedAction('Install automatically')
+      : undefined;
+  }
+
   if (id === 'openocd') {
     const asset = getXpackAsset('openocd');
     return asset ? managedAction('Install automatically') : undefined;
@@ -747,7 +799,7 @@ function getInstallAction(id, context) {
 }
 
 function getUpdateAction(id, context) {
-  if (['openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
     return managedAction(id === 'openocd' || id === 'armGcc' ? 'Update / reinstall' : 'Update');
   }
 
@@ -793,7 +845,7 @@ function getUpdateAction(id, context) {
 }
 
 function getUninstallAction(id, context) {
-  if (['openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
     return { type: 'managed-uninstall', label: 'Uninstall' };
   }
 
@@ -1032,6 +1084,7 @@ async function executeLifecycleAction(action, definition, verb) {
 async function uninstallManagedPackage(id, context) {
   const expected = getExpectedPaths(context);
   const targets = {
+    codegrip: expected.codegrip,
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
@@ -1102,7 +1155,9 @@ async function installManagedPackage(id, context, progress, token) {
   try {
     ensureNotCancelled(token);
 
-    if (id === 'openocd' || id === 'armGcc') {
+    if (id === 'codegrip') {
+      await installCodegripPackage(expected, tempRoot, progress, token);
+    } else if (id === 'openocd' || id === 'armGcc') {
       await installXpackPackage(id, expected, tempRoot, progress, token);
     } else if (id === 'database') {
       await installDatabase(expected, tempRoot, progress, token);
@@ -1128,6 +1183,48 @@ async function installManagedPackage(id, context, progress, token) {
       // Keep the shared temporary directory if another install is using it.
     }
   }
+}
+
+async function installCodegripPackage(expected, tempRoot, progress, token) {
+  if (process.platform !== 'linux' || os.arch() !== 'x64') {
+    throw new Error(`The managed CODEGRIP v${VERSIONS.codegrip} package is currently available only for Linux x64.`);
+  }
+
+  const assetName = 'codegrip.7z';
+  const archivePath = path.join(tempRoot, assetName);
+  const extractRoot = path.join(tempRoot, 'payload');
+  await fs.promises.mkdir(extractRoot, { recursive: true });
+
+  progress.report({ message: `Downloading CODEGRIP v${VERSIONS.codegrip}...` });
+  await downloadFile(URLS.codegrip, archivePath, progress, token);
+  ensureNotCancelled(token);
+
+  progress.report({ message: `Extracting ${assetName}...` });
+  await extractArchive(archivePath, extractRoot, token);
+
+  let source = extractRoot;
+  const nested = path.join(extractRoot, 'codegrip');
+  const entries = await fs.promises.readdir(extractRoot, { withFileTypes: true });
+  if (entries.length === 1 && entries[0].isDirectory() && entries[0].name.toLowerCase() === 'codegrip' && directoryHasContent(nested)) {
+    source = nested;
+  }
+
+  const sourceServer = path.join(source, 'apps', 'bin', 'CodegripGdbServer');
+  const sourcePacks = path.join(source, 'packs');
+  if (!fs.existsSync(sourceServer)) {
+    throw new Error(`Downloaded CODEGRIP archive does not contain ${path.join('apps', 'bin', 'CodegripGdbServer')}.`);
+  }
+  if (!directoryHasContent(sourcePacks)) {
+    throw new Error('Downloaded CODEGRIP archive does not contain a populated packs directory.');
+  }
+
+  // Some 7-Zip extractors do not preserve the executable bit. Make the server
+  // runnable before and after the atomic directory replacement.
+  await fs.promises.chmod(sourceServer, 0o755);
+
+  progress.report({ message: `Installing to ${expected.codegrip}...` });
+  await replaceDirectory(source, expected.codegrip);
+  await fs.promises.chmod(path.join(expected.codegrip, 'apps', 'bin', 'CodegripGdbServer'), 0o755);
 }
 
 async function installXpackPackage(id, expected, tempRoot, progress, token) {
@@ -1591,6 +1688,7 @@ function expectedPathFor(id, expected) {
     jlink: process.platform === 'win32'
       ? path.join(expected.jlinkWindowsRoot, 'JLink*', 'JFlash.exe')
       : '/opt/SEGGER/JLink/JFlashExe',
+    codegrip: expected.codegrip,
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
@@ -1827,7 +1925,7 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
     <section id="packageGrid" class="grid" aria-label="Package status"></section>
 
     <footer>
-      <p>Installed packages now expose update and uninstall actions. OpenOCD, ARM GCC, database, BSP, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
+      <p>Installed packages now expose update and uninstall actions. CODEGRIP, OpenOCD, ARM GCC, database, BSP, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>
