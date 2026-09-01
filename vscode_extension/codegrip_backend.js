@@ -571,9 +571,11 @@ async function eraseCodegrip(options) {
 }
 
 async function prepareCodegripDebug(options) {
-  // NECTO performs debug in two phases:
-  //   1. program with debugEnable=true using a normal control-server lifetime;
-  //   2. start a fresh server with CloseAfterDebug and configure the target.
+  // Mirror NECTO's Codegrip::programJob(..., true) + beginDebugSession():
+  //   1. program the image with debugEnable=true using a short-lived control server;
+  //   2. start a fresh debug server with --stop gdb, configure the selected probe/MCU,
+  //      then disconnect the control socket. The server remains alive only while GDB
+  //      is connected and exits naturally when the debugger disconnects.
   await programCodegrip({ ...options, debugEnable: true });
 
   const runtime = await openConfiguredCodegrip({ ...options, closeMode: 'debug' });

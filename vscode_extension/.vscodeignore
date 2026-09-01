@@ -1,3 +1,4 @@
 .vscode/**
 *.vsix
 package-lock.json
+config/package-catalog.local.json

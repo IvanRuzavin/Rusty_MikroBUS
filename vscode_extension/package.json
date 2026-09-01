@@ -1,8 +1,8 @@
 {
   "name": "mikrobus-rust-tools",
-  "displayName": "MikroBUS Rust Tools",
-  "description": "Cross-platform Rust MikroBUS VS Code tools with reusable MCU/board setups and automatic USB CODEGRIP discovery.",
-  "version": "0.1.0",
+  "displayName": "MikroBUS Embedded Tools",
+  "description": "Cross-platform Rust and C MikroBUS tools with reusable NECTO-style MCU setups, managed packages and programmer integration.",
+  "version": "0.6.2",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -11,7 +11,8 @@
     "Other"
   ],
   "extensionDependencies": [
-    "marus25.cortex-debug"
+    "marus25.cortex-debug",
+    "ms-vscode.cpptools"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -30,7 +31,18 @@
     "onCommand:mikrobusRust.flashCurrentFile",
     "onCommand:mikrobusRust.debugCurrentFile",
     "onCommand:mikrobusRust.dumpDebugVariables",
-    "onDebug:mikrobus-rust-debug"
+    "onCommand:mikrobusC.createSetup",
+    "onCommand:mikrobusC.buildSetup",
+    "onCommand:mikrobusC.applySetup",
+    "onCommand:mikrobusC.build",
+    "onCommand:mikrobusC.clean",
+    "onCommand:mikrobusC.flash",
+    "onCommand:mikrobusC.debug",
+    "onCommand:mikrobusC.erase",
+    "onCommand:mikrobusC.openInstalledPackages",
+    "onDebug:mikrobus-rust-debug",
+    "onCommand:mikrobusC.installEnvironment",
+    "onWebviewPanel:mikrobusC.hardwareConfigurator"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -102,10 +114,68 @@
         "command": "mikrobusRust.dumpDebugVariables",
         "title": "MikroBUS Rust: Print Variables to Debug Console",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "mikrobusC.createSetup",
+        "title": "MikroBUS C: Create and Build Setup",
+        "icon": "$(add)"
+      },
+      {
+        "command": "mikrobusC.buildSetup",
+        "title": "MikroBUS C: Rebuild Workspace Setup"
+      },
+      {
+        "command": "mikrobusC.applySetup",
+        "title": "MikroBUS C: Apply Setup to Workspace"
+      },
+      {
+        "command": "mikrobusC.build",
+        "title": "MikroBUS C: Build Project",
+        "icon": {
+          "light": "media/hammer-light.svg",
+          "dark": "media/hammer-dark.svg"
+        }
+      },
+      {
+        "command": "mikrobusC.clean",
+        "title": "MikroBUS C: Clean Project"
+      },
+      {
+        "command": "mikrobusC.flash",
+        "title": "MikroBUS C: Build and Flash Project",
+        "icon": {
+          "light": "media/lightning-light.svg",
+          "dark": "media/lightning-dark.svg"
+        }
+      },
+      {
+        "command": "mikrobusC.debug",
+        "title": "MikroBUS C: Build and Debug Project",
+        "icon": {
+          "light": "media/debug-light.svg",
+          "dark": "media/debug-dark.svg"
+        }
+      },
+      {
+        "command": "mikrobusC.erase",
+        "title": "MikroBUS C: Erase MCU",
+        "icon": {
+          "light": "media/eraser-light.svg",
+          "dark": "media/eraser-dark.svg"
+        }
+      },
+      {
+        "command": "mikrobusC.openInstalledPackages",
+        "title": "MikroBUS C: Installed Packages"
+      },
+      {
+        "command": "mikrobusC.installEnvironment",
+        "title": "MikroBUS C: Development Environment",
+        "icon": "$(cloud-download)"
       }
     ],
     "configuration": {
-      "title": "MikroBUS Rust",
+      "title": "MikroBUS Embedded",
       "properties": {
         "mikrobusRust.storageRoot": {
           "type": "string",
@@ -146,6 +216,31 @@
           "type": "string",
           "default": "",
           "description": "Optional path to an ARM GCC bin directory. A path to one tool in that directory is also accepted and sibling tools are resolved beside it. Leave empty to use PATH or the ARM GCC package already managed by Development Environment."
+        },
+        "mikrobusRust.cDatabasePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a NECTO-compatible necto_db.db SQLite database used by C setup selection. Leave empty to use the managed database or the standard NECTOStudio7 path."
+        },
+        "mikrobusRust.cCmakePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to CMake for C core, SDK and project builds. Leave empty to resolve cmake from PATH."
+        },
+        "mikrobusRust.cNinjaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to Ninja for C core, SDK and project builds. Leave empty to resolve ninja from PATH."
+        },
+        "mikrobusRust.jlinkCommanderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to JLinkExe/JLink.exe or the SEGGER J-Link directory. Leave empty to use PATH, the NECTO SEGGER programmer package, or standard SEGGER install locations."
+        },
+        "mikrobusRust.jlinkGdbServerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to JLinkGDBServerCLExe/JLinkGDBServerCL or the SEGGER J-Link directory. Leave empty to use PATH, the NECTO SEGGER programmer package, or standard SEGGER install locations."
         },
         "mikrobusRust.windowsDebugTransport": {
           "type": "string",
@@ -192,7 +287,7 @@
       "activitybar": [
         {
           "id": "mikrobusRust",
-          "title": "MikroBUS Rust",
+          "title": "MikroBUS Embedded",
           "icon": "media/mikrobus-rust.svg"
         }
       ]
@@ -202,7 +297,7 @@
         {
           "type": "webview",
           "id": "mikrobusRust.setupView",
-          "name": "Configured Setups"
+          "name": "Environment"
         }
       ]
     },
@@ -239,6 +334,68 @@
           "command": "mikrobusRust.eraseWorkspaceMcu",
           "when": "editorLangId == rust && mikrobusRust.workspaceBound",
           "group": "navigation@13"
+        },
+        {
+          "command": "mikrobusC.build",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp)",
+          "group": "navigation@20"
+        },
+        {
+          "command": "mikrobusC.flash",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp)",
+          "group": "navigation@21"
+        },
+        {
+          "command": "mikrobusC.debug",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp)",
+          "group": "navigation@22"
+        },
+        {
+          "command": "mikrobusC.erase",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp)",
+          "group": "navigation@23"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "mikrobusC.createSetup",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.buildSetup",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.applySetup",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.build",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.clean",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.flash",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.debug",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.erase",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.openInstalledPackages",
+          "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.installEnvironment",
+          "when": "mikrobusRust.cSupportEnabled"
         }
       ],
       "debug/toolBar": [
@@ -266,6 +423,23 @@
         "command": "mikrobusRust.debugCurrentFile",
         "key": "f5",
         "when": "editorLangId == rust && mikrobusRust.workspaceBound"
+      },
+      {
+        "command": "mikrobusC.build",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "mikrobusC.flash",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp)"
+      },
+      {
+        "command": "mikrobusC.debug",
+        "key": "f5",
+        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp)"
       }
     ],
     "debuggers": [
@@ -316,9 +490,12 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check media/setup.js && node --check media/mcu.js && node --check media/setups.js",
-    "test": "node test/codegrip_backend.test.js",
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js",
+    "test": "node test/c_support.test.js",
     "build": "npx @vscode/vsce package"
+  },
+  "dependencies": {
+    "7zip-bin": "^5.2.0"
   },
   "license": "UNLICENSED",
   "icon": "media/mikrobus-rust.png",

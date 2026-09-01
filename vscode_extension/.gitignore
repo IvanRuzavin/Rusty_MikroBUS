@@ -1,0 +1,4 @@
+config/package-catalog.local.json
+node_modules/
+*.vsix
+*.7z

@@ -12,12 +12,14 @@ const {
   getSetupDashboardState,
   useSetupWithCurrentWorkspace
 } = require('./mcu_configurator');
+const { cLanguageSupport } = require('./feature_flags');
+const { registerCSupport, getCSetupDashboardState, rebuildSetupById, reconfigureSetupById, removeSetupById } = require('./c_setup');
 
 const VERSIONS = {
   probeRs: '0.32.0',
   openocd: '0.12.0-7',
   armGcc: '14.2.1-1.1',
-  codegrip: '0.0.1'
+  codegrip: '1.7.0'
 };
 
 const URLS = {
@@ -27,7 +29,11 @@ const URLS = {
     stlink: 'https://download.mikroe.com/setups/drivers/mikroprog/arm/st-link-usb-drivers.rar'
   },
   jlink: 'https://www.segger.com/downloads/jlink/',
-  codegrip: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/codegrip.7z',
+  codegrip: {
+    win32: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/win/codegrip.7z',
+    darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/macos/codegrip.7z',
+    linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/linux/codegrip.7z'
+  },
   bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
   rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
   probeRsShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.sh`,
@@ -38,6 +44,20 @@ const URLS = {
 let setupView;
 let environmentPanel;
 
+function getActiveEnvironment(context) {
+  const saved = String(context.globalState.get('mikrobus.activeEnvironment', 'rust')).toLowerCase();
+  return cLanguageSupport && saved === 'c' ? 'c' : 'rust';
+}
+
+async function setActiveEnvironment(context, environment) {
+  const selected = cLanguageSupport && String(environment).toLowerCase() === 'c' ? 'c' : 'rust';
+  await context.globalState.update('mikrobus.activeEnvironment', selected);
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.activeEnvironment', selected);
+  if (setupView) setupView.title = selected === 'c' ? 'C Environment' : 'Rust Setups';
+  postDashboardState(setupView, context);
+  return selected;
+}
+
 class MikrobusSetupViewProvider {
   constructor(context) {
     this.context = context;
@@ -45,6 +65,7 @@ class MikrobusSetupViewProvider {
 
   resolveWebviewView(webviewView) {
     setupView = webviewView;
+    webviewView.title = getActiveEnvironment(this.context) === 'c' ? 'C Environment' : 'Rust Setups';
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -68,6 +89,9 @@ class MikrobusSetupViewProvider {
 }
 
 function activate(context) {
+  void vscode.commands.executeCommand('setContext', 'mikrobusRust.cSupportEnabled', cLanguageSupport);
+  void vscode.commands.executeCommand('setContext', 'mikrobusRust.activeEnvironment', getActiveEnvironment(context));
+  if (cLanguageSupport) registerCSupport(context);
   registerMcuConfigurator(context);
 
   const provider = new MikrobusSetupViewProvider(context);
@@ -165,14 +189,24 @@ async function handleDashboardMessage(message, view, context) {
       postDashboardState(view, context);
       return;
     }
+    if (message.type === 'selectEnvironment' && (message.environment === 'rust' || message.environment === 'c')) {
+      await setActiveEnvironment(context, message.environment);
+      return;
+    }
+    const activeEnvironment = getActiveEnvironment(context);
     if (message.type === 'configure') {
-      await vscode.commands.executeCommand('mikrobusRust.configureMcu');
+      await vscode.commands.executeCommand(activeEnvironment === 'c' ? 'mikrobusC.createSetup' : 'mikrobusRust.configureMcu');
       return;
     }
     if (message.type === 'environment') {
-      await openEnvironmentSetup(context);
+      if (activeEnvironment === 'c') await vscode.commands.executeCommand('mikrobusC.installEnvironment');
+      else await openEnvironmentSetup(context);
       return;
     }
+    if (message.type === 'cApply' && typeof message.id === 'string') { await vscode.commands.executeCommand('mikrobusC.applySetup', message.id); postDashboardState(view, context); return; }
+    if (message.type === 'cRebuild' && typeof message.id === 'string') { await rebuildSetupById(context, message.id); postDashboardState(view, context); return; }
+    if (message.type === 'cReconfigure' && typeof message.id === 'string') { await reconfigureSetupById(context, message.id); postDashboardState(view, context); return; }
+    if (message.type === 'cRemove' && typeof message.id === 'string') { await removeSetupById(context, message.id); postDashboardState(view, context); return; }
     if (message.type === 'apply' && typeof message.id === 'string') {
       await useSetupWithCurrentWorkspace(context, message.id);
       postDashboardState(view, context);
@@ -190,14 +224,15 @@ async function handleDashboardMessage(message, view, context) {
     }
   } catch (error) {
     const detail = error?.message || String(error);
-    vscode.window.showErrorMessage(`MikroBUS Rust: ${detail}`);
+    vscode.window.showErrorMessage(`MikroBUS Embedded: ${detail}`);
     void view?.webview.postMessage({ type: 'dashboardError', message: detail });
   }
 }
 
 function postDashboardState(view, context) {
   if (!view) return;
-  void view.webview.postMessage({ type: 'dashboardState', ...getSetupDashboardState(context) });
+  const cState = cLanguageSupport ? getCSetupDashboardState(context) : { cSetups: [], cWorkspace: undefined, cProject: { available: false } };
+  void view.webview.postMessage({ type: 'dashboardState', environment: getActiveEnvironment(context), cSupportEnabled: cLanguageSupport, ...getSetupDashboardState(context), ...cState });
 }
 
 async function handleSetupMessage(message, view, context) {
@@ -645,13 +680,6 @@ function detectManaged(id, expected) {
         : path.join(expected.codegrip, 'apps', 'bin', 'CodegripGdbServer');
     const packs = path.join(expected.codegrip, 'packs');
 
-    if (process.platform !== 'linux' || os.arch() !== 'x64') {
-      return unsupportedResult(
-        `The managed CODEGRIP v${VERSIONS.codegrip} archive is currently Linux x64 only. You can still use mikrobusRust.codegripServerPath/codegripPacksPath for another installation.`,
-        expected.codegrip
-      );
-    }
-
     let executable = false;
     try {
       const stat = fs.statSync(server);
@@ -670,7 +698,7 @@ function detectManaged(id, expected) {
           ? 'Managed CodegripGdbServer is missing or not executable.'
           : 'Managed CODEGRIP packs directory is missing or empty.',
       expectedPath: expected.codegrip,
-      version: `Rusty_MikroBUS v${VERSIONS.codegrip}`
+      version: '1.7.0'
     };
   }
 
@@ -1186,9 +1214,8 @@ async function installManagedPackage(id, context, progress, token) {
 }
 
 async function installCodegripPackage(expected, tempRoot, progress, token) {
-  if (process.platform !== 'linux' || os.arch() !== 'x64') {
-    throw new Error(`The managed CODEGRIP v${VERSIONS.codegrip} package is currently available only for Linux x64.`);
-  }
+  const codegripUrl = URLS.codegrip[process.platform];
+  if (!codegripUrl) throw new Error(`No managed CODEGRIP package is defined for ${getPlatformLabel()}.`);
 
   const assetName = 'codegrip.7z';
   const archivePath = path.join(tempRoot, assetName);
@@ -1196,7 +1223,7 @@ async function installCodegripPackage(expected, tempRoot, progress, token) {
   await fs.promises.mkdir(extractRoot, { recursive: true });
 
   progress.report({ message: `Downloading CODEGRIP v${VERSIONS.codegrip}...` });
-  await downloadFile(URLS.codegrip, archivePath, progress, token);
+  await downloadFile(codegripUrl, archivePath, progress, token);
   ensureNotCancelled(token);
 
   progress.report({ message: `Extracting ${assetName}...` });
@@ -1209,22 +1236,24 @@ async function installCodegripPackage(expected, tempRoot, progress, token) {
     source = nested;
   }
 
-  const sourceServer = path.join(source, 'apps', 'bin', 'CodegripGdbServer');
+  const relativeServer = process.platform === 'win32'
+    ? path.join('apps', 'CodegripGdbServer.exe')
+    : process.platform === 'darwin'
+      ? path.join('apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
+      : path.join('apps', 'bin', 'CodegripGdbServer');
+  const sourceServer = path.join(source, relativeServer);
   const sourcePacks = path.join(source, 'packs');
   if (!fs.existsSync(sourceServer)) {
-    throw new Error(`Downloaded CODEGRIP archive does not contain ${path.join('apps', 'bin', 'CodegripGdbServer')}.`);
+    throw new Error(`Downloaded CODEGRIP archive does not contain ${relativeServer}.`);
   }
   if (!directoryHasContent(sourcePacks)) {
     throw new Error('Downloaded CODEGRIP archive does not contain a populated packs directory.');
   }
 
-  // Some 7-Zip extractors do not preserve the executable bit. Make the server
-  // runnable before and after the atomic directory replacement.
-  await fs.promises.chmod(sourceServer, 0o755);
-
+  if (process.platform !== 'win32') await fs.promises.chmod(sourceServer, 0o755);
   progress.report({ message: `Installing to ${expected.codegrip}...` });
   await replaceDirectory(source, expected.codegrip);
-  await fs.promises.chmod(path.join(expected.codegrip, 'apps', 'bin', 'CodegripGdbServer'), 0o755);
+  if (process.platform !== 'win32') await fs.promises.chmod(path.join(expected.codegrip, relativeServer), 0o755);
 }
 
 async function installXpackPackage(id, expected, tempRoot, progress, token) {
@@ -1862,22 +1891,38 @@ function getDashboardHtml(webview, extensionUri) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
-  <title>MikroBUS Rust Configured Setups</title>
+  <title>MikroBUS Embedded</title>
 </head>
 <body>
   <main class="dashboard">
     <header>
-      <div><p class="eyebrow">MIKROBUS RUST</p><h1>Configured setups</h1></div>
+      <div><p class="eyebrow">MIKROBUS EMBEDDED</p><h1 id="environmentTitle">Rust setups</h1></div>
       <button id="refresh" class="iconButton" title="Refresh">↻</button>
     </header>
-    <section id="projectState" class="projectState"></section>
+    <div id="environmentSwitch" class="environmentSwitch" role="group" aria-label="Programming environment">
+      <button id="selectRust" data-environment="rust">Rust</button>
+      <button id="selectC" data-environment="c">C</button>
+    </div>
     <p id="error" class="error hidden"></p>
+    <section id="rustDashboard">
+    <section id="projectState" class="projectState"></section>
     <section id="setupList" class="setupList"></section>
     <section id="emptyState" class="empty hidden">
       <div class="chipIcon">µ</div>
       <h2>No configured setups</h2>
       <p>Create a reusable MCU or board setup first.</p>
       <button id="configureFirst" class="primary">Configure my first setup</button>
+    </section>
+    </section>
+    <section id="cDashboard" class="hidden">
+      <section id="cProjectState" class="projectState"></section>
+      <section id="cSetupList" class="setupList"></section>
+      <section id="cEmptyState" class="empty hidden">
+        <div class="chipIcon">C</div>
+        <h2>No configured C setups</h2>
+        <p>Create a reusable MCU or board setup first.</p>
+        <button id="cConfigureFirst" class="primary">Configure my first setup</button>
+      </section>
     </section>
     <footer>
       <button id="configure" class="secondary">Configure MCU or Board</button>
