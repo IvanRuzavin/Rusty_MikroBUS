@@ -386,7 +386,7 @@
                 },
                 {
                     "hidden": false,
-                    "init": "00005300",
+                    "init": "00005400",
                     "key": "PLLN",
                     "label": "Main PLL (PLL) multiplication factor for VCO",
                     "mask": "00007FC0",
@@ -2861,7 +2861,7 @@
                 },
                 {
                     "hidden": false,
-                    "init": "05000000",
+                    "init": "00000000",
                     "key": "MCO1PRE",
                     "label": "MCO1 prescaler",
                     "mask": "07000000",
@@ -3061,18 +3061,15 @@
                         },
                         {
                             "sub_module_name": "gpioe",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiof",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiog",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpioh",
@@ -3083,18 +3080,15 @@
                         },
                         {
                             "sub_module_name": "gpioi",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpioj",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiok",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 },
@@ -3205,7 +3199,6 @@
                             "pin_map_features": [
                                 "spi2_sck_b10_af5",
                                 "spi2_sck_b13_af5",
-                                "spi2_sck_i1_af5",
                                 "spi2_miso_b14_af5",
                                 "spi2_miso_c2_af5",
                                 "spi2_mosi_b15_af5",
@@ -3225,18 +3218,15 @@
                         },
                         {
                             "sub_module_name": "spi4",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "spi5",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "spi6",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 },
@@ -3366,64 +3356,62 @@
                         {
                             "sub_module_name": "uart1",
                             "pin_map_features": [
-                                "uart1_rx_a10_af7",
-                                "uart1_rx_b7_af7",
                                 "uart1_tx_a9_af7",
-                                "uart1_tx_b6_af7"
+                                "uart1_tx_b6_af7",
+                                "uart1_rx_a10_af7",
+                                "uart1_rx_b7_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart2",
                             "pin_map_features": [
-                                "uart2_rx_a3_af7",
-                                "uart2_tx_a2_af7"
+                                "uart2_tx_a2_af7",
+                                "uart2_rx_a3_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart3",
                             "pin_map_features": [
-                                "uart3_rx_b11_af7",
-                                "uart3_rx_c11_af7",
                                 "uart3_tx_b10_af7",
-                                "uart3_tx_c10_af7"
+                                "uart3_tx_c10_af7",
+                                "uart3_rx_b11_af7",
+                                "uart3_rx_c11_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart4",
                             "pin_map_features": [
-                                "uart4_rx_a1_af8",
-                                "uart4_rx_c11_af8",
                                 "uart4_tx_a0_af8",
-                                "uart4_tx_c10_af8"
+                                "uart4_tx_c10_af8",
+                                "uart4_rx_a1_af8",
+                                "uart4_rx_c11_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart5",
                             "pin_map_features": [
-                                "uart5_rx_d2_af8",
-                                "uart5_tx_c12_af8"
+                                "uart5_tx_c12_af8",
+                                "uart5_rx_d2_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart6",
                             "pin_map_features": [
-                                "uart6_rx_c7_af8",
-                                "uart6_tx_c6_af8"
+                                "uart6_tx_c6_af8",
+                                "uart6_rx_c7_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart7",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "uart8",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 }
             ]
         }
-    ] 
+    ]
 }

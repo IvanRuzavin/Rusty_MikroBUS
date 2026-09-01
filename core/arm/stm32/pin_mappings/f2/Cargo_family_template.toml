@@ -192,10 +192,6 @@ gpioi_8 = []
 gpioi_9 = []
 gpioi_10 = []
 gpioi_11 = []
-gpioi_12 = []
-gpioi_13 = []
-gpioi_14 = []
-gpioi_15 = []
 
 adc1 = [{adc1_features}]
 
@@ -235,7 +231,6 @@ adc2_c3_c13 = []
 adc2_c4_c14 = []
 adc2_c5_c15 = []
 
-
 adc3 = [{adc3_features}]
 
 adc3_a0_c0 = []
@@ -255,74 +250,58 @@ adc3_c3_c13 = []
 adc3_f4_c14 = []
 adc3_f5_c15 = []
 
-
 i2c1 = [{i2c1_features}]
 
 i2c1_scl_b6_af4 = []
 i2c1_scl_b8_af4 = []
-
 i2c1_sda_b7_af4 = []
 i2c1_sda_b9_af4 = []
-
 
 i2c2 = [{i2c2_features}]
 
 i2c2_scl_b10_af4 = []
 i2c2_scl_f1_af4 = []
 i2c2_scl_h4_af4 = []
-
 i2c2_sda_b11_af4 = []
 i2c2_sda_f0_af4 = []
 i2c2_sda_h5_af4 = []
-
 
 i2c3 = [{i2c3_features}]
 
 i2c3_scl_a8_af4 = []
 i2c3_scl_h7_af4 = []
-
 i2c3_sda_c9_af4 = []
 i2c3_sda_h8_af4 = []
-
 
 spi1 = [{spi1_features}]
 
 spi1_sck_a5_af5 = []
 spi1_sck_b3_af5 = []
-
 spi1_miso_a6_af5 = []
 spi1_miso_b4_af5 = []
-
 spi1_mosi_a7_af5 = []
 spi1_mosi_b5_af5 = []
-
 
 spi2 = [{spi2_features}]
 
 spi2_sck_b10_af5 = []
 spi2_sck_b13_af5 = []
 spi2_sck_i1_af5 = []
-
 spi2_miso_b14_af5 = []
 spi2_miso_c2_af5 = []
 spi2_miso_i2_af5 = []
-
 spi2_mosi_b15_af5 = []
 spi2_mosi_c3_af5 = []
 spi2_mosi_i3_af5 = []
-
 
 spi3 = [{spi3_features}]
 
 spi3_sck_b3_af6 = []
 spi3_sck_c10_af6 = []
-
 spi3_miso_b4_af6 = []
 spi3_miso_c11_af6 = []
-
 spi3_mosi_b5_af6 = []
 spi3_mosi_c12_af6 = []
-
 
 tim1 = [{tim1_features}]
 
@@ -343,7 +322,6 @@ tim1_ch3n_b15_af1 = []
 tim1_ch3n_e12_af1 = []
 tim1_ch4_a11_af1 = []
 tim1_ch4_e14_af1 = []
-
 
 tim2 = [{tim2_features}]
 
@@ -446,46 +424,44 @@ tim14 = [{tim14_features}]
 tim14_ch1_a7_af9 = []
 tim14_ch1_f9_af9 = []
 
-
 uart1 = [{uart1_features}]
 
-uart1_rx_a10_af7 = []
-uart1_rx_b7_af7 = []
 uart1_tx_a9_af7 = []
 uart1_tx_b6_af7 = []
+uart1_rx_a10_af7 = []
+uart1_rx_b7_af7 = []
 
 uart2 = [{uart2_features}]
 
-uart2_rx_a3_af7 = []
-uart2_rx_d6_af7 = []
 uart2_tx_a2_af7 = []
 uart2_tx_d5_af7 = []
+uart2_rx_a3_af7 = []
+uart2_rx_d6_af7 = []
 
 uart3 = [{uart3_features}]
 
-uart3_rx_b11_af7 = []
-uart3_rx_c11_af7 = []
-uart3_rx_d9_af7 = []
 uart3_tx_b10_af7 = []
 uart3_tx_c10_af7 = []
 uart3_tx_d8_af7 = []
+uart3_rx_b11_af7 = []
+uart3_rx_c11_af7 = []
+uart3_rx_d9_af7 = []
 
 uart4 = [{uart4_features}]
 
-uart4_rx_a1_af8 = []
-uart4_rx_c11_af8 = []
 uart4_tx_a0_af8 = []
 uart4_tx_c10_af8 = []
+uart4_rx_a1_af8 = []
+uart4_rx_c11_af8 = []
 
 uart5 = [{uart5_features}]
 
-uart5_rx_d2_af8 = []
 uart5_tx_c12_af8 = []
+uart5_rx_d2_af8 = []
 
 uart6 = [{uart6_features}]
 
-uart6_rx_c7_af8 = []
-uart6_rx_g9_af8 = []
 uart6_tx_c6_af8 = []
 uart6_tx_g14_af8 = []
-
+uart6_rx_c7_af8 = []
+uart6_rx_g9_af8 = []

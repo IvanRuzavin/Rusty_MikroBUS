@@ -461,7 +461,7 @@
     "core": "M3",
     "delay_src_path": "delays/m3/__lib_delays.c",
     "clock": "32",
-        "language_list": [
+    "language_list": [
         {
             "language": "RUST",
             "module_list": [
@@ -539,18 +539,15 @@
                         },
                         {
                             "sub_module_name": "gpioe",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiof",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiog",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpioh",
@@ -568,6 +565,7 @@
                             "sub_module_name": "adc1",
                             "pin_map_features": [
                                 "adc1_a0_c0",
+                                "adc1_b2_c0b",
                                 "adc1_a1_c1",
                                 "adc1_a2_c2",
                                 "adc1_a3_c3",
@@ -585,9 +583,7 @@
                                 "adc1_c5_c15",
                                 "adc1_b12_c18",
                                 "adc1_b13_c19",
-                                "adc1_b14_c20",
-                                "adc1_b15_c21",
-                                "adc1_b2_c0b"
+                                "adc1_b14_c20"
                             ]
                         }
                     ]
@@ -713,8 +709,8 @@
                             "sub_module_name": "tim10",
                             "pin_map_features": [
                                 "tim10_ch1_a6_af3",
-                                "tim10_ch1_b12_af3",
-                                "tim10_ch1_b8_af3"
+                                "tim10_ch1_b8_af3",
+                                "tim10_ch1_b12_af3"
                             ]
                         },
                         {
@@ -733,45 +729,45 @@
                         {
                             "sub_module_name": "uart1",
                             "pin_map_features": [
-                                "uart1_rx_a10_af7",
-                                "uart1_rx_b7_af7",
                                 "uart1_tx_a9_af7",
-                                "uart1_tx_b6_af7"
+                                "uart1_tx_b6_af7",
+                                "uart1_rx_a10_af7",
+                                "uart1_rx_b7_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart2",
                             "pin_map_features": [
-                                "uart2_rx_a3_af7",
-                                "uart2_tx_a2_af7"
+                                "uart2_tx_a2_af7",
+                                "uart2_rx_a3_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart3",
                             "pin_map_features": [
-                                "uart3_rx_b11_af7",
-                                "uart3_rx_c11_af7",
                                 "uart3_tx_b10_af7",
-                                "uart3_tx_c10_af7"
+                                "uart3_tx_c10_af7",
+                                "uart3_rx_b11_af7",
+                                "uart3_rx_c11_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart4",
                             "pin_map_features": [
-                                "uart4_rx_c11_af8",
-                                "uart4_tx_c10_af8"
+                                "uart4_tx_c10_af8",
+                                "uart4_rx_c11_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart5",
                             "pin_map_features": [
-                                "uart5_rx_d2_af8",
-                                "uart5_tx_c12_af8"
+                                "uart5_tx_c12_af8",
+                                "uart5_rx_d2_af8"
                             ]
                         }
                     ]
                 }
             ]
         }
-    ] 
+    ]
 }

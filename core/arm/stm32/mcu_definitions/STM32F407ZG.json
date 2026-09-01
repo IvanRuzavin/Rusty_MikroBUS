@@ -386,7 +386,7 @@
                 },
                 {
                     "hidden": false,
-                    "init": "00005300",
+                    "init": "00005400",
                     "key": "PLLN",
                     "label": "Main PLL (PLL) multiplication factor for VCO",
                     "mask": "00007FC0",
@@ -2861,7 +2861,7 @@
                 },
                 {
                     "hidden": false,
-                    "init": "05000000",
+                    "init": "00000000",
                     "key": "MCO1PRE",
                     "label": "MCO1 prescaler",
                     "mask": "07000000",
@@ -3146,18 +3146,15 @@
                         },
                         {
                             "sub_module_name": "gpioi",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpioj",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "gpiok",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 },
@@ -3266,10 +3263,10 @@
                             "sub_module_name": "spi1",
                             "pin_map_features": [
                                 "spi1_sck_a5_af5",
-                                "spi1_miso_a6_af5",
-                                "spi1_mosi_a7_af5",
                                 "spi1_sck_b3_af5",
+                                "spi1_miso_a6_af5",
                                 "spi1_miso_b4_af5",
+                                "spi1_mosi_a7_af5",
                                 "spi1_mosi_b5_af5"
                             ]
                         },
@@ -3279,8 +3276,8 @@
                                 "spi2_sck_b10_af5",
                                 "spi2_sck_b13_af5",
                                 "spi2_miso_b14_af5",
-                                "spi2_mosi_b15_af5",
                                 "spi2_miso_c2_af5",
+                                "spi2_mosi_b15_af5",
                                 "spi2_mosi_c3_af5"
                             ]
                         },
@@ -3288,27 +3285,24 @@
                             "sub_module_name": "spi3",
                             "pin_map_features": [
                                 "spi3_sck_b3_af6",
-                                "spi3_miso_b4_af6",
-                                "spi3_mosi_b5_af6",
                                 "spi3_sck_c10_af6",
+                                "spi3_miso_b4_af6",
                                 "spi3_miso_c11_af6",
+                                "spi3_mosi_b5_af6",
                                 "spi3_mosi_c12_af6"
                             ]
                         },
                         {
                             "sub_module_name": "spi4",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "spi5",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "spi6",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 },
@@ -3318,22 +3312,22 @@
                         {
                             "sub_module_name": "tim1",
                             "pin_map_features": [
-                                "tim1_ch1n_a7_af1",
                                 "tim1_ch1_a8_af1",
-                                "tim1_ch2_a9_af1",
-                                "tim1_ch3_a10_af1",
-                                "tim1_ch4_a11_af1",
-                                "tim1_ch2n_b0_af1",
-                                "tim1_ch3n_b1_af1",
-                                "tim1_ch1n_b13_af1",
-                                "tim1_ch2n_b14_af1",
-                                "tim1_ch3n_b15_af1",
-                                "tim1_ch1n_e8_af1",
                                 "tim1_ch1_e9_af1",
-                                "tim1_ch2n_e10_af1",
+                                "tim1_ch1n_a7_af1",
+                                "tim1_ch1n_b13_af1",
+                                "tim1_ch1n_e8_af1",
+                                "tim1_ch2_a9_af1",
                                 "tim1_ch2_e11_af1",
-                                "tim1_ch3n_e12_af1",
+                                "tim1_ch2n_b0_af1",
+                                "tim1_ch2n_b14_af1",
+                                "tim1_ch2n_e10_af1",
+                                "tim1_ch3_a10_af1",
                                 "tim1_ch3_e13_af1",
+                                "tim1_ch3n_b1_af1",
+                                "tim1_ch3n_b15_af1",
+                                "tim1_ch3n_e12_af1",
+                                "tim1_ch4_a11_af1",
                                 "tim1_ch4_e14_af1"
                             ]
                         },
@@ -3342,12 +3336,12 @@
                             "pin_map_features": [
                                 "tim2_ch1_a0_af1",
                                 "tim2_ch1_a5_af1",
-                                "tim2_ch2_a1_af1",
-                                "tim2_ch3_a2_af1",
-                                "tim2_ch4_a3_af1",
                                 "tim2_ch1_a15_af1",
+                                "tim2_ch2_a1_af1",
                                 "tim2_ch2_b3_af1",
+                                "tim2_ch3_a2_af1",
                                 "tim2_ch3_b10_af1",
+                                "tim2_ch4_a3_af1",
                                 "tim2_ch4_b11_af1"
                             ]
                         },
@@ -3455,70 +3449,68 @@
                         {
                             "sub_module_name": "uart1",
                             "pin_map_features": [
-                                "uart1_rx_a10_af7",
-                                "uart1_rx_b7_af7",
                                 "uart1_tx_a9_af7",
-                                "uart1_tx_b6_af7"
+                                "uart1_tx_b6_af7",
+                                "uart1_rx_a10_af7",
+                                "uart1_rx_b7_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart2",
                             "pin_map_features": [
-                                "uart2_rx_a3_af7",
-                                "uart2_rx_d6_af7",
                                 "uart2_tx_a2_af7",
-                                "uart2_tx_d5_af7"
+                                "uart2_tx_d5_af7",
+                                "uart2_rx_a3_af7",
+                                "uart2_rx_d6_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart3",
                             "pin_map_features": [
-                                "uart3_rx_b11_af7",
-                                "uart3_rx_c11_af7",
-                                "uart3_rx_d9_af7",
                                 "uart3_tx_b10_af7",
                                 "uart3_tx_c10_af7",
-                                "uart3_tx_d8_af7"
+                                "uart3_tx_d8_af7",
+                                "uart3_rx_b11_af7",
+                                "uart3_rx_c11_af7",
+                                "uart3_rx_d9_af7"
                             ]
                         },
                         {
                             "sub_module_name": "uart4",
                             "pin_map_features": [
-                                "uart4_rx_a1_af8",
-                                "uart4_rx_c11_af8",
                                 "uart4_tx_a0_af8",
-                                "uart4_tx_c10_af8"
+                                "uart4_tx_c10_af8",
+                                "uart4_rx_a1_af8",
+                                "uart4_rx_c11_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart5",
                             "pin_map_features": [
-                                "uart5_rx_d2_af8",
-                                "uart5_tx_c12_af8"
+                                "uart5_tx_c12_af8",
+                                "uart5_rx_d2_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart6",
                             "pin_map_features": [
-                                "uart6_rx_c7_af8",
-                                "uart6_rx_g9_af8",
                                 "uart6_tx_c6_af8",
-                                "uart6_tx_g14_af8"
+                                "uart6_tx_g14_af8",
+                                "uart6_rx_c7_af8",
+                                "uart6_rx_g9_af8"
                             ]
                         },
                         {
                             "sub_module_name": "uart7",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         },
                         {
                             "sub_module_name": "uart8",
-                            "pin_map_features": [
-                            ]
+                            "pin_map_features": []
                         }
                     ]
                 }
             ]
         }
-    ] 
+    ]
 }

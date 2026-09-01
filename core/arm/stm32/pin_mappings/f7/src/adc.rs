@@ -101,105 +101,108 @@ pub struct hal_ll_adc_pin_map_t
 
 pub const _adc_map: &[hal_ll_adc_pin_map_t] =
 &[
+    //ADC1
     #[cfg(all(feature = "adc1", feature = "adc1_a0_c0"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A0,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
+    hal_ll_adc_pin_map_t{pin: GPIO_A0, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
     #[cfg(all(feature = "adc1", feature = "adc1_a1_c1"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A1,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
+    hal_ll_adc_pin_map_t{pin: GPIO_A1, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
     #[cfg(all(feature = "adc1", feature = "adc1_a2_c2"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A2,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
+    hal_ll_adc_pin_map_t{pin: GPIO_A2, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
     #[cfg(all(feature = "adc1", feature = "adc1_a3_c3"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A3,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
+    hal_ll_adc_pin_map_t{pin: GPIO_A3, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
     #[cfg(all(feature = "adc1", feature = "adc1_a4_c4"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A4,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
+    hal_ll_adc_pin_map_t{pin: GPIO_A4, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
     #[cfg(all(feature = "adc1", feature = "adc1_a5_c5"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A5,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
+    hal_ll_adc_pin_map_t{pin: GPIO_A5, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
     #[cfg(all(feature = "adc1", feature = "adc1_a6_c6"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A6,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
+    hal_ll_adc_pin_map_t{pin: GPIO_A6, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
     #[cfg(all(feature = "adc1", feature = "adc1_a7_c7"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A7,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
+    hal_ll_adc_pin_map_t{pin: GPIO_A7, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
     #[cfg(all(feature = "adc1", feature = "adc1_b0_c8"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_B0,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
+    hal_ll_adc_pin_map_t{pin: GPIO_B0, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
     #[cfg(all(feature = "adc1", feature = "adc1_b1_c9"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_B1,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
+    hal_ll_adc_pin_map_t{pin: GPIO_B1, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
     #[cfg(all(feature = "adc1", feature = "adc1_c0_c10"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C0,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
+    hal_ll_adc_pin_map_t{pin: GPIO_C0, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
     #[cfg(all(feature = "adc1", feature = "adc1_c1_c11"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C1,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
+    hal_ll_adc_pin_map_t{pin: GPIO_C1, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
     #[cfg(all(feature = "adc1", feature = "adc1_c2_c12"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C2,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
+    hal_ll_adc_pin_map_t{pin: GPIO_C2, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
     #[cfg(all(feature = "adc1", feature = "adc1_c3_c13"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C3,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
+    hal_ll_adc_pin_map_t{pin: GPIO_C3, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
     #[cfg(all(feature = "adc1", feature = "adc1_c4_c14"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C4,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},    
+    hal_ll_adc_pin_map_t{pin: GPIO_C4, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},
     #[cfg(all(feature = "adc1", feature = "adc1_c5_c15"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C5,  base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
-    
-    #[cfg(all(feature = "adc2", feature = "adc2_a0_c0"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A0,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
-    #[cfg(all(feature = "adc2", feature = "adc2_a1_c1"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A1,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
-    #[cfg(all(feature = "adc2", feature = "adc2_a2_c2"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A2,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
-    #[cfg(all(feature = "adc2", feature = "adc2_a3_c3"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A3,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
-    #[cfg(all(feature = "adc2", feature = "adc2_a4_c4"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A4,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
-    #[cfg(all(feature = "adc2", feature = "adc2_a5_c5"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A5,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
-    #[cfg(all(feature = "adc2", feature = "adc2_a6_c6"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A6,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
-    #[cfg(all(feature = "adc2", feature = "adc2_a7_c7"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A7,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
-    #[cfg(all(feature = "adc2", feature = "adc2_b0_c8"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_B0,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
-    #[cfg(all(feature = "adc2", feature = "adc2_b1_c9"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_B1,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
-    #[cfg(all(feature = "adc2", feature = "adc2_c0_c10"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C0,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
-    #[cfg(all(feature = "adc2", feature = "adc2_c1_c11"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C1,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
-    #[cfg(all(feature = "adc2", feature = "adc2_c2_c12"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C2,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
-    #[cfg(all(feature = "adc2", feature = "adc2_c3_c13"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C3,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
-    #[cfg(all(feature = "adc2", feature = "adc2_c4_c14"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C4,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},
-    #[cfg(all(feature = "adc2", feature = "adc2_c5_c15"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C5,  base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
+    hal_ll_adc_pin_map_t{pin: GPIO_C5, base: ADC1_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_1 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
 
+    //ADC2
+    #[cfg(all(feature = "adc2", feature = "adc2_a0_c0"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A0, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
+    #[cfg(all(feature = "adc2", feature = "adc2_a1_c1"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A1, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
+    #[cfg(all(feature = "adc2", feature = "adc2_a2_c2"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A2, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
+    #[cfg(all(feature = "adc2", feature = "adc2_a3_c3"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A3, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
+    #[cfg(all(feature = "adc2", feature = "adc2_a4_c4"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A4, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
+    #[cfg(all(feature = "adc2", feature = "adc2_a5_c5"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A5, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
+    #[cfg(all(feature = "adc2", feature = "adc2_a6_c6"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A6, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
+    #[cfg(all(feature = "adc2", feature = "adc2_a7_c7"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_A7, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
+    #[cfg(all(feature = "adc2", feature = "adc2_b0_c8"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_B0, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
+    #[cfg(all(feature = "adc2", feature = "adc2_b1_c9"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_B1, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
+    #[cfg(all(feature = "adc2", feature = "adc2_c0_c10"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C0, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
+    #[cfg(all(feature = "adc2", feature = "adc2_c1_c11"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C1, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
+    #[cfg(all(feature = "adc2", feature = "adc2_c2_c12"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C2, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
+    #[cfg(all(feature = "adc2", feature = "adc2_c3_c13"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C3, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
+    #[cfg(all(feature = "adc2", feature = "adc2_c4_c14"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C4, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},
+    #[cfg(all(feature = "adc2", feature = "adc2_c5_c15"))]
+    hal_ll_adc_pin_map_t{pin: GPIO_C5, base: ADC2_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_2 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
+
+    //ADC3
     #[cfg(all(feature = "adc3", feature = "adc3_a0_c0"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A0,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
+    hal_ll_adc_pin_map_t{pin: GPIO_A0, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_0},
     #[cfg(all(feature = "adc3", feature = "adc3_a1_c1"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A1,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
+    hal_ll_adc_pin_map_t{pin: GPIO_A1, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_1},
     #[cfg(all(feature = "adc3", feature = "adc3_a2_c2"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A2,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
+    hal_ll_adc_pin_map_t{pin: GPIO_A2, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_2},
     #[cfg(all(feature = "adc3", feature = "adc3_a3_c3"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_A3,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
+    hal_ll_adc_pin_map_t{pin: GPIO_A3, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_3},
     #[cfg(all(feature = "adc3", feature = "adc3_f6_c4"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F6,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
+    hal_ll_adc_pin_map_t{pin: GPIO_F6, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_4},
     #[cfg(all(feature = "adc3", feature = "adc3_f7_c5"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F7,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
+    hal_ll_adc_pin_map_t{pin: GPIO_F7, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_5},
     #[cfg(all(feature = "adc3", feature = "adc3_f8_c6"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F8,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
+    hal_ll_adc_pin_map_t{pin: GPIO_F8, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_6},
     #[cfg(all(feature = "adc3", feature = "adc3_f9_c7"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F9,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
+    hal_ll_adc_pin_map_t{pin: GPIO_F9, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_7},
     #[cfg(all(feature = "adc3", feature = "adc3_f10_c8"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F10,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
+    hal_ll_adc_pin_map_t{pin: GPIO_F10, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_8},
     #[cfg(all(feature = "adc3", feature = "adc3_f3_c9"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F3,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
+    hal_ll_adc_pin_map_t{pin: GPIO_F3, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_9},
     #[cfg(all(feature = "adc3", feature = "adc3_c0_c10"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C0,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
+    hal_ll_adc_pin_map_t{pin: GPIO_C0, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_10},
     #[cfg(all(feature = "adc3", feature = "adc3_c1_c11"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C1,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
+    hal_ll_adc_pin_map_t{pin: GPIO_C1, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_11},
     #[cfg(all(feature = "adc3", feature = "adc3_c2_c12"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C2,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
+    hal_ll_adc_pin_map_t{pin: GPIO_C2, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_12},
     #[cfg(all(feature = "adc3", feature = "adc3_c3_c13"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_C3,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
+    hal_ll_adc_pin_map_t{pin: GPIO_C3, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_13},
     #[cfg(all(feature = "adc3", feature = "adc3_f4_c14"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F4,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},
+    hal_ll_adc_pin_map_t{pin: GPIO_F4, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_14},
     #[cfg(all(feature = "adc3", feature = "adc3_f5_c15"))]
-    hal_ll_adc_pin_map_t{pin: GPIO_F5,  base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
-    
+    hal_ll_adc_pin_map_t{pin: GPIO_F5, base: ADC3_BASE_ADDR, module_index: hal_ll_adc_module_num(adc_modules::ADC_MODULE_3 as u8), channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_15},
+
     hal_ll_adc_pin_map_t{pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, module_index: HAL_LL_PIN_NC, channel: hal_ll_adc_channel_t::HAL_LL_ADC_CHANNEL_NC}
 ];
 

@@ -91,12 +91,13 @@ pub struct hal_ll_spi_master_pin_map_t {
 
 pub const _spi_sck_map: &[hal_ll_spi_master_pin_map_t] = 
 &[
+    //SPI1
     #[cfg(all(feature = "spi1", feature = "spi1_sck_a5_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_A5, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi1", feature = "spi1_sck_b3_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B3, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
 
-
+    //SPI2
     #[cfg(all(feature = "spi2", feature = "spi2_sck_b10_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B10, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi2", feature = "spi2_sck_b13_af5"))]
@@ -104,23 +105,24 @@ pub const _spi_sck_map: &[hal_ll_spi_master_pin_map_t] =
     #[cfg(all(feature = "spi2", feature = "spi2_sck_i1_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_I1, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
 
+    //SPI3
     #[cfg(all(feature = "spi3", feature = "spi3_sck_b3_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B3, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
     #[cfg(all(feature = "spi3", feature = "spi3_sck_c10_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_C10, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
-    
 
     hal_ll_spi_master_pin_map_t{ pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, module_index: HAL_LL_PIN_NC, af: HAL_LL_PIN_NC as u32}
-
 ];
 
 pub const _spi_miso_map: &[hal_ll_spi_master_pin_map_t] = 
 &[
+    //SPI1
     #[cfg(all(feature = "spi1", feature = "spi1_miso_a6_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_A6, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi1", feature = "spi1_miso_b4_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B4, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
 
+    //SPI2
     #[cfg(all(feature = "spi2", feature = "spi2_miso_b14_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B14, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi2", feature = "spi2_miso_c2_af5"))]
@@ -128,21 +130,24 @@ pub const _spi_miso_map: &[hal_ll_spi_master_pin_map_t] =
     #[cfg(all(feature = "spi2", feature = "spi2_miso_i2_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_I2, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
 
+    //SPI3
     #[cfg(all(feature = "spi3", feature = "spi3_miso_b4_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B4, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
     #[cfg(all(feature = "spi3", feature = "spi3_miso_c11_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_C11, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
-    
+
     hal_ll_spi_master_pin_map_t{ pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, module_index: HAL_LL_PIN_NC, af: HAL_LL_PIN_NC as u32}
 ];
 
 pub const _spi_mosi_map: &[hal_ll_spi_master_pin_map_t] = 
 &[
+    //SPI1
     #[cfg(all(feature = "spi1", feature = "spi1_mosi_a7_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_A7, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi1", feature = "spi1_mosi_b5_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B5, base: SPI1_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_1 as u8), af: HAL_LL_SPI1_MASTER_GPIO_AF5 as u32},
 
+    //SPI2
     #[cfg(all(feature = "spi2", feature = "spi2_mosi_b15_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B15, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
     #[cfg(all(feature = "spi2", feature = "spi2_mosi_c3_af5"))]
@@ -150,11 +155,11 @@ pub const _spi_mosi_map: &[hal_ll_spi_master_pin_map_t] =
     #[cfg(all(feature = "spi2", feature = "spi2_mosi_i3_af5"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_I3, base: SPI2_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_2 as u8), af: HAL_LL_SPI2_MASTER_GPIO_AF5 as u32},
 
+    //SPI3
     #[cfg(all(feature = "spi3", feature = "spi3_mosi_b5_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_B5, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
     #[cfg(all(feature = "spi3", feature = "spi3_mosi_c12_af6"))]
     hal_ll_spi_master_pin_map_t{ pin: GPIO_C12, base: SPI3_MASTER_BASE_ADDR, module_index: hal_ll_spi_master_module_num(spi_modules::SPI_MODULE_3 as u8), af: HAL_LL_SPI3_MASTER_GPIO_AF6 as u32},
-    
 
     hal_ll_spi_master_pin_map_t{ pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, module_index: HAL_LL_PIN_NC, af: HAL_LL_PIN_NC as u32}
 ];

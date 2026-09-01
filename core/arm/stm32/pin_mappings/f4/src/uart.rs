@@ -95,6 +95,15 @@ pub const UART7_NVIC: u8 = 82;
 #[cfg(feature = "uart8")]
 pub const UART8_NVIC: u8 = 83;
 
+#[cfg(feature = "uart4")]
+pub const HAL_LL_UART4_GPIO_AF11 : u8 = 11;
+#[cfg(feature = "uart5")]
+pub const HAL_LL_UART5_GPIO_AF11 : u8 = 11;
+#[cfg(feature = "uart9")]
+pub const HAL_LL_UART9_GPIO_AF11 : u8 = 11;
+#[cfg(feature = "uart10")]
+pub const HAL_LL_UART10_GPIO_AF11 : u8 = 11;
+
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum uart_modules {
@@ -136,6 +145,7 @@ pub struct hal_ll_uart_pin_map_t {
 }
 
 pub static hal_ll_uart_tx_map : &[hal_ll_uart_pin_map_t] = & [
+    //UART1
     #[cfg(all(feature = "uart1", feature = "uart1_tx_a9_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A9, base: UART1_BASE_ADDR, af: HAL_LL_UART1_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_1 as u8) },
     #[cfg(all(feature = "uart1", feature = "uart1_tx_a15_af7"))]
@@ -143,11 +153,13 @@ pub static hal_ll_uart_tx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart1", feature = "uart1_tx_b6_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_B6, base: UART1_BASE_ADDR, af: HAL_LL_UART1_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_1 as u8) },
 
+    //UART2
     #[cfg(all(feature = "uart2", feature = "uart2_tx_a2_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A2, base: UART2_BASE_ADDR, af: HAL_LL_UART2_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_2 as u8) },
     #[cfg(all(feature = "uart2", feature = "uart2_tx_d5_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_D5, base: UART2_BASE_ADDR, af: HAL_LL_UART2_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_2 as u8) },
 
+    //UART3
     #[cfg(all(feature = "uart3", feature = "uart3_tx_b10_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_B10, base: UART3_BASE_ADDR, af: HAL_LL_UART3_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_3 as u8) },
     #[cfg(all(feature = "uart3", feature = "uart3_tx_c10_af7"))]
@@ -155,14 +167,31 @@ pub static hal_ll_uart_tx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart3", feature = "uart3_tx_d8_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_D8, base: UART3_BASE_ADDR, af: HAL_LL_UART3_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_3 as u8) },
 
+    //UART4
     #[cfg(all(feature = "uart4", feature = "uart4_tx_a0_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A0, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
+    #[cfg(all(feature = "uart4", feature = "uart4_tx_a12_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_A12, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
     #[cfg(all(feature = "uart4", feature = "uart4_tx_c10_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_C10, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
+    #[cfg(all(feature = "uart4", feature = "uart4_tx_d1_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_D1, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
+    #[cfg(all(feature = "uart4", feature = "uart4_tx_d10_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_D10, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
 
+    //UART5
+    #[cfg(all(feature = "uart5", feature = "uart5_tx_b6_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B6, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_tx_b9_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B9, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_tx_b13_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B13, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
     #[cfg(all(feature = "uart5", feature = "uart5_tx_c12_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_C12, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_tx_e8_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_E8, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
 
+    //UART6
     #[cfg(all(feature = "uart6", feature = "uart6_tx_a11_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A11, base: UART6_BASE_ADDR, af: HAL_LL_UART6_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_6 as u8) },
     #[cfg(all(feature = "uart6", feature = "uart6_tx_c6_af8"))]
@@ -170,19 +199,39 @@ pub static hal_ll_uart_tx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart6", feature = "uart6_tx_g14_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_G14, base: UART6_BASE_ADDR, af: HAL_LL_UART6_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_6 as u8) },
 
+    //UART7
+    #[cfg(all(feature = "uart7", feature = "uart7_tx_a15_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_A15, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
+    #[cfg(all(feature = "uart7", feature = "uart7_tx_b4_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B4, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
     #[cfg(all(feature = "uart7", feature = "uart7_tx_e8_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_E8, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
     #[cfg(all(feature = "uart7", feature = "uart7_tx_f7_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_F7, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
 
+    //UART8
     #[cfg(all(feature = "uart8", feature = "uart8_tx_e1_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_E1, base: UART8_BASE_ADDR, af: HAL_LL_UART8_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_8 as u8) },
+    #[cfg(all(feature = "uart8", feature = "uart8_tx_f9_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_F9, base: UART8_BASE_ADDR, af: HAL_LL_UART8_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_8 as u8) },
 
+    //UART9
+    #[cfg(all(feature = "uart9", feature = "uart9_tx_d15_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_D15, base: UART9_BASE_ADDR, af: HAL_LL_UART9_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_9 as u8) },
+    #[cfg(all(feature = "uart9", feature = "uart9_tx_g1_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_G1, base: UART9_BASE_ADDR, af: HAL_LL_UART9_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_9 as u8) },
+
+    //UART10
+    #[cfg(all(feature = "uart10", feature = "uart10_tx_e3_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_E3, base: UART10_BASE_ADDR, af: HAL_LL_UART10_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_10 as u8) },
+    #[cfg(all(feature = "uart10", feature = "uart10_tx_g12_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_G12, base: UART10_BASE_ADDR, af: HAL_LL_UART10_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_10 as u8) },
 
     hal_ll_uart_pin_map_t { pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, af: HAL_LL_PIN_NC as u32, module_index: HAL_LL_PIN_NC },
 ];
 
 pub static hal_ll_uart_rx_map : &[hal_ll_uart_pin_map_t] = & [
+    //UART1
     #[cfg(all(feature = "uart1", feature = "uart1_rx_a10_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A10, base: UART1_BASE_ADDR, af: HAL_LL_UART1_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_1 as u8) },
     #[cfg(all(feature = "uart1", feature = "uart1_rx_b3_af7"))]
@@ -190,11 +239,13 @@ pub static hal_ll_uart_rx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart1", feature = "uart1_rx_b7_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_B7, base: UART1_BASE_ADDR, af: HAL_LL_UART1_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_1 as u8) },
 
+    //UART2
     #[cfg(all(feature = "uart2", feature = "uart2_rx_a3_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A3, base: UART2_BASE_ADDR, af: HAL_LL_UART2_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_2 as u8) },
     #[cfg(all(feature = "uart2", feature = "uart2_rx_d6_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_D6, base: UART2_BASE_ADDR, af: HAL_LL_UART2_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_2 as u8) },
 
+    //UART3
     #[cfg(all(feature = "uart3", feature = "uart3_rx_b11_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_B11, base: UART3_BASE_ADDR, af: HAL_LL_UART3_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_3 as u8) },
     #[cfg(all(feature = "uart3", feature = "uart3_rx_c5_af7"))]
@@ -204,14 +255,29 @@ pub static hal_ll_uart_rx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart3", feature = "uart3_rx_d9_af7"))]
     hal_ll_uart_pin_map_t { pin: GPIO_D9, base: UART3_BASE_ADDR, af: HAL_LL_UART3_GPIO_AF7 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_3 as u8) },
 
+    //UART4
     #[cfg(all(feature = "uart4", feature = "uart4_rx_a1_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A1, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
+    #[cfg(all(feature = "uart4", feature = "uart4_rx_a11_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_A11, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
     #[cfg(all(feature = "uart4", feature = "uart4_rx_c11_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_C11, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
+    #[cfg(all(feature = "uart4", feature = "uart4_rx_d0_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_D0, base: UART4_BASE_ADDR, af: HAL_LL_UART4_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_4 as u8) },
 
+    //UART5
+    #[cfg(all(feature = "uart5", feature = "uart5_rx_b5_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B5, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_rx_b8_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B8, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_rx_b12_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B12, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
     #[cfg(all(feature = "uart5", feature = "uart5_rx_d2_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_D2, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
+    #[cfg(all(feature = "uart5", feature = "uart5_rx_e7_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_E7, base: UART5_BASE_ADDR, af: HAL_LL_UART5_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_5 as u8) },
 
+    //UART6
     #[cfg(all(feature = "uart6", feature = "uart6_rx_a12_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_A12, base: UART6_BASE_ADDR, af: HAL_LL_UART6_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_6 as u8) },
     #[cfg(all(feature = "uart6", feature = "uart6_rx_c7_af8"))]
@@ -219,14 +285,33 @@ pub static hal_ll_uart_rx_map : &[hal_ll_uart_pin_map_t] = & [
     #[cfg(all(feature = "uart6", feature = "uart6_rx_g9_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_G9, base: UART6_BASE_ADDR, af: HAL_LL_UART6_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_6 as u8) },
 
+    //UART7
+    #[cfg(all(feature = "uart7", feature = "uart7_rx_a8_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_A8, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
+    #[cfg(all(feature = "uart7", feature = "uart7_rx_b3_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_B3, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
     #[cfg(all(feature = "uart7", feature = "uart7_rx_e7_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_E7, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
     #[cfg(all(feature = "uart7", feature = "uart7_rx_f6_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_F6, base: UART7_BASE_ADDR, af: HAL_LL_UART7_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_7 as u8) },
 
+    //UART8
     #[cfg(all(feature = "uart8", feature = "uart8_rx_e0_af8"))]
     hal_ll_uart_pin_map_t { pin: GPIO_E0, base: UART8_BASE_ADDR, af: HAL_LL_UART8_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_8 as u8) },
+    #[cfg(all(feature = "uart8", feature = "uart8_rx_f8_af8"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_F8, base: UART8_BASE_ADDR, af: HAL_LL_UART8_GPIO_AF8 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_8 as u8) },
 
+    //UART9
+    #[cfg(all(feature = "uart9", feature = "uart9_rx_d14_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_D14, base: UART9_BASE_ADDR, af: HAL_LL_UART9_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_9 as u8) },
+    #[cfg(all(feature = "uart9", feature = "uart9_rx_g0_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_G0, base: UART9_BASE_ADDR, af: HAL_LL_UART9_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_9 as u8) },
+
+    //UART10
+    #[cfg(all(feature = "uart10", feature = "uart10_rx_e2_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_E2, base: UART10_BASE_ADDR, af: HAL_LL_UART10_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_10 as u8) },
+    #[cfg(all(feature = "uart10", feature = "uart10_rx_g11_af11"))]
+    hal_ll_uart_pin_map_t { pin: GPIO_G11, base: UART10_BASE_ADDR, af: HAL_LL_UART10_GPIO_AF11 as u32, module_index: hal_ll_uart_module_num(uart_modules::UART_MODULE_10 as u8) },
 
     hal_ll_uart_pin_map_t { pin: HAL_LL_PIN_NC, base: HAL_LL_MODULE_ERROR, af: HAL_LL_PIN_NC as u32, module_index: HAL_LL_PIN_NC },
 ];
