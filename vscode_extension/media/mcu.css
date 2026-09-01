@@ -194,7 +194,7 @@ code { overflow-wrap: anywhere; }
 .setupsHeader { margin-bottom: 12px; }
 .managerStatus { min-height: 24px; margin-bottom: 8px; color: var(--vscode-descriptionForeground); }
 .errorText { color: var(--vscode-errorForeground); }
-.actionsCell { display: flex; gap: 6px; flex-wrap: wrap; min-width: 240px; }
+.actionsCell { display: flex; gap: 6px; flex-wrap: nowrap; min-width: 240px; white-space: nowrap; }
 .emptyManager, .loadingView {
   min-height: 48vh;
   display: grid;

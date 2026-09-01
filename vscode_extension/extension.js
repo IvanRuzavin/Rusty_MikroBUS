@@ -14,6 +14,7 @@ const {
 } = require('./mcu_configurator');
 const { cLanguageSupport } = require('./feature_flags');
 const { registerCSupport, getCSetupDashboardState, rebuildSetupById, reconfigureSetupById, removeSetupById } = require('./c_setup');
+const sharedProgrammerPackages = require('./c_package_manager');
 
 const VERSIONS = {
   probeRs: '0.32.0',
@@ -21,6 +22,14 @@ const VERSIONS = {
   armGcc: '14.2.1-1.1',
   codegrip: '1.7.0'
 };
+
+const CODEGRIP_SERVER_SPEC = Object.freeze({
+  kind: 'programmer',
+  name: 'codegrip_gdb_server',
+  version: VERSIONS.codegrip,
+  displayName: 'CODEGRIP Suite',
+  environment: false
+});
 
 const URLS = {
   windows: {
@@ -329,7 +338,7 @@ function getPackageDefinitions() {
     {
       id: 'codegrip',
       name: 'MIKROE CODEGRIP',
-      description: `CODEGRIP server and MCU packs from Rusty_MikroBUS v${VERSIONS.codegrip}, used for USB discovery, programming, erase, and GDB debugging.`,
+      description: `CODEGRIP GDB server v${VERSIONS.codegrip}. MCU-specific device packs are resolved from the live Codegrip-Prog-Debug.csv catalog per setup.`,
       kind: 'managed'
     },
     {
@@ -478,7 +487,10 @@ function getExpectedPaths(context) {
     jlinkLinuxRoot: '/opt/SEGGER',
     stlinkDriverRoot: path.join(windowsDir, 'System32', 'DriverStore', 'FileRepository'),
     udevRules: '/etc/udev/rules.d/69-probe-rs.rules',
-    codegrip: path.join(managedRoot, 'runner', 'codegrip'),
+    // Programmer packages are shared between the Rust and C environments.
+    // Keep the Rust Development Environment view pointed at the same package
+    // cache used by the per-MCU live CODEGRIP catalog installer.
+    codegrip: sharedProgrammerPackages.packageTarget(context, CODEGRIP_SERVER_SPEC),
     openocd: path.join(managedRoot, 'runner', `xpack-openocd-${VERSIONS.openocd}`),
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
     database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
@@ -673,32 +685,27 @@ function detectJLink(expected) {
 
 function detectManaged(id, expected) {
   if (id === 'codegrip') {
-    const server = process.platform === 'win32'
-      ? path.join(expected.codegrip, 'apps', 'CodegripGdbServer.exe')
-      : process.platform === 'darwin'
-        ? path.join(expected.codegrip, 'apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
-        : path.join(expected.codegrip, 'apps', 'bin', 'CodegripGdbServer');
-    const packs = path.join(expected.codegrip, 'packs');
-
+    const serverNames = process.platform === 'win32'
+      ? ['CodegripGdbServer.exe', 'codegrip_gdb_server.exe', 'codegrip-gdb-server.exe']
+      : ['CodegripGdbServer', 'codegrip_gdb_server', 'codegrip-gdb-server'];
+    const server = findFirstNamedFile(expected.codegrip, serverNames, 10);
     let executable = false;
-    try {
-      const stat = fs.statSync(server);
-      executable = stat.isFile();
-      if (executable) fs.accessSync(server, fs.constants.X_OK);
-    } catch {
-      executable = false;
+    if (server) {
+      try {
+        const stat = fs.statSync(server);
+        executable = stat.isFile();
+        if (executable && process.platform !== 'win32') fs.accessSync(server, fs.constants.X_OK);
+      } catch {
+        executable = false;
+      }
     }
-    const packsPresent = directoryHasContent(packs);
-    const present = executable && packsPresent;
     return {
-      status: present ? 'installed' : 'missing',
-      detail: present
-        ? 'Managed CodegripGdbServer and MCU packs found.'
-        : !executable
-          ? 'Managed CodegripGdbServer is missing or not executable.'
-          : 'Managed CODEGRIP packs directory is missing or empty.',
+      status: executable ? 'installed' : 'missing',
+      detail: executable
+        ? 'Shared CodegripGdbServer found. Rust and C setups resolve MCU device packs from the live CODEGRIP catalog.'
+        : 'Shared CodegripGdbServer is missing or not executable.',
       expectedPath: expected.codegrip,
-      version: '1.7.0'
+      version: VERSIONS.codegrip
     };
   }
 
@@ -1053,6 +1060,20 @@ async function handleUninstallRequest(id, context) {
     return;
   }
 
+  if (id === 'codegrip' && action.type === 'managed-uninstall') {
+    try {
+      const removed = await sharedProgrammerPackages.uninstallPackage(
+        context,
+        sharedProgrammerPackages.packageKey(CODEGRIP_SERVER_SPEC)
+      );
+      if (removed) vscode.window.showInformationMessage(`${definition.name} uninstalled from the shared programmer package cache.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to uninstall ${definition.name}: ${message}`);
+    }
+    return;
+  }
+
   const expected = getExpectedPaths(context);
   const target = expectedPathFor(id, expected);
   const extra = definition.kind === 'managed'
@@ -1112,7 +1133,6 @@ async function executeLifecycleAction(action, definition, verb) {
 async function uninstallManagedPackage(id, context) {
   const expected = getExpectedPaths(context);
   const targets = {
-    codegrip: expected.codegrip,
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
@@ -1184,7 +1204,10 @@ async function installManagedPackage(id, context, progress, token) {
     ensureNotCancelled(token);
 
     if (id === 'codegrip') {
-      await installCodegripPackage(expected, tempRoot, progress, token);
+      // CODEGRIP is a programmer package shared by Rust and C. Use the common
+      // package registry so either language can install it once and all setups
+      // can reference the same server payload.
+      await sharedProgrammerPackages.ensurePackage(context, CODEGRIP_SERVER_SPEC, progress, token);
     } else if (id === 'openocd' || id === 'armGcc') {
       await installXpackPackage(id, expected, tempRoot, progress, token);
     } else if (id === 'database') {
@@ -1242,12 +1265,8 @@ async function installCodegripPackage(expected, tempRoot, progress, token) {
       ? path.join('apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
       : path.join('apps', 'bin', 'CodegripGdbServer');
   const sourceServer = path.join(source, relativeServer);
-  const sourcePacks = path.join(source, 'packs');
   if (!fs.existsSync(sourceServer)) {
     throw new Error(`Downloaded CODEGRIP archive does not contain ${relativeServer}.`);
-  }
-  if (!directoryHasContent(sourcePacks)) {
-    throw new Error('Downloaded CODEGRIP archive does not contain a populated packs directory.');
   }
 
   if (process.platform !== 'win32') await fs.promises.chmod(sourceServer, 0o755);

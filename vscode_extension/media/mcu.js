@@ -455,17 +455,15 @@
         document.getElementById('codegripHwTokens').textContent = state.codegripConnection.hwTokens || '—';
         codegripConnectionDetails.classList.remove('hidden');
       } else {
-        codegripConnectionStatus.textContent = 'No USB CODEGRIP selected';
+        codegripConnectionStatus.textContent = 'No USB CODEGRIP selected (optional during setup build)';
         codegripConnectionStatus.className = 'connectionStatus';
         codegripConnectionDetails.classList.add('hidden');
       }
     }
 
-    generateButton.disabled = state.programmers.length === 0
-      || state.codegripScanning
-      || (codegripSelected && !state.codegripConnection);
+    generateButton.disabled = state.programmers.length === 0 || state.codegripScanning;
     generateButton.title = codegripSelected && !state.codegripConnection
-      ? 'Find a USB CODEGRIP before building this configuration.'
+      ? 'USB discovery is optional. The CODEGRIP device will be searched when Flash, Debug or Erase is used.'
       : '';
   }
 

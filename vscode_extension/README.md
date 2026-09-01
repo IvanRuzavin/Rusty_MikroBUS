@@ -216,3 +216,26 @@ CODEGRIP keeps the working NECTO-style `--stop gdb` + `cppdbg` path. Stop Debugg
 ### Compact CODEGRIP restart sessions (v0.6.2)
 
 CODEGRIP Restart still creates a fresh `--stop gdb` server and a fresh `cppdbg` session after the previous session has fully terminated, but replacement sessions are now started as compact child sessions of the session they replace. VS Code therefore collapses the superseded parent in the CALL STACK instead of accumulating visible CODEGRIP session entries. The dynamically-created CODEGRIP debug configuration is also marked `presentation.hidden`. Each CODEGRIP server/debug session has an internal generation ID; cleanup from an older session is ignored if a newer generation is active, so Restart always operates on the newest CODEGRIP runtime.
+
+## Rust programmer integration (0.6.3)
+
+Rust CODEGRIP setups now use the same live programmer-package model as C. When a CODEGRIP setup is created or an older setup needs migration, the extension resolves the exact MCU name through `Codegrip-Prog-Debug.csv`, installs `codegrip_gdb_server` plus the required MCU device-pack dependencies in the shared programmer cache, and materializes a setup-local `codegrip/packs` tree. The resolved catalog and runtime paths are stored with the Rust setup.
+
+The CODEGRIP server package is shared between Rust and C. The Rust Development Environment now detects/installs that shared `codegrip_gdb_server` package rather than requiring a separate monolithic Rust `runner/codegrip` package with all MCU packs bundled inside it.
+
+Rust **SEGGER J-Link** setups now use SEGGER J-Link directly through Cortex-Debug instead of routing J-Link through probe-rs DAP. J-Link debug uses the native J-Link GDB server at 4 MHz SWD, while Rust Flash and Erase use J-Link Commander. probe-rs remains the fallback for programmer profiles that are neither CODEGRIP nor SEGGER J-Link.
+
+The Rust `main()` entry-line parser now places the temporary source breakpoint on the first executable-looking statement in the function body. For a multiline boolean initialization expression this prevents the automatic entry breakpoint from being placed on a continuation such as the second `|| digital_out_init(...)` line. Native J-Link additionally uses the exported `main` symbol as its run-to-entry point.
+
+## Rust programmer probe routing (0.6.4)
+
+On Linux, selecting **SEGGER J-Link** now distinguishes the installed SEGGER software from a physically connected J-Link USB probe. A real SEGGER USB probe (VID `1366`) keeps the native J-Link/Cortex-Debug path. If no physical J-Link is present, the Rust workflow falls back to probe-rs so onboard probes such as the Nucleo ST-LINK can still flash, erase and debug instead of timing out inside JLinkGDBServer/JLinkExe.
+
+The probe-rs fallback now attempts a normal SWD connection first. Flash operations retry once with connect-under-reset only if normal connection fails, and debug no longer forces connect-under-reset by default. This keeps normal Nucleo/ST-LINK startup fast while retaining an under-reset recovery path for targets that need it.
+
+
+## Rust setup UX and lazy CODEGRIP discovery (0.6.5)
+
+- Rust configured-setup action buttons use the same single-row layout as C setup cards.
+- A Rust setup using CODEGRIP can be built without a CODEGRIP connected by USB. Setup creation only resolves/downloads the shared CODEGRIP server and the MCU-specific pack(s) from the live `Codegrip-Prog-Debug.csv` catalog.
+- If a Rust CODEGRIP setup has no saved USB connection, Flash, Debug, or Erase performs USB discovery on demand. One discovered device is selected automatically; multiple devices produce a quick-pick. The selected USB CODEGRIP is then stored in the reusable setup for later operations.

@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Embedded Tools",
   "description": "Cross-platform Rust and C MikroBUS tools with reusable NECTO-style MCU setups, managed packages and programmer integration.",
-  "version": "0.6.2",
+  "version": "0.6.5",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"

@@ -34,6 +34,64 @@ try {
   const packageManager = require('../c_package_manager')._test;
   const codegrip = require('../codegrip_backend')._test;
   const codegripCatalog = require('../c_codegrip_catalog');
+  const rustMcu = require('../mcu_configurator')._test;
+
+  assert.strictEqual(rustMcu.normalizeJlinkDeviceName('R7FA6M4AF3CFB'), 'R7FA6M4AF');
+  assert.strictEqual(rustMcu.normalizeJlinkDeviceName('STM32F412ZG'), 'STM32F412ZG');
+  assert.strictEqual(rustMcu.isJlinkProgrammer({ programmerUid: 'SEGGER_JLINK', programmerName: 'SEGGER J-Link' }), true);
+  assert.strictEqual(rustMcu.isJlinkProgrammer({ programmerUid: 'MIKROE_CODEGRIP', programmerName: 'CODEGRIP' }), false);
+  assert.strictEqual(rustMcu.isCodegripProgrammer({ programmerUid: 'MIKROE_CODEGRIP' }), true);
+  const fakeUsbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-jlink-usb-'));
+  try {
+    const stlink = path.join(fakeUsbRoot, '1-1');
+    fs.mkdirSync(stlink);
+    fs.writeFileSync(path.join(stlink, 'idVendor'), '0483\n');
+    fs.writeFileSync(path.join(stlink, 'idProduct'), '374b\n');
+    const jlink = path.join(fakeUsbRoot, '1-2');
+    fs.mkdirSync(jlink);
+    fs.writeFileSync(path.join(jlink, 'idVendor'), '1366\n');
+    fs.writeFileSync(path.join(jlink, 'idProduct'), '0105\n');
+    fs.writeFileSync(path.join(jlink, 'serial'), '123456789\n');
+    fs.writeFileSync(path.join(jlink, 'product'), 'J-Link\n');
+    const probes = rustMcu.findLocalJlinkUsbProbes(fakeUsbRoot);
+    assert.strictEqual(probes.length, 1);
+    assert.strictEqual(probes[0].serialNumber, '123456789');
+    assert.strictEqual(rustMcu.shouldUseNativeJlink({ programmerUid: 'SEGGER_JLINK' }, probes), true);
+    if (process.platform === 'linux') {
+      assert.strictEqual(rustMcu.shouldUseNativeJlink({ programmerUid: 'SEGGER_JLINK' }, []), false);
+    }
+  } finally {
+    fs.rmSync(fakeUsbRoot, { recursive: true, force: true });
+  }
+  const rustEntrySource = [
+    '#[unsafe(no_mangle)]',
+    'fn main() -> ! {',
+    '    let mut output_1 = digital_out_t::default();',
+    '    let mut output_2 = digital_out_t::default();',
+    '    let mut output_3 = digital_out_t::default();',
+    '',
+    '    if digital_out_init(&mut output_1, pin_out_1).is_err()',
+    '        || digital_out_init(&mut output_2, pin_out_2).is_err()',
+    '        || digital_out_init(&mut output_3, pin_out_3).is_err()',
+    '    {',
+    '        loop {}',
+    '    }',
+    '}'
+  ].join('\n');
+  assert.strictEqual(rustMcu.findMainEntryLine(rustEntrySource), 2);
+  assert.deepStrictEqual(rustMcu.rustCodegripPackSpec({
+    packageName: 'codegrip_pack_stm32l0',
+    packageVersion: '1.0.0',
+    displayName: 'STM32L0 CODEGRIP Device Pack',
+    downloadUrl: 'https://example/STM32L0.7z'
+  }), {
+    kind: 'programmer-pack',
+    name: 'codegrip_pack_stm32l0',
+    version: '1.0.0',
+    displayName: 'STM32L0 CODEGRIP Device Pack',
+    downloadUrl: 'https://example/STM32L0.7z',
+    environment: false
+  });
 
   assert.strictEqual(setup.safeId('STM32F4 Full SDK'), 'stm32f4-full-sdk');
   assert.deepStrictEqual(setup.splitFlags('-mcpu=cortex-m4 "-DVALUE=hello world"'), ['-mcpu=cortex-m4', '-DVALUE=hello world']);
@@ -506,6 +564,19 @@ try {
   assert.strictEqual(packageManager.safeName('../unsafe package'), '..-unsafe-package');
   assert.strictEqual(codegrip.responseStatusIsSuccess(0), true);
   assert.strictEqual(codegrip.responseStatusIsSuccess('1'), false);
+
+  const rustConfiguratorSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
+  const rustMcuUiSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.js'), 'utf8');
+  const setupCssSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'setups.css'), 'utf8');
+  const mcuCssSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.css'), 'utf8');
+  assert.ok(!rustConfiguratorSource.includes('Find and select a USB CODEGRIP connection before building this configuration.'));
+  assert.ok(rustConfiguratorSource.includes('No CODEGRIP USB device is stored in this setup; searching now...'));
+  assert.ok(rustConfiguratorSource.includes('discoverUsbCodegrips({'));
+  assert.ok(rustConfiguratorSource.includes('persistCodegripConnection(context, setup, normalized)'));
+  assert.ok(!rustMcuUiSource.includes('(codegripSelected && !state.codegripConnection)'));
+  assert.ok(rustMcuUiSource.includes('USB discovery is optional. The CODEGRIP device will be searched when Flash, Debug or Erase is used.'));
+  assert.ok(setupCssSource.includes('flex-flow: row nowrap'));
+  assert.ok(mcuCssSource.includes('flex-wrap: nowrap'));
 
   process.stdout.write('C support tests passed.\n');
 } finally {

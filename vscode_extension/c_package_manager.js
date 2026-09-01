@@ -614,22 +614,44 @@ async function ensurePackages(context, specs, progress, token) {
 }
 
 function setupReferences(context, packageEntry) {
-  const setupRoot = getPackagePaths(context).setups;
-  if (!fs.existsSync(setupRoot)) return [];
   const references = [];
-  for (const name of fs.readdirSync(setupRoot)) {
-    const setupPath = path.join(setupRoot, name, 'setup.json');
-    if (!fs.existsSync(setupPath)) continue;
-    try {
-      const setup = JSON.parse(fs.readFileSync(setupPath, 'utf8'));
-      if (Array.isArray(setup.packageKeys) && setup.packageKeys.includes(packageEntry.key)) {
-        references.push(setup.name || setup.id || name);
+  const setupRoot = getPackagePaths(context).setups;
+  if (fs.existsSync(setupRoot)) {
+    for (const name of fs.readdirSync(setupRoot)) {
+      const setupPath = path.join(setupRoot, name, 'setup.json');
+      if (!fs.existsSync(setupPath)) continue;
+      try {
+        const setup = JSON.parse(fs.readFileSync(setupPath, 'utf8'));
+        if (Array.isArray(setup.packageKeys) && setup.packageKeys.includes(packageEntry.key)) {
+          references.push(setup.name || setup.id || name);
+        }
+      } catch {
+        // An invalid C setup is reported by the setup workflow, not package listing.
       }
-    } catch {
-      // An invalid setup is reported by the setup workflow, not package listing.
     }
   }
-  return references;
+
+  // Programmer packages are shared by both language environments. Protect
+  // packages referenced by Rust CODEGRIP setups as well as C setups.
+  const rustRegistry = path.join(getManagedRoot(context), 'configured-setups', 'setups.json');
+  if (fs.existsSync(rustRegistry)) {
+    try {
+      const registry = JSON.parse(fs.readFileSync(rustRegistry, 'utf8'));
+      for (const setup of Array.isArray(registry.setups) ? registry.setups : []) {
+        const keys = [];
+        if (/codegrip/i.test(`${setup.programmerUid || ''} ${setup.programmerName || ''}`)) {
+          keys.push('programmer:codegrip_gdb_server@1.7.0');
+          for (const pkg of setup.codegripCatalog?.packages || []) {
+            keys.push(`programmer-pack:${pkg.packageName}@${pkg.packageVersion || 'current'}`);
+          }
+        }
+        if (keys.includes(packageEntry.key)) references.push(`Rust: ${setup.mcuName || setup.id}`);
+      }
+    } catch {
+      // Ignore an invalid Rust registry here; Rust setup loading reports it.
+    }
+  }
+  return [...new Set(references)];
 }
 
 async function uninstallPackage(context, key) {

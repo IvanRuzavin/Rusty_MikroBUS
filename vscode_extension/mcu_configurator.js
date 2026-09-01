@@ -13,6 +13,8 @@ const {
   prepareCodegripDebug,
   stopCodegripServer
 } = require('./codegrip_backend');
+const codegripCatalog = require('./c_codegrip_catalog');
+const sharedProgrammerPackages = require('./c_package_manager');
 
 let mcuPanel;
 let outputChannel;
@@ -179,6 +181,8 @@ function saveConfiguredSetup(context, payload, result) {
     codegripConnection: result.programmerUid === 'MIKROE_CODEGRIP'
       ? normalizeDiscoveredDevice(result.codegripConnection || payload.codegripConnection)
       : undefined,
+    codegripCatalog: result.programmerUid === 'MIKROE_CODEGRIP' ? result.codegripCatalog : undefined,
+    codegripRuntime: result.programmerUid === 'MIKROE_CODEGRIP' ? result.codegripRuntime : undefined,
     sdkRoot: path.relative(getConfiguredSetupPaths(context).root, result.sdkRoot).split(path.sep).join('/'),
     artifactVersion: 1,
     createdAt: existing?.createdAt || now,
@@ -343,7 +347,7 @@ function registerMcuConfigurator(context) {
       }
     }),
     vscode.debug.onDidStartDebugSession((session) => {
-      if (session.type === 'mikrobus-rust-debug' && pendingDebugLaunch) {
+      if ((session.type === 'mikrobus-rust-debug' || (session.type === 'cortex-debug' && session.configuration.__mikrobusRustJlink === true)) && pendingDebugLaunch) {
         const pending = pendingDebugLaunch;
         pendingDebugLaunch = undefined;
         if (pending.ownedBreakpoint) {
@@ -373,11 +377,17 @@ function registerMcuConfigurator(context) {
     }),
     vscode.debug.registerDebugAdapterTrackerFactory('cortex-debug', {
       createDebugAdapterTracker(session) {
-        if (session.configuration.__mikrobusCodegrip !== true) return undefined;
-        // CODEGRIP programs the device before Cortex-Debug attaches. Once VS Code
-        // has installed source breakpoints, continue from CODEGRIP's halted state
-        // to the temporary entry breakpoint, matching the probe-rs workflow.
-        return createMikrobusDebugTracker(session, true);
+        if (session.configuration.__mikrobusCodegrip === true) {
+          // CODEGRIP programs the device before Cortex-Debug attaches. Once VS Code
+          // has installed source breakpoints, continue from CODEGRIP's halted state.
+          return createMikrobusDebugTracker(session, true);
+        }
+        if (session.configuration.__mikrobusRustJlink === true) {
+          // Native J-Link/Cortex-Debug owns launch/continue itself. Keep only the
+          // variable-stop tracking; do not inject the probe-rs reset continuation.
+          return createMikrobusDebugTracker(session, false);
+        }
+        return undefined;
       }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {
@@ -873,6 +883,247 @@ function isCodegripProgrammer(setup) {
   return /codegrip/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
 }
 
+function isJlinkProgrammer(setup) {
+  return /j[-_ ]?link|segger/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
+}
+
+function findLocalJlinkUsbProbes(sysfsRoot = '/sys/bus/usb/devices') {
+  if (process.platform !== 'linux') return [];
+  const probes = [];
+  let entries = [];
+  try { entries = fs.readdirSync(sysfsRoot, { withFileTypes: true }); } catch { return probes; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const root = path.join(sysfsRoot, entry.name);
+    let vendor = '';
+    try { vendor = fs.readFileSync(path.join(root, 'idVendor'), 'utf8').trim().toLowerCase(); } catch { continue; }
+    // SEGGER's USB vendor ID is 0x1366. Detecting the physical probe separately
+    // from the installed J-Link software prevents Nucleo/ST-LINK boards from
+    // being routed into JLinkGDBServer merely because SEGGER is installed.
+    if (vendor !== '1366') continue;
+    const readText = (name) => {
+      try { return fs.readFileSync(path.join(root, name), 'utf8').trim(); } catch { return ''; }
+    };
+    probes.push({
+      sysfsName: entry.name,
+      productId: readText('idProduct'),
+      serialNumber: readText('serial'),
+      product: readText('product') || 'SEGGER J-Link'
+    });
+  }
+  return probes;
+}
+
+function shouldUseNativeJlink(setup, probes = undefined) {
+  if (!isJlinkProgrammer(setup)) return false;
+  // On Linux we can reliably distinguish installed SEGGER software from a
+  // connected USB J-Link. On platforms without this sysfs signal, preserve the
+  // explicit J-Link selection and let the native backend handle discovery.
+  if (process.platform !== 'linux') return true;
+  const detected = probes === undefined ? findLocalJlinkUsbProbes() : probes;
+  return Array.isArray(detected) && detected.length > 0;
+}
+
+function normalizeJlinkDeviceName(mcuName) {
+  const value = String(mcuName || '').trim();
+  // Keep Rust and C aligned with the NECTO SEGGER integration. Renesas R7
+  // package suffixes are not part of the J-Link device selector.
+  if (/^R7/i.test(value) && value.length > 4) return value.slice(0, -4);
+  return value;
+}
+
+function configuredExecutable(value, executableNames = []) {
+  const configured = String(value || '').trim();
+  if (!configured) return undefined;
+  const expanded = expandHome(configured);
+  try {
+    if (fs.statSync(expanded).isFile()) return expanded;
+    if (fs.statSync(expanded).isDirectory()) {
+      for (const name of executableNames) {
+        const candidate = path.join(expanded, name);
+        if (isExecutableFile(candidate)) return candidate;
+      }
+    }
+  } catch {}
+  return undefined;
+}
+
+function findNamedFile(root, names, maximumDepth = 4) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  const walk = (directory, depth) => {
+    if (depth > maximumDepth) return undefined;
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return undefined; }
+    for (const entry of entries) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isFile() && wanted.has(entry.name.toLowerCase()) && isExecutableFile(candidate)) return candidate;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = walk(path.join(directory, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(root, 0);
+}
+
+function standardJlinkRoots() {
+  const home = os.homedir();
+  return [
+    path.join(home, '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'segger'),
+    process.platform === 'darwin' ? '/Applications/SEGGER/JLink' : undefined,
+    process.platform === 'linux' ? '/opt/SEGGER/JLink' : undefined,
+    process.platform === 'win32' && process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'SEGGER', 'JLink') : undefined,
+    process.platform === 'win32' && process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'SEGGER', 'JLink') : undefined
+  ].filter(Boolean);
+}
+
+function resolveJlinkExecutable(settingName, executableNames) {
+  const explicit = configuredExecutable(configuredToolPath(settingName), executableNames);
+  if (explicit) return explicit;
+  for (const name of executableNames) {
+    const fromPath = findExecutableOnPath(name);
+    if (fromPath) return fromPath;
+  }
+  for (const root of standardJlinkRoots()) {
+    const direct = configuredExecutable(root, executableNames);
+    if (direct) return direct;
+    const recursive = findNamedFile(root, executableNames, 4);
+    if (recursive) return recursive;
+  }
+  return undefined;
+}
+
+function resolveJlinkTools() {
+  const commanderNames = process.platform === 'win32' ? ['JLink.exe', 'JLinkExe.exe'] : ['JLinkExe'];
+  const serverNames = process.platform === 'win32' ? ['JLinkGDBServerCL.exe', 'JLinkGDBServerCLExe.exe'] : ['JLinkGDBServerCLExe', 'JLinkGDBServerCL'];
+  return {
+    commander: resolveJlinkExecutable('jlinkCommanderPath', commanderNames),
+    gdbServer: resolveJlinkExecutable('jlinkGdbServerPath', serverNames)
+  };
+}
+
+function rustCodegripPackSpec(pkg) {
+  return {
+    kind: 'programmer-pack',
+    name: pkg.packageName,
+    version: pkg.packageVersion || 'current',
+    displayName: pkg.displayName || pkg.packageName,
+    downloadUrl: pkg.downloadUrl,
+    environment: false
+  };
+}
+
+function findRecursiveCodegripServer(root, maximumDepth = 10) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const isServer = (name) => {
+    const normalized = String(name || '').replace(/\.exe$/i, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return normalized === 'codegripgdbserver';
+  };
+  const walk = (directory, depth) => {
+    if (depth > maximumDepth) return undefined;
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return undefined; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !isServer(entry.name)) continue;
+      const candidate = path.join(directory, entry.name);
+      if (process.platform === 'win32') return candidate;
+      try { fs.chmodSync(candidate, 0o755); } catch {}
+      if (isExecutableFile(candidate)) return candidate;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = walk(path.join(directory, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(root, 0);
+}
+
+function findDirectoryNamed(root, wantedName, maximumDepth = 8) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const wanted = String(wantedName || '').toLowerCase();
+  const walk = (directory, depth) => {
+    if (depth > maximumDepth) return undefined;
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return undefined; }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.toLowerCase() === wanted) return path.join(directory, entry.name);
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = walk(path.join(directory, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(root, 0);
+}
+
+function copyDirectoryContents(source, target) {
+  if (!source || !fs.existsSync(source)) return;
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) fs.cpSync(from, to, { recursive: true, force: true });
+    else if (entry.isFile()) fs.copyFileSync(from, to);
+  }
+}
+
+async function prepareRustCodegripRuntime(context, mcuName, runtimeRoot, progress, token) {
+  progress?.report({ message: `Reading live CODEGRIP device-pack catalog for ${mcuName}...` });
+  const catalog = await codegripCatalog.resolveDevice(mcuName, token);
+  const serverSpec = { kind: 'programmer', name: 'codegrip_gdb_server', version: '1.7.0', displayName: 'CODEGRIP Suite', environment: false };
+  const specs = [serverSpec, ...catalog.packages.map(rustCodegripPackSpec)];
+  progress?.report({ message: `Installing CODEGRIP programmer packages for ${mcuName}...` });
+  const installed = await sharedProgrammerPackages.ensurePackages(context, specs, progress, token);
+  const serverEntry = installed.get(sharedProgrammerPackages.packageKey(serverSpec)) || sharedProgrammerPackages.getInstalledPackage(context, serverSpec);
+  if (!serverEntry?.root) throw new Error('Managed CODEGRIP GDB server package was not installed.');
+  const serverExecutable = findRecursiveCodegripServer(serverEntry.root);
+  if (!serverExecutable) throw new Error(`CodegripGdbServer was not found under ${serverEntry.root}.`);
+
+  const packsRoot = path.join(runtimeRoot, 'packs');
+  fs.rmSync(packsRoot, { recursive: true, force: true });
+  fs.mkdirSync(packsRoot, { recursive: true });
+  const sharedPacksRoot = findDirectoryNamed(serverEntry.root, 'packs', 8);
+  if (sharedPacksRoot) copyDirectoryContents(sharedPacksRoot, packsRoot);
+
+  const devicePacks = [];
+  for (const pkg of catalog.packages) {
+    const spec = rustCodegripPackSpec(pkg);
+    const entry = installed.get(sharedProgrammerPackages.packageKey(spec)) || sharedProgrammerPackages.getInstalledPackage(context, spec);
+    if (!entry?.root) throw new Error(`CODEGRIP device pack '${pkg.packageName}' was not installed.`);
+    const relativeParts = codegripCatalog.relativePacksInstallPath(pkg.installLocation);
+    const installDirectory = path.join(packsRoot, ...relativeParts);
+    copyDirectoryContents(entry.root, installDirectory);
+    devicePacks.push({
+      packageName: pkg.packageName,
+      packageVersion: pkg.packageVersion,
+      sourceUrl: pkg.downloadUrl,
+      packageRoot: entry.root,
+      installLocation: pkg.installLocation,
+      installDirectory
+    });
+  }
+  if (!devicePacks.length) throw new Error(`No CODEGRIP device pack was resolved for ${mcuName}.`);
+  return {
+    catalog,
+    runtime: {
+      catalogUrl: catalog.catalogUrl,
+      catalogResolvedAt: catalog.resolvedAt,
+      serverRoot: serverEntry.root,
+      serverExecutable,
+      sharedPacksRoot,
+      packsRoot,
+      devicePacks
+    }
+  };
+}
+
 function resolveCodegripExecutable(context) {
   const executableName = executableFileName('CodegripGdbServer');
   const configured = configuredToolPath('codegripServerPath');
@@ -949,16 +1200,62 @@ function resolveCodegripPacksPath(serverExecutable, context) {
   );
 }
 
-function codegripOperationOptions(context, setup, channel) {
-  const executable = resolveCodegripExecutable(context);
-  const packsPath = resolveCodegripPacksPath(executable, context);
-  const discovered = normalizeDiscoveredDevice(setup?.codegripConnection);
-  if (!discovered) {
-    throw new Error(
-      'This CODEGRIP setup has no discovered USB connection. Reopen Hardware Configuration, select CODEGRIP, ' +
-      'choose Find USB CODEGRIP, and rebuild the setup.'
+function persistCodegripConnection(context, setup, discovered) {
+  if (!setup?.id || !discovered) return;
+  const registry = readConfiguredSetupRegistry(context);
+  const index = registry.setups.findIndex((item) => item.id === setup.id);
+  if (index < 0) return;
+  registry.setups[index] = {
+    ...registry.setups[index],
+    codegripConnection: normalizeDiscoveredDevice(discovered),
+    updatedAt: new Date().toISOString()
+  };
+  writeConfiguredSetupRegistry(context, registry);
+  setup.codegripConnection = registry.setups[index].codegripConnection;
+  void vscode.commands.executeCommand('mikrobusRust.refreshSetupView');
+}
+
+async function resolveCodegripConnectionForOperation(context, setup, executable, packsPath, channel) {
+  const stored = normalizeDiscoveredDevice(setup?.codegripConnection);
+  if (stored) return stored;
+
+  channel.appendLine('No CODEGRIP USB device is stored in this setup; searching now...');
+  const discovery = await discoverUsbCodegrips({
+    executable,
+    packsPath,
+    mcu: setup.mcuName,
+    channel,
+    commandTimeoutMs: 8000
+  });
+
+  let device = discovery.devices[0];
+  if (discovery.devices.length > 1) {
+    const choice = await vscode.window.showQuickPick(
+      discovery.devices.map((candidate) => ({
+        label: candidate.deviceName || 'CODEGRIP',
+        description: candidate.serialNumber,
+        detail: `USB · ${candidate.hwTokens || ''}`,
+        device: candidate
+      })),
+      { placeHolder: `Select the CODEGRIP to use with ${setup.mcuName}` }
     );
+    device = choice?.device;
+    if (!device) throw new Error('CODEGRIP selection was cancelled.');
   }
+
+  const normalized = normalizeDiscoveredDevice(device);
+  if (!normalized) throw new Error('CODEGRIP discovery did not return a usable USB connection.');
+  channel.appendLine(`Using discovered CODEGRIP: ${normalized.deviceName} (${normalized.serialNumber})`);
+  persistCodegripConnection(context, setup, normalized);
+  return normalized;
+}
+
+async function codegripOperationOptions(context, setup, channel) {
+  const storedExecutable = String(setup?.codegripRuntime?.serverExecutable || '');
+  const storedPacks = String(setup?.codegripRuntime?.packsRoot || '');
+  const executable = isExecutableFile(storedExecutable) ? storedExecutable : resolveCodegripExecutable(context);
+  const packsPath = storedPacks && fs.existsSync(storedPacks) ? storedPacks : resolveCodegripPacksPath(executable, context);
+  const discovered = await resolveCodegripConnectionForOperation(context, setup, executable, packsPath, channel);
   const profile = normalizeConnectionProfile(discovered);
   channel.appendLine(`CODEGRIP USB device: ${discovered.deviceName} (${discovered.serialNumber})`);
   channel.appendLine(`Programmer profile: ${setup.programmerName || 'MIKROE CODEGRIP'} (${setup.programmerUid || 'MIKROE_CODEGRIP'})`);
@@ -972,11 +1269,14 @@ function codegripOperationOptions(context, setup, channel) {
   };
 }
 
-function codegripDiscoveryOptions(context, mcuName, channel) {
-  const executable = resolveCodegripExecutable(context);
+async function codegripDiscoveryOptions(context, mcuName, channel, progress, token) {
+  const discoveryRoot = path.join(getManagedRoot(context), 'configured-setups', '.codegrip-discovery', setupIdForMcu(mcuName));
+  const prepared = await prepareRustCodegripRuntime(context, mcuName, discoveryRoot, progress, token);
+  channel.appendLine(`CODEGRIP device pack catalog: ${prepared.catalog.catalogUrl}`);
+  channel.appendLine(`CODEGRIP packs for ${mcuName}: ${prepared.runtime.packsRoot}`);
   return {
-    executable,
-    packsPath: resolveCodegripPacksPath(executable, context),
+    executable: prepared.runtime.serverExecutable,
+    packsPath: prepared.runtime.packsRoot,
     mcu: mcuName,
     channel,
     commandTimeoutMs: 8000
@@ -1039,10 +1339,55 @@ async function withCodegripHex(context, programBinary, channel, action) {
 }
 
 async function flashElfWithCodegrip(context, setup, programBinary, channel) {
-  const options = codegripOperationOptions(context, setup, channel);
+  const options = await codegripOperationOptions(context, setup, channel);
   await withCodegripHex(context, programBinary, channel, async (hexFile) => {
     await programCodegrip({ ...options, hexFile, debugEnable: false });
   });
+}
+
+function jlinkCommandFile(lines) {
+  const filePath = path.join(os.tmpdir(), `mikrobus-jlink-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.jlink`);
+  fs.writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
+  return filePath;
+}
+
+async function runJlinkCommander(setup, lines, channel) {
+  const tools = resolveJlinkTools();
+  if (!tools.commander) {
+    throw new Error('J-Link Commander was not found. Set mikrobusRust.jlinkCommanderPath or install SEGGER J-Link.');
+  }
+  const device = normalizeJlinkDeviceName(setup.mcuName);
+  const commandFile = jlinkCommandFile(lines);
+  channel.appendLine(`Resolved J-Link Commander: ${tools.commander}`);
+  channel.appendLine(`J-Link target: ${device} (MCU ${setup.mcuName})`);
+  try {
+    const args = ['-device', device, '-if', 'SWD', '-speed', '4000', '-AutoConnect', '1', '-NoGui', '1', '-ExitOnError', '1', '-CommandFile', commandFile];
+    const code = await runStreaming(tools.commander, args, path.dirname(commandFile), channel);
+    if (code !== 0) throw new Error(`J-Link Commander failed with exit code ${code}. See the MikroBUS Rust output.`);
+  } finally {
+    fs.rmSync(commandFile, { force: true });
+  }
+}
+
+async function flashElfWithJlink(setup, programBinary, channel) {
+  await runJlinkCommander(setup, [
+    `device ${normalizeJlinkDeviceName(setup.mcuName)}`,
+    'connect',
+    `loadfile "${String(programBinary).replace(/\\/g, '/')}"`,
+    'r',
+    'g',
+    'exit'
+  ], channel);
+}
+
+async function eraseWithJlink(setup, channel) {
+  await runJlinkCommander(setup, [
+    `device ${normalizeJlinkDeviceName(setup.mcuName)}`,
+    'connect',
+    'erase',
+    'r',
+    'exit'
+  ], channel);
 }
 
 function buildToolEnvironment(executable) {
@@ -1186,7 +1531,8 @@ function activeMikrobusDebugSession() {
   const session = vscode.debug.activeDebugSession;
   const isProbeRs = session?.type === 'mikrobus-rust-debug';
   const isCodegrip = session?.type === 'cortex-debug' && session.configuration.__mikrobusCodegrip === true;
-  if (!session || (!isProbeRs && !isCodegrip)) {
+  const isJlink = session?.type === 'cortex-debug' && session.configuration.__mikrobusRustJlink === true;
+  if (!session || (!isProbeRs && !isCodegrip && !isJlink)) {
     throw new Error('No active MikroBUS Rust debug session. Start debugging a Rust file first.');
   }
   return session;
@@ -1448,40 +1794,63 @@ async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
   });
 }
 
+async function flashCargoBinWithProbeRs(binding, setup, binName, channel) {
+  const baseArgs = ['flash'];
+  if (binName) baseArgs.push('--bin', binName);
+  baseArgs.push('--chip', setup.mcuName);
+  try {
+    await executeChecked(channel, 'cargo', baseArgs, binding.sdkRoot);
+  } catch (error) {
+    channel.appendLine('probe-rs normal SWD connection failed; retrying once with connect-under-reset.');
+    await executeChecked(channel, 'cargo', [...baseArgs, '--connect-under-reset'], binding.sdkRoot);
+  }
+}
+
 async function buildCurrentRustSource(binding, setup, source, channel, flash) {
   const binName = 'mikrobus_current';
   return withTemporaryRustBinary(binding, source, binName, async () => {
     await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
     const programBinary = resolveBuiltNamedBinary(binding, setup, binName);
     if (flash) {
-      await executeChecked(
-        channel,
-        'cargo',
-        ['flash', '--bin', binName, '--chip', setup.mcuName, '--connect-under-reset'],
-        binding.sdkRoot
-      );
+      await flashCargoBinWithProbeRs(binding, setup, binName, channel);
     }
     return { programBinary, binName };
   });
 }
 
 function findMainEntryLine(sourceText) {
-  const lines = sourceText.split(/\r?\n/);
+  const lines = String(sourceText || '').split(/\r?\n/);
   let mainLine = -1;
+  let bodyStarted = false;
+  let inBlockComment = false;
   for (let i = 0; i < lines.length; i += 1) {
-    if (/\bfn\s+main\s*\(/.test(lines[i])) {
-      mainLine = i;
-      break;
+    if (mainLine < 0 && /\bfn\s+main\s*\(/.test(lines[i])) mainLine = i;
+    if (mainLine < 0) continue;
+
+    let text = lines[i];
+    if (!bodyStarted) {
+      const brace = text.indexOf('{');
+      if (brace < 0) continue;
+      bodyStarted = true;
+      text = text.slice(brace + 1);
+      if (!text.trim()) continue;
     }
-  }
-  if (mainLine < 0) return 0;
-  for (let i = mainLine + 1; i < lines.length; i += 1) {
-    const trimmed = lines[i].trim();
-    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue;
-    if (trimmed === '{' || trimmed === '}') continue;
+
+    let cleaned = '';
+    for (let j = 0; j < text.length; j += 1) {
+      if (inBlockComment) {
+        if (text[j] === '*' && text[j + 1] === '/') { inBlockComment = false; j += 1; }
+        continue;
+      }
+      if (text[j] === '/' && text[j + 1] === '*') { inBlockComment = true; j += 1; continue; }
+      if (text[j] === '/' && text[j + 1] === '/') break;
+      cleaned += text[j];
+    }
+    const trimmed = cleaned.trim();
+    if (!trimmed || trimmed === '{' || trimmed === '}') continue;
     return i;
   }
-  return mainLine;
+  return mainLine >= 0 ? mainLine : 0;
 }
 
 function sameFilePath(left, right) {
@@ -1550,7 +1919,7 @@ async function debugCurrentRustFile(context) {
     const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
     const objdumpPath = resolveArmGccExecutable(context, 'arm-none-eabi-objdump');
     const armToolchainPath = path.dirname(gdbPath);
-    const options = codegripOperationOptions(context, setup, channel);
+    const options = await codegripOperationOptions(context, setup, channel);
     const entry = ensureEntryBreakpoint(source);
     channel.appendLine(`Debug source: ${source}`);
     channel.appendLine(`Debug ELF: ${programBinary}`);
@@ -1611,6 +1980,75 @@ async function debugCurrentRustFile(context) {
     }
   }
 
+  const jlinkSelected = isJlinkProgrammer(setup);
+  const localJlinkProbes = jlinkSelected ? findLocalJlinkUsbProbes() : [];
+  const nativeJlink = shouldUseNativeJlink(setup, localJlinkProbes);
+
+  if (jlinkSelected && !nativeJlink) {
+    channel.appendLine('SEGGER J-Link is selected, but no physical USB J-Link probe was detected.');
+    channel.appendLine('Using probe-rs with the connected onboard/debug probe instead (for Nucleo boards this is normally ST-LINK).');
+  }
+
+  if (nativeJlink) {
+    const cortexDebug = vscode.extensions.getExtension('marus25.cortex-debug');
+    if (!cortexDebug) {
+      throw new Error('SEGGER J-Link debugging requires the Cortex-Debug extension (marus25.cortex-debug). Install it and reload VS Code.');
+    }
+    await cortexDebug.activate();
+    const tools = resolveJlinkTools();
+    if (!tools.gdbServer) {
+      throw new Error('J-Link GDB Server was not found. Set mikrobusRust.jlinkGdbServerPath or install SEGGER J-Link.');
+    }
+    const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
+    const objdumpPath = resolveArmGccExecutable(context, 'arm-none-eabi-objdump');
+    const armToolchainPath = path.dirname(gdbPath);
+    const entry = ensureEntryBreakpoint(source);
+    const device = normalizeJlinkDeviceName(setup.mcuName);
+    channel.appendLine(`Debug source: ${source}`);
+    channel.appendLine(`Debug ELF: ${programBinary}`);
+    channel.appendLine(`Programmer profile: ${setup.programmerName || 'SEGGER J-Link'} (${setup.programmerUid || 'SEGGER_JLINK'})`);
+    channel.appendLine(`Resolved J-Link GDB Server: ${tools.gdbServer}`);
+    channel.appendLine(`J-Link target: ${device} (MCU ${setup.mcuName})`);
+    channel.appendLine(`J-Link speed: 4000 kHz`);
+    channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
+
+    pendingDebugLaunch = {
+      source,
+      ownedBreakpoint: entry.owned ? entry.breakpoint : undefined,
+      kind: 'jlink-rust'
+    };
+    const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
+      type: 'cortex-debug',
+      request: 'launch',
+      name: `MikroBUS Rust J-Link: ${setup.mcuName}`,
+      cwd: binding.sdkRoot,
+      executable: programBinary,
+      servertype: 'jlink',
+      serverpath: tools.gdbServer,
+      device,
+      interface: 'swd',
+      serverArgs: ['-speed', '4000'],
+      gdbPath,
+      armToolchainPath,
+      objdumpPath,
+      toolchainPrefix: 'arm-none-eabi',
+      // main is exported with #[no_mangle], so the J-Link/GDB path can stop at
+      // the real Rust entry symbol instead of probe-rs' reset/continue timing.
+      // The temporary source breakpoint remains as a precise first-statement
+      // fallback for DWARF line tables that place the function symbol on its
+      // declaration rather than its first executable statement.
+      runToEntryPoint: 'main',
+      showDevDebugOutput: 'none',
+      __mikrobusRustJlink: true
+    });
+    if (!started) {
+      pendingDebugLaunch = undefined;
+      if (entry.owned) vscode.debug.removeBreakpoints([entry.breakpoint]);
+      throw new Error('VS Code did not start the SEGGER J-Link debug session.');
+    }
+    return;
+  }
+
   const probeRsExecutable = resolveToolExecutable('probe-rs');
   const entry = ensureEntryBreakpoint(source);
   channel.appendLine(`Debug source: ${source}`);
@@ -1631,7 +2069,9 @@ async function debugCurrentRustFile(context) {
     cwd: binding.sdkRoot,
     chip: setup.mcuName,
     wireProtocol: 'Swd',
-    connectUnderReset: true,
+    // Normal SWD attach is considerably faster for onboard ST-LINK/CMSIS-DAP.
+    // Flash commands retry under reset only if the normal connection fails.
+    connectUnderReset: false,
     flashingConfig: {
       flashingEnabled: true,
       haltAfterReset: true,
@@ -1653,11 +2093,15 @@ async function debugCurrentRustFile(context) {
 async function runBoundWorkspaceAction(context, action) {
   const { binding, setup } = requireWorkspaceBinding(context);
   const useCodegrip = isCodegripProgrammer(setup);
+  const jlinkSelected = isJlinkProgrammer(setup);
+  const localJlinkProbes = jlinkSelected ? findLocalJlinkUsbProbes() : [];
+  const useJlink = shouldUseNativeJlink(setup, localJlinkProbes);
+  const useProbeRsFallback = jlinkSelected && !useJlink;
 
   if (action === 'erase') {
     const confirmation = await vscode.window.showWarningMessage(
       `Erase all flash memory on ${setup.mcuName}?`,
-      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\nProgrammer: ${setup.programmerName || setup.programmerUid}\n\nThis will erase the MCU flash through ${useCodegrip ? 'CODEGRIP' : 'probe-rs'}. The configured setup itself will not be removed.` },
+      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\nProgrammer: ${setup.programmerName || setup.programmerUid}\n\nThis will erase the MCU flash through ${useCodegrip ? 'CODEGRIP' : useJlink ? 'SEGGER J-Link' : useProbeRsFallback ? 'probe-rs using the connected onboard/debug probe' : 'probe-rs'}. The configured setup itself will not be removed.` },
       'Erase MCU'
     );
     if (confirmation !== 'Erase MCU') return;
@@ -1667,6 +2111,9 @@ async function runBoundWorkspaceAction(context, action) {
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz ===`);
   channel.appendLine(`Reusable setup: ${binding.sdkRoot}`);
+  if (useProbeRsFallback) {
+    channel.appendLine('No physical USB J-Link probe detected; using probe-rs with the connected onboard/debug probe.');
+  }
 
   await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -1677,8 +2124,9 @@ async function runBoundWorkspaceAction(context, action) {
       const source = getActiveRustSource(binding);
       const editor = vscode.window.activeTextEditor;
       if (editor) await editor.document.save();
-      const result = await buildCurrentRustSource(binding, setup, source, channel, !useCodegrip);
+      const result = await buildCurrentRustSource(binding, setup, source, channel, !useCodegrip && !useJlink);
       if (useCodegrip) await flashElfWithCodegrip(context, setup, result.programBinary, channel);
+      else if (useJlink) await flashElfWithJlink(setup, result.programBinary, channel);
       return;
     }
     if (action === 'buildCurrent') {
@@ -1696,14 +2144,19 @@ async function runBoundWorkspaceAction(context, action) {
       if (useCodegrip) {
         await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
         await flashElfWithCodegrip(context, setup, resolveBuiltProgramBinary(binding, setup), channel);
+      } else if (useJlink) {
+        await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
+        await flashElfWithJlink(setup, resolveBuiltProgramBinary(binding, setup), channel);
       } else {
-        await executeChecked(channel, 'cargo', ['flash', '--chip', setup.mcuName, '--connect-under-reset'], binding.sdkRoot);
+        await flashCargoBinWithProbeRs(binding, setup, undefined, channel);
       }
       return;
     }
     if (action === 'erase') {
       if (useCodegrip) {
-        await eraseCodegrip(codegripOperationOptions(context, setup, channel));
+        await eraseCodegrip(await codegripOperationOptions(context, setup, channel));
+      } else if (useJlink) {
+        await eraseWithJlink(setup, channel);
       } else {
         await executeChecked(channel, 'probe-rs', ['erase', '--chip', setup.mcuName], binding.sdkRoot);
       }
@@ -1924,9 +2377,12 @@ async function handleMcuMessage(message, panel, context) {
     channel.appendLine(`\n=== ${mcuName} · Find USB CODEGRIP ===`);
     const discovery = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: 'Searching for USB CODEGRIP devices...',
+      title: 'Preparing CODEGRIP and searching for USB devices...',
       cancellable: false
-    }, () => discoverUsbCodegrips(codegripDiscoveryOptions(context, mcuName, channel)));
+    }, async (progress) => {
+      const options = await codegripDiscoveryOptions(context, mcuName, channel, progress);
+      return discoverUsbCodegrips(options);
+    });
     let device = discovery.devices[0];
     if (discovery.devices.length > 1) {
       const choice = await vscode.window.showQuickPick(
@@ -2476,12 +2932,21 @@ function remapGeneratedResult(result, stagingRoot, targetRoot) {
     if (!value || !isPathWithin(stagingRoot, value)) return value;
     return path.join(targetRoot, path.relative(stagingRoot, value));
   };
+  const codegripRuntime = result.codegripRuntime ? {
+    ...result.codegripRuntime,
+    packsRoot: remap(result.codegripRuntime.packsRoot),
+    devicePacks: (result.codegripRuntime.devicePacks || []).map((item) => ({
+      ...item,
+      installDirectory: remap(item.installDirectory)
+    }))
+  } : undefined;
   return {
     ...result,
     sdkRoot: targetRoot,
     setupRoot: remap(result.setupRoot),
     coreHeader: remap(result.coreHeader),
-    cargoConfig: remap(result.cargoConfig)
+    cargoConfig: remap(result.cargoConfig),
+    codegripRuntime
   };
 }
 
@@ -2528,7 +2993,12 @@ async function buildPortableSetupWorkspace(context, payload, progress) {
 
 async function ensurePortableSetupWorkspace(context, setup) {
   const sdkRoot = resolveSetupSdkRoot(context, setup);
-  if (portableSetupIsComplete(sdkRoot)) {
+  const codegripRuntimeReady = !isCodegripProgrammer(setup) || (
+    isExecutableFile(setup?.codegripRuntime?.serverExecutable) &&
+    Boolean(setup?.codegripRuntime?.packsRoot) &&
+    fs.existsSync(setup.codegripRuntime.packsRoot)
+  );
+  if (portableSetupIsComplete(sdkRoot) && codegripRuntimeReady) {
     return {
       ...setup,
       sdkRoot,
@@ -2584,11 +3054,17 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   if (!selectedProgrammer) {
     throw new Error(`Select a supported programmer for ${mcuName} before generating the configuration.`);
   }
+  // CODEGRIP USB discovery is optional while building a reusable setup.
+  // The setup contains the selected MCU, shared server path and exact device
+  // pack(s); a physical CODEGRIP is resolved lazily when Flash/Debug/Erase is
+  // requested. Preserve an explicitly selected device when one was discovered.
   const codegripConnection = selectedProgrammer.uid === 'MIKROE_CODEGRIP'
     ? normalizeDiscoveredDevice(payload.codegripConnection)
     : undefined;
-  if (selectedProgrammer.uid === 'MIKROE_CODEGRIP' && !codegripConnection) {
-    throw new Error('Find and select a USB CODEGRIP connection before building this configuration.');
+  let codegripSupport;
+  if (selectedProgrammer.uid === 'MIKROE_CODEGRIP') {
+    const runtimeRoot = path.join(paths.sdk, '.programmer', 'codegrip');
+    codegripSupport = await prepareRustCodegripRuntime(context, mcuName, runtimeRoot, progress);
   }
   const familyImpl = readFamilyImplementationMetadata(paths.database, mcuName);
   const definitionPath = findMcuDefinition(paths.core, mcuName);
@@ -2710,6 +3186,8 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       programmerUid: selectedProgrammer.uid,
       programmerName: selectedProgrammer.name,
       codegripConnection,
+      codegripCatalog: codegripSupport?.catalog,
+      codegripRuntime: codegripSupport?.runtime,
       sdkRoot: paths.sdk,
       setupRoot,
       coreHeader: path.join(setupRoot, 'core', 'src', 'core_header.rs'),
@@ -3058,6 +3536,13 @@ module.exports = {
     resolveManagedBspFile,
     normalizeRustCrateEntryPoint,
     readCargoPackageName,
-    resolveBuiltProgramBinary
+    resolveBuiltProgramBinary,
+    findMainEntryLine,
+    isCodegripProgrammer,
+    isJlinkProgrammer,
+    findLocalJlinkUsbProbes,
+    shouldUseNativeJlink,
+    normalizeJlinkDeviceName,
+    rustCodegripPackSpec
   }
 };
