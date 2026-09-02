@@ -121,10 +121,26 @@ function activate(context) {
   const refreshSetupView = vscode.commands.registerCommand('mikrobusRust.refreshSetupView', async () => {
     postDashboardState(setupView, context);
   });
+  const refreshDatabase = vscode.commands.registerCommand('mikrobusRust.refreshDatabase', async () => {
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Refreshing MikroBUS Rust database',
+      cancellable: true
+    }, async (progress, token) => {
+      await installManagedPackage('database', context, progress, token);
+    });
+    vscode.window.showInformationMessage('MikroBUS Rust database downloaded and replaced successfully.');
+    if (environmentPanel) {
+      postStatus(environmentPanel, scanPackages(context), context);
+    }
+    postDashboardState(setupView, context);
+    return true;
+  });
   context.subscriptions.push(
     openSetup,
     openEnvironment,
     refreshSetupView,
+    refreshDatabase,
     vscode.workspace.onDidChangeWorkspaceFolders(() => postDashboardState(setupView, context)),
     vscode.workspace.onDidCreateFiles(() => postDashboardState(setupView, context)),
     vscode.workspace.onDidDeleteFiles(() => postDashboardState(setupView, context))

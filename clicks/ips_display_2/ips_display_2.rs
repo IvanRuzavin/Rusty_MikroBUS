@@ -90,6 +90,7 @@ pub enum Error {
     Spi,
     Pin,
     OutOfBounds,
+    InvalidImageSize,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -249,6 +250,42 @@ impl IpsDisplay2 {
                 decision += ((x - y) * 2) + 1;
             }
         }
+        Ok(())
+    }
+
+    /// Draw a full-screen image stored as big-endian RGB565 bytes.
+    ///
+    /// The expected payload is WIDTH * HEIGHT * 2 bytes. This matches the
+    /// preconverted `.rgb565` asset produced by tools/png_to_rgb565.py.
+    pub fn draw_rgb565_image(&mut self, pixels: &[u8]) -> Result<()> {
+        let (width, height) = self.dimensions();
+        let expected = usize::from(width) * usize::from(height) * 2;
+        if pixels.len() != expected {
+            return Err(Error::InvalidImageSize);
+        }
+
+        self.set_position(
+            Point { x: 0, y: 0 },
+            Point { x: width - 1, y: height - 1 },
+        )?;
+
+        // The current SPI API takes a mutable slice. Keep the image itself in
+        // flash and copy manageable chunks to a small stack buffer for transfer.
+        let mut tx = [0u8; 1024];
+        digital_out_low(&mut self.cs).map_err(|_| Error::Pin)?;
+        digital_out_high(&mut self.dc).map_err(|_| Error::Pin)?;
+
+        for chunk in pixels.chunks(tx.len()) {
+            tx[..chunk.len()].copy_from_slice(chunk);
+            drv_spi_master::spi_master_write(
+                &mut self.spi,
+                &mut tx[..chunk.len()],
+                chunk.len(),
+            )
+            .map_err(|_| Error::Spi)?;
+        }
+
+        digital_out_high(&mut self.cs).map_err(|_| Error::Pin)?;
         Ok(())
     }
 

@@ -9,11 +9,15 @@ const path = require('path');
 const childProcess = require('child_process');
 const vscode = require('vscode');
 const { resolvePackage } = require('./c_package_catalog');
+const compilerSupport = require('./c_compiler_support');
 
 const installLocks = new Map();
 let packagePanel;
 let environmentPanel;
-let programmerPanel;
+let environmentViewKind = 'environment';
+
+const CORE_METADATA_URL = 'https://github.com/MikroElektronika/core_packages/releases/download/v2.0.0/metadata.json';
+const MIKROSDK_LATEST_API = 'https://api.github.com/repos/MikroElektronika/mikrosdk_v2/releases/latest';
 
 function expandHome(value) {
   const text = String(value || '').trim();
@@ -38,9 +42,17 @@ function getPackagePaths(context) {
   };
 }
 
-function packageKey(spec) {
+function legacyPackageKey(spec) {
   const version = String(spec.version || '').trim();
   return `${spec.kind}:${spec.name}${version ? `@${version}` : ''}`;
+}
+
+function packageKey(spec) {
+  const version = String(spec.version || '').trim();
+  const instance = String(spec.kind || '').toLowerCase() === 'bsp-card'
+    ? String(spec.mcuName || spec.deviceUid || '').trim()
+    : '';
+  return `${spec.kind}:${spec.name}${instance ? `#${safeName(instance)}` : ''}${version ? `@${version}` : ''}`;
 }
 
 function safeName(value) {
@@ -48,12 +60,16 @@ function safeName(value) {
 }
 
 function packageTarget(context, spec) {
-  return path.join(
-    getPackagePaths(context).packages,
-    safeName(spec.kind),
-    safeName(spec.name),
-    safeName(spec.version || 'current')
-  );
+  const packagesRoot = path.resolve(getPackagePaths(context).packages);
+  if (spec.installRelativePath) {
+    const segments = String(spec.installRelativePath).replace(/\\/g, '/').split('/').filter(Boolean);
+    if (!segments.length || segments.some((segment) => segment === '..' || segment === '.')) throw new Error(`Invalid package install path for ${spec.name}.`);
+    const target = path.resolve(packagesRoot, ...segments);
+    const relative = path.relative(packagesRoot, target);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Package install path escapes the managed package root: ${target}`);
+    return target;
+  }
+  return path.join(packagesRoot, safeName(spec.kind), safeName(spec.name), safeName(spec.version || 'current'));
 }
 
 function readRegistry(context) {
@@ -90,6 +106,22 @@ function listInstalledPackages(context, includeEnvironment = true) {
     .filter((entry) => includeEnvironment || !entry.environment)
     .filter((entry) => entry.root && fs.existsSync(entry.root))
     .sort((left, right) => `${left.kind}/${left.name}`.localeCompare(`${right.kind}/${right.name}`));
+}
+
+function findRecursive(root, predicate, maximumDepth = 8) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const queue = [{ directory: root, depth: 0 }];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries;
+    try { entries = fs.readdirSync(current.directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const candidate = path.join(current.directory, entry.name);
+      if (entry.isFile() && predicate(candidate, entry.name)) return candidate;
+      if (entry.isDirectory() && current.depth < maximumDepth) queue.push({ directory: candidate, depth: current.depth + 1 });
+    }
+  }
+  return undefined;
 }
 
 function findOnPath(names) {
@@ -131,7 +163,7 @@ function ensureNotCancelled(token) {
   if (token?.isCancellationRequested) throw new Error('Package installation cancelled.');
 }
 
-function openResponse(url, token, redirectCount = 0) {
+function openResponse(url, token, redirectCount = 0, accept = 'application/octet-stream') {
   ensureNotCancelled(token);
   if (redirectCount > 8) return Promise.reject(new Error(`Too many redirects while downloading ${url}.`));
   return new Promise((resolve, reject) => {
@@ -139,14 +171,15 @@ function openResponse(url, token, redirectCount = 0) {
     const transport = parsed.protocol === 'http:' ? http : https;
     const request = transport.get(parsed, {
       headers: {
-        Accept: 'application/octet-stream',
-        'User-Agent': 'mikrobus-embedded-vscode-extension'
+        Accept: accept,
+        'User-Agent': 'mikrobus-embedded-vscode-extension',
+        ...(parsed.hostname === 'api.github.com' ? { 'X-GitHub-Api-Version': '2022-11-28' } : {})
       }
     }, (response) => {
       const status = response.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
         response.resume();
-        openResponse(new URL(response.headers.location, parsed).toString(), token, redirectCount + 1)
+        openResponse(new URL(response.headers.location, parsed).toString(), token, redirectCount + 1, accept)
           .then(resolve, reject);
         return;
       }
@@ -165,6 +198,153 @@ function openResponse(url, token, redirectCount = 0) {
     request.on('error', reject);
     request.on('close', () => cancellation?.dispose());
   });
+}
+
+
+function jsonAcceptHeader() {
+  return 'application/vnd.github+json, application/json;q=0.9, */*;q=0.8';
+}
+
+async function fetchJson(url, token) {
+  const response = await openResponse(url, token, 0, jsonAcceptHeader());
+  const chunks = [];
+  await new Promise((resolve, reject) => {
+    response.on('data', (chunk) => chunks.push(chunk));
+    response.on('error', reject);
+    response.on('end', resolve);
+  });
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch (error) { throw new Error(`Invalid JSON downloaded from ${url}: ${error.message}`); }
+}
+
+let coreMetadataCache;
+let coreMetadataLoadedAt = 0;
+async function loadCoreMetadata(_context, token, force = false) {
+  if (!force && coreMetadataCache && Date.now() - coreMetadataLoadedAt < 15 * 60 * 1000) return coreMetadataCache;
+  const parsed = await fetchJson(CORE_METADATA_URL, token);
+  const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.packages) ? parsed.packages : []);
+  coreMetadataCache = items;
+  coreMetadataLoadedAt = Date.now();
+  return items;
+}
+
+let latestSdkCache;
+let latestSdkLoadedAt = 0;
+async function latestMikroSdkRelease(token, force = false) {
+  if (!force && latestSdkCache && Date.now() - latestSdkLoadedAt < 10 * 60 * 1000) return latestSdkCache;
+  const release = await fetchJson(MIKROSDK_LATEST_API, token);
+  const tag = String(release?.tag_name || '').trim();
+  if (!tag) throw new Error('Latest mikroSDK GitHub release has no tag_name.');
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  const sdkAsset = assets.find((asset) => /^mikrosdk\.7z$/i.test(String(asset?.name || '')));
+  latestSdkCache = { tag, version: tag.replace(/^mikroSDK[-_]?/i, '').replace(/^v/i, ''), assets, sdkUrl: sdkAsset?.browser_download_url || `https://github.com/MikroElektronika/mikrosdk_v2/releases/download/${encodeURIComponent(tag)}/mikrosdk.7z` };
+  latestSdkLoadedAt = Date.now();
+  return latestSdkCache;
+}
+
+function coreInstallRelativePath(metadata) {
+  const location = String(metadata?.install_location || '').replace(/\\\\/g, '/');
+  const marker = '/packages/core/';
+  const index = location.toLowerCase().indexOf(marker);
+  const relative = index >= 0 ? location.slice(index + marker.length) : '';
+  return relative ? `core/${relative}` : `core/${safeName(metadata?.name)}`;
+}
+
+async function corePackageSpec(context, packageName, compilerUid, token) {
+  const items = await loadCoreMetadata(context, token);
+  const metadata = items.find((item) => String(item?.name || '') === String(packageName || ''));
+  if (!metadata) throw new Error(`Core package '${packageName}' is not present in core_packages metadata.`);
+  if (compilerUid && Array.isArray(metadata.compilers) && metadata.compilers.length) {
+    const expected = compilerSupport.coreMetadataCompilerLabel(compilerUid);
+    if (expected) {
+      const compatible = metadata.compilers.some((value) => String(value || '').trim().toLowerCase() === expected.toLowerCase());
+      if (!compatible) {
+        throw new Error(`Core package '${packageName}' metadata does not list ${expected} (${compilerUid}) as a compatible compiler.`);
+      }
+    }
+  }
+  const releaseTag = String(metadata.release_tag || '').trim();
+  if (!releaseTag) throw new Error(`Core package '${packageName}' has no release_tag in metadata.`);
+  return {
+    kind: 'core',
+    name: packageName,
+    version: String(metadata.version || 'current'),
+    displayName: metadata.display_name || packageName,
+    environment: false,
+    compilerUid,
+    installRelativePath: coreInstallRelativePath(metadata),
+    downloadUrl: `https://github.com/MikroElektronika/core_packages/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(packageName)}.7z`,
+    metadata
+  };
+}
+
+
+async function compilerPackageSpec(context, compilerOrGroup, token) {
+  const installerPackage = String(compilerOrGroup?.installerPackage || compilerOrGroup?.packageName || compilerOrGroup?.name || '').trim();
+  if (!installerPackage) throw new Error('Compiler row does not define Compilers.installer_package.');
+  const asset = compilerSupport.compilerAsset(installerPackage);
+  if (!asset?.url) {
+    throw new Error(`No managed compiler download is defined for ${installerPackage} on ${process.platform}/${process.arch}.`);
+  }
+  const compilerUids = Array.isArray(compilerOrGroup?.compilerUids)
+    ? compilerOrGroup.compilerUids
+    : [compilerOrGroup?.uid].filter(Boolean);
+  const displayName = compilerOrGroup?.displayName || compilerOrGroup?.name || installerPackage;
+  const toolchainBinaries = Array.isArray(compilerOrGroup?.binaryPaths)
+    ? compilerOrGroup.binaryPaths
+    : [compilerOrGroup?.cCompiler, compilerOrGroup?.cxxCompiler, compilerOrGroup?.asmCompiler, compilerOrGroup?.gdbPath]
+        .map((value) => String(value || '').trim()).filter(Boolean);
+  return {
+    kind: 'toolchain',
+    name: installerPackage,
+    version: String(asset.version || compilerOrGroup?.version || 'current'),
+    displayName,
+    environment: false,
+    compilerUid: compilerUids.join(', '),
+    compilerUids,
+    toolchainBinaries,
+    installRelativePath: asset.installRelativePath || `compilers/${safeName(installerPackage)}`,
+    downloadUrl: asset.url,
+    detail: compilerOrGroup?.supportedDeviceCount !== undefined
+      ? `${compilerOrGroup.supportedDeviceCount} SDK-supported device mapping(s); ${compilerOrGroup.mappedDeviceCount || compilerOrGroup.supportedDeviceCount || 0} total mapping(s).`
+      : undefined
+  };
+}
+
+async function sdkPackageSpec(token) {
+  const release = await latestMikroSdkRelease(token);
+  return { kind: 'sdk', name: 'mikrosdk', version: 'latest', resolvedVersion: release.version, displayName: `mikroSDK ${release.version}`, environment: true, downloadUrl: release.sdkUrl, installRelativePath: 'sdk/mikrosdk' };
+}
+
+async function bspPackageSpec(kind, item, token) {
+  const release = await latestMikroSdkRelease(token);
+  const name = String(item?.name || '').trim();
+  if (!name) throw new Error('BSP package has no name.');
+  const asset = release.assets.find((candidate) => String(candidate?.name || '').toLowerCase() === `${name}.7z`.toLowerCase());
+  if (!asset?.browser_download_url) throw new Error(`BSP package '${name}.7z' is not present in the latest mikroSDK release (${release.tag}).`);
+  const downloadUrl = asset.browser_download_url;
+  const mcuName = kind === 'bsp-card' ? String(item?.mcuName || '').trim() : '';
+  if (kind === 'bsp-card' && !mcuName) throw new Error(`MCU-card package '${name}' has no MCU_NAME in Devices.sdk_config.`);
+  return {
+    kind,
+    name,
+    version: 'latest',
+    resolvedVersion: release.version,
+    displayName: item.displayName || name,
+    environment: false,
+    downloadUrl,
+    folderName: item.folderName,
+    mcuName: mcuName || undefined,
+    deviceUid: item.deviceUid,
+    boardUid: item.boardUid,
+    detail: mcuName ? `MCU: ${mcuName}` : undefined,
+    // MCU-card packages are installed into an MCU-specific leaf. Multiple MCU
+    // variants can therefore coexist under the same package directory and an
+    // uninstall removes only the selected MCU_NAME payload.
+    installRelativePath: kind === 'bsp-card'
+      ? `${kind}/${safeName(name)}/${safeName(mcuName)}`
+      : `${kind}/${safeName(name)}`
+  };
 }
 
 async function downloadFile(url, destination, progress, token) {
@@ -496,6 +676,31 @@ function verifyChecksum(filePath, checksum) {
   if (actual !== normalized) throw new Error(`SHA-256 verification failed for ${path.basename(filePath)}.`);
 }
 
+function makeManagedToolchainExecutables(root, spec) {
+  if (process.platform === 'win32' || String(spec?.kind || '').toLowerCase() !== 'toolchain' || !root || !fs.existsSync(root)) return;
+  const requested = Array.isArray(spec.toolchainBinaries) ? spec.toolchainBinaries : [];
+  const candidates = new Set();
+  for (const relativeRaw of requested) {
+    const relative = String(relativeRaw || '').replace(/[\\/]+/g, path.sep).replace(/^[/\\]+/, '');
+    if (!relative) continue;
+    const direct = path.join(root, relative);
+    if (fs.existsSync(direct)) candidates.add(direct);
+    const base = path.basename(relative);
+    if (base) {
+      const found = findRecursive(root, (_candidate, name) => name === base, 8);
+      if (found) candidates.add(found);
+    }
+  }
+  // Some compiler package rows (notably mikroC) store only the logical
+  // executable name in c_compiler. If the archive wraps the payload in an
+  // extra directory, the recursive lookup above still finds it.
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) fs.chmodSync(candidate, 0o755);
+    } catch {}
+  }
+}
+
 async function installPackageUnlocked(context, spec, progress, token) {
   const resolved = await resolvePackage(context, spec);
   const paths = getPackagePaths(context);
@@ -510,6 +715,18 @@ async function installPackageUnlocked(context, spec, progress, token) {
     progress?.report({ message: `Installing ${spec.name}...` });
     await extractArchive(archivePath, extractRoot, token);
     let source = normalizedPayloadRoot(extractRoot, spec);
+    if (String(spec.kind || '').toLowerCase() === 'bsp-card') {
+      const cardHeader = findRecursive(source, (_candidate, fileName) => fileName.toLowerCase() === 'mcu_card.h', 10)
+        || findRecursive(extractRoot, (_candidate, fileName) => fileName.toLowerCase() === 'mcu_card.h', 10);
+      if (!cardHeader) throw new Error(`MCU-card BSP '${spec.name}' does not contain mcu_card.h.`);
+      const normalizedCard = path.join(operationRoot, 'normalized-card');
+      fs.rmSync(normalizedCard, { recursive: true, force: true });
+      fs.mkdirSync(normalizedCard, { recursive: true });
+      // Keep any sibling files that belong to this MCU-card payload, but strip
+      // archive wrapper / board/include/mcu_cards directories from the cache.
+      fs.cpSync(path.dirname(cardHeader), normalizedCard, { recursive: true, force: true });
+      source = normalizedCard;
+    }
     if (isCodegripServerSpec(spec)) {
       source = await findCodegripPayloadIncludingNested(extractRoot, operationRoot, token);
       if (!source) {
@@ -529,7 +746,27 @@ async function installPackageUnlocked(context, spec, progress, token) {
       }
     }
     const target = packageTarget(context, spec);
+    if (String(spec.kind || '').toLowerCase() === 'bsp-card') {
+      // Migrate the pre-0.7.3 unscoped cache (<package>/payload...) to the new
+      // <package>/<MCU_NAME>/ layout. Existing 0.7.3 MCU siblings are preserved.
+      const migrationRegistry = readRegistry(context);
+      const legacyKey = legacyPackageKey(spec);
+      const legacy = migrationRegistry.packages.find((item) => item.key === legacyKey);
+      if (legacy) {
+        const packageParent = path.dirname(target);
+        const siblingRoots = migrationRegistry.packages
+          .filter((item) => item.key !== legacyKey && item.kind === spec.kind && item.name === spec.name && item.root)
+          .map((item) => path.resolve(item.root))
+          .filter((root) => path.dirname(root) === path.resolve(packageParent) && fs.existsSync(root));
+        if (!siblingRoots.length && path.resolve(legacy.root || '') === path.resolve(packageParent)) {
+          fs.rmSync(packageParent, { recursive: true, force: true });
+        }
+        migrationRegistry.packages = migrationRegistry.packages.filter((item) => item.key !== legacyKey);
+        writeRegistry(context, migrationRegistry);
+      }
+    }
     await replaceDirectory(source, target);
+    makeManagedToolchainExecutables(target, spec);
     if (isCodegripServerSpec(spec) && !codegripServerInstalled(target)) {
       throw new Error(`Installed CODEGRIP package is incomplete: ${target}.`);
     }
@@ -551,12 +788,17 @@ async function installPackageUnlocked(context, spec, progress, token) {
       displayName: spec.displayName || spec.name,
       kind: spec.kind,
       catalogGroup: spec.catalogGroup || spec.kind,
-      version: resolved.version || spec.version || '',
+      version: spec.resolvedVersion || resolved.version || spec.version || '',
       environment: Boolean(spec.environment),
       root: target,
       sourceUrl: resolved.downloadUrl,
+      folderName: spec.folderName,
+      mcuName: spec.mcuName,
+      deviceUid: spec.deviceUid,
+      boardUid: spec.boardUid,
       installedAt: new Date().toISOString()
     };
+    registry.packages = registry.packages.filter((item) => item.key === key || path.resolve(item.root || '') !== path.resolve(target));
     const index = registry.packages.findIndex((item) => item.key === key);
     if (index >= 0) registry.packages[index] = entry;
     else registry.packages.push(entry);
@@ -569,8 +811,8 @@ async function installPackageUnlocked(context, spec, progress, token) {
 
 async function ensurePackage(context, spec, progress, token) {
   const installed = getInstalledPackage(context, spec);
-  const versionMatches = installed && (!spec.version || !installed.version || installed.version === spec.version);
-  if (versionMatches) {
+  const versionMatches = installed && (!spec.version || spec.version === 'latest' || !installed.version || installed.version === spec.version);
+  if (versionMatches && !spec.alwaysRefresh) {
     // A previously installed CODEGRIP server package may have been extracted
     // by an older generic archive path and therefore miss CodegripGdbServer.
     // Device packs are intentionally not required here; they are managed per
@@ -581,7 +823,7 @@ async function ensurePackage(context, spec, progress, token) {
       // SDK contents may change while retaining the mikroSDK semantic version,
       // and live CODEGRIP catalog entries can redirect a package name/version to
       // a new asset URL. Track source URLs for both cases.
-      const sourceSensitive = String(spec.kind || '').toLowerCase() === 'sdk' || Boolean(spec.downloadUrl);
+      const sourceSensitive = ['sdk','core','bsp-card','bsp-board'].includes(String(spec.kind || '').toLowerCase()) || Boolean(spec.downloadUrl);
       if (!sourceSensitive) return installed;
       const resolved = await resolvePackage(context, spec);
       if (installed.sourceUrl === resolved.downloadUrl) return installed;
@@ -654,6 +896,105 @@ function setupReferences(context, packageEntry) {
   return [...new Set(references)];
 }
 
+function resolvedBspMetadata(context, entry) {
+  if (!/^bsp-(?:card|board)$/i.test(String(entry?.kind || ''))) return entry || {};
+  const result = { ...(entry || {}) };
+  if (result.folderName && (result.kind !== 'bsp-card' || result.mcuName)) return result;
+  try {
+    const db = require('./c_database');
+    const candidates = result.kind === 'bsp-card'
+      ? db.listCardInstallerPackages(context)
+      : db.listBoardInstallerPackages(context);
+    const match = candidates.find((item) => {
+      if (String(item.name || '') !== String(result.name || '')) return false;
+      if (result.deviceUid && item.deviceUid) return String(item.deviceUid) === String(result.deviceUid);
+      if (result.boardUid && item.boardUid) return String(item.boardUid) === String(result.boardUid);
+      return true;
+    });
+    if (match) Object.assign(result, match);
+  } catch {
+    // The database may itself be the package being removed. Registry metadata
+    // is sufficient for packages installed by 0.7.3 and newer.
+  }
+  return result;
+}
+
+function managedSdkBspRoots(context, registry) {
+  const roots = new Set();
+  const sdkEntries = (registry?.packages || []).filter((item) => item.kind === 'sdk' && item.root);
+  sdkEntries.push({ root: path.join(getPackagePaths(context).packages, 'sdk', 'mikrosdk') });
+  for (const sdk of sdkEntries) {
+    for (const candidate of [path.join(sdk.root, 'src', 'bsp'), path.join(sdk.root, 'bsp')]) {
+      if (fs.existsSync(candidate)) roots.add(path.resolve(candidate));
+    }
+  }
+  return [...roots];
+}
+
+function removeEmptyDirectory(directory) {
+  try {
+    if (fs.existsSync(directory) && fs.statSync(directory).isDirectory() && fs.readdirSync(directory).length === 0) fs.rmdirSync(directory);
+  } catch {
+    // Empty-parent cleanup is cosmetic; the actual payload removal is verified.
+  }
+}
+
+function invalidateReferencingSetupArtifacts(context, entry) {
+  const setupRoot = getPackagePaths(context).setups;
+  if (!fs.existsSync(setupRoot)) return;
+  for (const name of fs.readdirSync(setupRoot)) {
+    const directory = path.join(setupRoot, name);
+    const setupPath = path.join(directory, 'setup.json');
+    if (!fs.existsSync(setupPath)) continue;
+    let setup;
+    try {
+      setup = JSON.parse(fs.readFileSync(setupPath, 'utf8'));
+    } catch {
+      // Invalid setup JSON is reported by the normal setup loader.
+      continue;
+    }
+    if (!(setup.packageKeys || []).includes(entry.key)) continue;
+    for (const child of ['build', 'install', 'generated', 'codegrip', 'FileStartup', 'FileLinker']) {
+      fs.rmSync(path.join(directory, child), { recursive: true, force: true });
+    }
+    delete setup.builtAt;
+    delete setup.paths;
+    delete setup.tools;
+    delete setup.sdkDriverPackages;
+    delete setup.codegripRuntime;
+    const temporary = `${setupPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(setup, null, 2)}\n`, 'utf8');
+    fs.renameSync(temporary, setupPath);
+  }
+}
+
+function removeMaterializedPackageArtifacts(context, entry, registry) {
+  const metadata = resolvedBspMetadata(context, entry);
+  if (metadata.kind === 'bsp-board' && metadata.folderName) {
+    for (const bspRoot of managedSdkBspRoots(context, registry)) {
+      fs.rmSync(path.join(bspRoot, 'board', 'include', 'boards', String(metadata.folderName).toLowerCase()), { recursive: true, force: true });
+    }
+  }
+  if (metadata.kind === 'bsp-card' && metadata.folderName) {
+    const folderName = String(metadata.folderName).toLowerCase();
+    const mcuName = String(metadata.mcuName || '').trim();
+    for (const bspRoot of managedSdkBspRoots(context, registry)) {
+      const cardRoot = path.join(bspRoot, 'board', 'include', 'mcu_cards', folderName);
+      if (mcuName) fs.rmSync(path.join(cardRoot, mcuName), { recursive: true, force: true });
+      // 0.7.2 materialized a flat header here. 0.7.3 uses only MCU_NAME
+      // subdirectories, so remove the obsolete file during any card uninstall.
+      fs.rmSync(path.join(cardRoot, 'mcu_card.h'), { force: true });
+      removeEmptyDirectory(cardRoot);
+    }
+  }
+
+  // Every package type can contribute generated files to a setup's build or
+  // install prefix. Keep the setup selection itself, but invalidate/remove its
+  // generated artifacts so an uninstalled package cannot remain usable from a
+  // stale setup cache.
+  invalidateReferencingSetupArtifacts(context, entry);
+}
+
 async function uninstallPackage(context, key) {
   const registry = readRegistry(context);
   const entry = registry.packages.find((item) => item.key === key);
@@ -674,9 +1015,17 @@ async function uninstallPackage(context, key) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(`Refusing to remove a package outside the managed C package root: ${target}`);
   }
+  // Remove copies/materializations first while registry metadata is still
+  // available, then remove the package's managed root itself.
+  removeMaterializedPackageArtifacts(context, entry, registry);
   fs.rmSync(target, { recursive: true, force: true });
+  if (fs.existsSync(target)) {
+    throw new Error(`Package files are still present after uninstall: ${target}`);
+  }
   registry.packages = registry.packages.filter((item) => item.key !== key);
   writeRegistry(context, registry);
+  // Clean empty per-package parents without ever climbing above packages/.
+  removeEmptyDirectory(path.dirname(target));
   return true;
 }
 
@@ -744,11 +1093,9 @@ function infrastructureSpecs() {
 
 function environmentSpecs() {
   return [
-    { kind: 'database', name: 'C_database', version: '0.0.1', displayName: 'C Setup Database', environment: true },
-    { kind: 'core', name: 'C_core', version: '0.0.1', displayName: 'C Core Collection', environment: true },
-    { kind: 'sdk', name: 'mikrosdk', version: '2.19.1', displayName: 'mikroSDK 2.19.1', environment: true },
-    ...infrastructureSpecs(),
-    { kind: 'toolchain', name: 'gcc_arm_compiler', version: '14.2.1-1.1', displayName: 'GCC for ARM', environment: true }
+    { kind: 'database', name: 'C_database', version: 'live', displayName: 'NECTO live database', environment: true, alwaysRefresh: true },
+    { kind: 'sdk', name: 'mikrosdk', version: 'latest', displayName: 'mikroSDK (latest)', environment: true, dynamic: 'sdk' },
+    ...infrastructureSpecs()
   ];
 }
 
@@ -774,81 +1121,192 @@ function installedProgrammerPackages(context) {
     .map((entry) => ({ ...entry, references: setupReferences(context, entry) }));
 }
 
+function managerDescriptor(kind) {
+  if (kind === 'environment') return { title: 'C Development Environment', subtitle: 'Shared C runtime components. MCU cores and BSPs are installed separately and only when needed.' };
+  if (kind === 'compiler') return { title: 'Compiler Packages', subtitle: 'Compiler toolchains from the NECTO Compilers table. Compatibility is determined by CompilerToDevice and per-compiler core package mappings.' };
+  if (kind === 'core') return { title: 'MCU Core Packages', subtitle: 'Per-MCU compiler core packages referenced by Devices.installer_package.' };
+  if (kind === 'card') return { title: 'MCU Card BSP Packages', subtitle: 'MCU-card BSP packages referenced by Devices.installer_package.' };
+  if (kind === 'board') return { title: 'Board BSP Packages', subtitle: 'Board BSP packages referenced by Boards.installer_package.' };
+  if (kind === 'codegrip') return { title: 'CODEGRIP Packages', subtitle: 'Installed CODEGRIP GDB server and MCU-specific device packs used by C or Rust setups.' };
+  return { title: 'Programmer Packages', subtitle: 'Programmer support packages referenced by the database.' };
+}
+
 function cManagerHtml(kind) {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const isEnvironment = kind === 'environment';
-  const title = isEnvironment ? 'C Development Environment' : 'Installed Programmer Packages';
-  const subtitle = isEnvironment
-    ? 'Extension-managed packages used by C setup creation and project builds.'
-    : 'Programmer/debugger packages installed by C setups, including CODEGRIP server and MCU device packs.';
+  const env = kind === 'environment';
+  const descriptor = managerDescriptor(kind);
+  const managerButtons = env
+    ? '<button data-manager="compiler" class="secondary">Compiler packages</button><button data-manager="programmers" class="secondary">Programmers</button><button data-manager="codegrip" class="secondary">CODEGRIP packages</button><button data-manager="core" class="secondary">Core packages</button><button data-manager="card" class="secondary">MCU card packages</button><button data-manager="board" class="secondary">Board packages</button>'
+    : '<button id="back" class="secondary">Back</button>';
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<title>${title}</title><style>
-body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1050px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.55;cursor:default}.summary{display:flex;gap:14px;margin-top:20px}.summary span{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.grid{display:grid;gap:12px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}
-</style></head><body><header><div><h1>${title}</h1><p class="muted">${subtitle}</p></div><div class="actions">${isEnvironment ? '<button id="installAll">Install all</button><button id="programmers" class="secondary">Installed programmer packages</button>' : '<button id="back" class="secondary">Back</button>'}<button id="refresh" class="secondary">Refresh</button></div></header>${isEnvironment ? '<section class="summary"><span id="installedCount">0 installed</span><span id="missingCount">0 missing</span></section>' : ''}<main id="packages" class="grid"></main>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const env=${isEnvironment ? 'true' : 'false'};
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function render(items){if(env){const installed=items.filter(x=>x.status==='installed').length;document.getElementById('installedCount').textContent=installed+' installed';document.getElementById('missingCount').textContent=(items.length-installed)+' missing';}if(!items.length){root.innerHTML='<div class="empty">'+(env?'No environment packages are defined.':'No programmer packages are installed.')+'</div>';return;}root.innerHTML=items.map(p=>{const status=p.status||'installed';const refs=(p.references||[]);return '<article class="card '+esc(status)+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'version not reported')+'</span><span>'+esc(status)+'</span></div><p><code>'+esc(p.root||'')+'</code></p>'+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+(status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':(env?'<button data-install="'+esc(p.key)+'">Install</button>':''))+'</div></article>';}).join('');}
-root.onclick=e=>{const uninstall=e.target?.dataset?.uninstall;if(uninstall){vscode.postMessage({type:'uninstall',key:uninstall});return;}const install=e.target?.dataset?.install;if(install)vscode.postMessage({type:'install',key:install});};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${isEnvironment ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.getElementById('programmers').onclick=()=>vscode.postMessage({type:'programmers'});" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state')render(e.data.items||[]);});vscode.postMessage({type:'ready'});</script></body></html>`;
+<title>${descriptor.title}</title><style>
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}
+</style></head><body><header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section><input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const installedChip=document.getElementById('installedCount');let all=[];let installedOnly=false;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function isInstalled(p){return p.status==='installed'||p.status==='update';}function render(){const q=document.getElementById('search').value.toLowerCase();const installed=all.filter(isInstalled).length;const items=all.filter(x=>(!installedOnly||isInstalled(x))&&JSON.stringify(x).toLowerCase().includes(q));installedChip.textContent=installedOnly?installed+' installed · showing only':installed+' installed';installedChip.classList.toggle('active',installedOnly);installedChip.setAttribute('aria-pressed',String(installedOnly));document.getElementById('missingCount').textContent=(all.length-installed)+' not installed';if(!items.length){root.innerHTML='<div class="empty">'+(installedOnly?'No installed packages match this filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const refs=p.references||[];const action=p.unavailable?'<button disabled>Unavailable</button>':(p.external?'<button data-open="'+esc(p.externalUrl||'')+'">Open download page</button>':(p.status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'));return '<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'')+'</span><span>'+esc(p.status||'missing')+'</span>'+(p.compilerUid?'<span>'+esc(p.compilerUid)+'</span>':'')+'</div><p><code>'+esc(p.root||p.installRelativePath||'')+'</code></p>'+(p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'')+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+action+'</div></article>';}).join('');}root.onclick=e=>{const u=e.target?.dataset?.uninstall;if(u){vscode.postMessage({type:'uninstall',key:u});return;}const i=e.target?.dataset?.install;if(i){vscode.postMessage({type:'install',key:i});return;}const o=e.target?.dataset?.open;if(o)vscode.postMessage({type:'openExternal',url:o});const m=e.target?.dataset?.manager;if(m)vscode.postMessage({type:'manager',manager:m});};document.getElementById('search').oninput=render;installedChip.onclick=()=>{installedOnly=!installedOnly;render();};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${env ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.querySelectorAll('[data-manager]').forEach(x=>x.onclick=()=>vscode.postMessage({type:'manager',manager:x.dataset.manager}));" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
-function postEnvironmentState(context) {
+function packageStateFromSpecs(context, specs) {
+  const installedAll = listInstalledPackages(context, true);
+  return specs.map((spec) => {
+    const exact = getInstalledPackage(context, spec);
+    const same = installedAll.find((item) => {
+      if (item.kind !== spec.kind || item.name !== spec.name) return false;
+      if (String(spec.kind || '').toLowerCase() !== 'bsp-card') return true;
+      const installedMcu = String(item.mcuName || '').trim();
+      const requestedMcu = String(spec.mcuName || '').trim();
+      // Legacy 0.7.2 entries have no mcuName and should be offered as an
+      // update/migration. 0.7.3 scoped entries only match their own MCU.
+      return !installedMcu || installedMcu === requestedMcu;
+    });
+    const resolvedChanged = Boolean(exact && spec.resolvedVersion && exact.version && String(exact.version) !== String(spec.resolvedVersion));
+    const sourceChanged = Boolean(exact && spec.downloadUrl && exact.sourceUrl && String(exact.sourceUrl) !== String(spec.downloadUrl));
+    const status = exact ? ((spec.alwaysRefresh || resolvedChanged || sourceChanged) ? 'update' : 'installed') : (same ? 'update' : 'missing');
+    return { ...spec, key: packageKey(spec), status, root: exact?.root || same?.root || packageTarget(context, spec), sourceUrl: exact?.sourceUrl || same?.sourceUrl || spec.downloadUrl || '', references: same ? setupReferences(context, same) : [] };
+  });
+}
+
+async function availableManagerSpecs(context, kind, token) {
+  const db = require('./c_database');
+  if (kind === 'environment') {
+    const result = [];
+    for (const spec of environmentSpecs()) result.push(spec.dynamic === 'sdk' ? await sdkPackageSpec(token) : spec);
+    return result;
+  }
+  if (kind === 'compiler') {
+    const result = [];
+    for (const item of db.listCompilerInstallerPackages(context)) {
+      try { result.push(await compilerPackageSpec(context, item, token)); }
+      catch (error) {
+        result.push({ kind:'toolchain', name:item.name, version:item.databaseVersions?.[0] || 'unavailable', displayName:item.displayName || item.name, unavailable:true, detail:error.message, compilerUid:(item.compilerUids || []).join(', ') });
+      }
+    }
+    return result;
+  }
+  if (kind === 'core') {
+    const requirements = db.listCoreInstallerPackages(context);
+    const unique = new Map();
+    for (const item of requirements) {
+      if (unique.has(item.name)) continue;
+      try { unique.set(item.name, await corePackageSpec(context, item.name, item.compilerUid, token)); }
+      catch (error) { unique.set(item.name, { kind:'core', name:item.name, version:'unresolved', displayName:item.name, unavailable:true, external:true, detail:error.message }); }
+    }
+    return [...unique.values()];
+  }
+  if (kind === 'card') {
+    const unique = new Map();
+    for (const item of db.listCardInstallerPackages(context)) {
+      const identity = `${item.name}:${item.mcuName || item.deviceUid || ''}`;
+      if (unique.has(identity)) continue;
+      try { unique.set(identity, await bspPackageSpec('bsp-card', item, token)); }
+      catch (error) { unique.set(identity, { kind:'bsp-card', name:item.name, version:'unavailable', displayName:item.displayName || item.name, unavailable:true, detail:error.message, folderName:item.folderName, mcuName:item.mcuName, deviceUid:item.deviceUid }); }
+    }
+    return [...unique.values()];
+  }
+  if (kind === 'board') {
+    const unique = new Map();
+    for (const item of db.listBoardInstallerPackages(context)) {
+      if (unique.has(item.name)) continue;
+      try { unique.set(item.name, await bspPackageSpec('bsp-board', item, token)); }
+      catch (error) { unique.set(item.name, { kind:'bsp-board', name:item.name, version:'unavailable', displayName:item.displayName || item.name, unavailable:true, detail:error.message, folderName:item.folderName }); }
+    }
+    return [...unique.values()];
+  }
+  if (kind === 'codegrip') {
+    return listInstalledPackages(context, true)
+      .filter((entry) => entry.kind === 'programmer-pack' || (entry.kind === 'programmer' && entry.name === 'codegrip_gdb_server'))
+      .map((entry) => ({
+        kind: entry.kind,
+        name: entry.name,
+        version: entry.version || '',
+        displayName: entry.displayName || (entry.kind === 'programmer-pack' ? `CODEGRIP MCU pack: ${entry.name}` : 'CODEGRIP Suite'),
+        detail: entry.kind === 'programmer-pack' ? 'MCU-specific CODEGRIP device pack installed on demand.' : 'CODEGRIP GDB server.'
+      }));
+  }
+  return db.listProgrammerInstallerPackages(context).map((item) => {
+    const packageName = String(item.installerPackage || '').trim();
+    if (item.uid === 'segger_jlink' && !packageName) return { kind:'programmer', name:'segger_jlink', version:'external', displayName:item.name, external:true, externalUrl:'https://www.segger.com/downloads/jlink/', detail:item.description };
+    if (!packageName) return { kind:'programmer', name:item.uid, version:'external', displayName:item.name, external:true, detail:item.description || 'No installer package is defined in the database.' };
+    if (item.uid === 'codegrip') return { kind:'programmer', name:'codegrip_gdb_server', version:'1.7.0', displayName:item.name, environment:false };
+    return { kind:'programmer', name:packageName, version:'general_packages_assets', displayName:item.name, environment:false, downloadUrl:`https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/${encodeURIComponent(packageName)}.7z`, detail:item.description };
+  });
+}
+
+async function postManagerState(context, kind, panel) {
+  if (!panel) return;
+  const specs = await availableManagerSpecs(context, kind, undefined);
+  const items = packageStateFromSpecs(context, specs).map((item) => {
+    return item;
+  });
+  void panel.webview.postMessage({ type:'state', items });
+}
+
+async function installManagerPackage(context, kind, key) {
+  await vscode.window.withProgress({ location:vscode.ProgressLocation.Notification, title:'Installing C package', cancellable:true }, async (progress, token) => {
+    const specs = await availableManagerSpecs(context, kind, token);
+    const spec = specs.find((item) => packageKey(item) === key);
+    if (!spec) throw new Error(`Package '${key}' is no longer available.`);
+    if (spec.external || spec.unavailable) throw new Error(`${spec.displayName || spec.name} is externally installed and cannot be downloaded by the extension.`);
+    await ensurePackage(context, spec, progress, token);
+  });
+}
+
+async function showEnvironmentPackageView(context, kind = 'environment') {
   if (!environmentPanel) return;
-  void environmentPanel.webview.postMessage({ type: 'state', items: environmentPackageState(context) });
+  environmentViewKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
+    ? kind
+    : 'environment';
+  const descriptor = managerDescriptor(environmentViewKind);
+  environmentPanel.title = `MikroBUS C: ${descriptor.title}`;
+  environmentPanel.webview.html = cManagerHtml(environmentViewKind);
 }
 
-function postProgrammerState(context) {
-  if (!programmerPanel) return;
-  void programmerPanel.webview.postMessage({ type: 'state', items: installedProgrammerPackages(context) });
-}
-
-async function installEnvironmentPackage(context, key) {
-  const spec = environmentSpecs().find((item) => packageKey(item) === key);
-  if (!spec) throw new Error(`Unknown C environment package '${key}'.`);
-  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing ${spec.displayName || spec.name}`, cancellable: true },
-    (progress, token) => ensurePackage(context, spec, progress, token));
+async function openPackageManager(context, kind) {
+  return openEnvironmentPackages(context, kind);
 }
 
 async function installAllEnvironmentPackages(context) {
-  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing MikroBUS C development environment', cancellable: true },
-    (progress, token) => ensurePackages(context, environmentSpecs(), progress, token));
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing MikroBUS C development environment', cancellable: true }, async (progress, token) => {
+    const specs = [];
+    for (const spec of environmentSpecs()) specs.push(spec.dynamic === 'sdk' ? await sdkPackageSpec(token) : spec);
+    await ensurePackages(context, specs, progress, token);
+  });
 }
 
-async function openProgrammerPackages(context) {
-  if (programmerPanel) { programmerPanel.reveal(vscode.ViewColumn.Active); postProgrammerState(context); return; }
-  programmerPanel = vscode.window.createWebviewPanel('mikrobusC.programmerPackages', 'MikroBUS C: Installed Programmer Packages', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
-  programmerPanel.webview.html = cManagerHtml('programmers');
-  programmerPanel.webview.onDidReceiveMessage(async (message) => {
-    try {
-      if (message?.type === 'ready' || message?.type === 'refresh') postProgrammerState(context);
-      if (message?.type === 'back') {
-        const current = programmerPanel;
-        if (current) current.dispose();
-        await openEnvironmentPackages(context);
-        return;
-      }
-      if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) postProgrammerState(context); }
-    } catch (error) { vscode.window.showErrorMessage(`MikroBUS C programmer packages: ${error.message || error}`); }
-  }, null, context.subscriptions);
-  programmerPanel.onDidDispose(() => { programmerPanel = undefined; }, null, context.subscriptions);
-  postProgrammerState(context);
-}
+async function openCompilerPackages(context){return openPackageManager(context,'compiler');}
+async function openProgrammerPackages(context){return openPackageManager(context,'programmers');}
+async function openCodegripPackages(context){return openPackageManager(context,'codegrip');}
+async function openCorePackages(context){return openPackageManager(context,'core');}
+async function openCardPackages(context){return openPackageManager(context,'card');}
+async function openBoardPackages(context){return openPackageManager(context,'board');}
 
-async function openEnvironmentPackages(context) {
-  if (environmentPanel) { environmentPanel.reveal(vscode.ViewColumn.Active); postEnvironmentState(context); return; }
-  environmentPanel = vscode.window.createWebviewPanel('mikrobusC.environmentPackages', 'MikroBUS C: Development Environment', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
-  environmentPanel.webview.html = cManagerHtml('environment');
-  environmentPanel.webview.onDidReceiveMessage(async (message) => {
-    try {
-      if (message?.type === 'ready' || message?.type === 'refresh') postEnvironmentState(context);
-      if (message?.type === 'installAll') { await installAllEnvironmentPackages(context); postEnvironmentState(context); }
-      if (message?.type === 'install' && typeof message.key === 'string') { await installEnvironmentPackage(context, message.key); postEnvironmentState(context); }
-      if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) postEnvironmentState(context); }
-      if (message?.type === 'programmers') await openProgrammerPackages(context);
-    } catch (error) { vscode.window.showErrorMessage(`MikroBUS C environment: ${error.message || error}`); }
-  }, null, context.subscriptions);
-  environmentPanel.onDidDispose(() => { environmentPanel = undefined; }, null, context.subscriptions);
-  postEnvironmentState(context);
+async function openEnvironmentPackages(context, initialKind = 'environment') {
+  if (environmentPanel) {
+    environmentPanel.reveal(vscode.ViewColumn.Active);
+    await showEnvironmentPackageView(context, initialKind);
+    return;
+  }
+  environmentPanel=vscode.window.createWebviewPanel('mikrobusC.environmentPackages','MikroBUS C: Development Environment',vscode.ViewColumn.Active,{enableScripts:true,retainContextWhenHidden:true});
+  environmentPanel.webview.onDidReceiveMessage(async(message)=>{try{
+    const activeKind = environmentViewKind;
+    if(message?.type==='ready'||message?.type==='refresh')await postManagerState(context,activeKind,environmentPanel);
+    if(message?.type==='installAll'){
+      await installAllEnvironmentPackages(context);
+      await postManagerState(context,activeKind,environmentPanel);
+    }
+    if(message?.type==='install'&&typeof message.key==='string'){
+      await installManagerPackage(context,activeKind,message.key);
+      await postManagerState(context,activeKind,environmentPanel);
+    }
+    if(message?.type==='uninstall'&&typeof message.key==='string'){
+      if(await uninstallPackage(context,message.key))await postManagerState(context,activeKind,environmentPanel);
+    }
+    if(message?.type==='openExternal'&&message.url)await vscode.env.openExternal(vscode.Uri.parse(message.url));
+    if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager);
+    if(message?.type==='back')await showEnvironmentPackageView(context,'environment');
+  }catch(error){vscode.window.showErrorMessage(`MikroBUS C ${environmentViewKind} packages: ${error.message||error}`);}},null,context.subscriptions);
+  environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';},null,context.subscriptions);
+  await showEnvironmentPackageView(context, initialKind);
 }
 
 module.exports = {
@@ -862,7 +1320,12 @@ module.exports = {
   ensurePackages,
   openInstalledPackages,
   openEnvironmentPackages,
+  openCompilerPackages,
   openProgrammerPackages,
+  openCodegripPackages,
+  openCorePackages,
+  openCardPackages,
+  openBoardPackages,
   uninstallPackage,
   infrastructureSpecs,
   environmentSpecs,
@@ -870,6 +1333,12 @@ module.exports = {
   installedProgrammerPackages,
   installAllEnvironmentPackages,
   findOnPath,
+  loadCoreMetadata,
+  latestMikroSdkRelease,
+  corePackageSpec,
+  compilerPackageSpec,
+  sdkPackageSpec,
+  bspPackageSpec,
   _test: {
     safeName,
     archiveNameFromUrl,
@@ -882,6 +1351,13 @@ module.exports = {
     collectNestedArchives,
     inferCodegripPayloadRootFromExecutable,
     findExistingCodegripPayloadRoot,
-    environmentSpecs
+    environmentSpecs,
+    jsonAcceptHeader,
+    findRecursive,
+    makeManagedToolchainExecutables,
+    resolvedBspMetadata,
+    managedSdkBspRoots,
+    removeMaterializedPackageArtifacts,
+    invalidateReferencingSetupArtifacts
   }
 };

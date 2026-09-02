@@ -18,7 +18,7 @@ const vscodeMock = {
     getConfiguration() { return { get(_key, fallback) { return fallback; } }; }
   },
   commands: { executeCommand() { return Promise.resolve(); } },
-  ProgressLocation: { Notification: 15 }
+  ProgressLocation: { Notification: 15, Window: 10 }
 };
 
 const originalLoad = Module._load;
@@ -29,12 +29,50 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 try {
   const setup = require('../c_setup')._test;
-  const database = require('../c_database')._test;
+  const databaseModule = require('../c_database');
+  const database = databaseModule._test;
   const catalog = require('../c_package_catalog')._test;
-  const packageManager = require('../c_package_manager')._test;
+  const packageManagerModule = require('../c_package_manager');
+  const packageManager = packageManagerModule._test;
+  const compilerSupport = require('../c_compiler_support');
   const codegrip = require('../codegrip_backend')._test;
   const codegripCatalog = require('../c_codegrip_catalog');
   const rustMcu = require('../mcu_configurator')._test;
+  const cConfigurator = require('../c_configurator')._test;
+
+  // config_registers settings_array fields must be materialized into real
+  // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
+  const pllDefinition = {
+    config_registers: [{
+      key: 'RCC_PLLCFGR', address: '40023804', fields: [{
+        hidden: false, key: 'PLLN', label: 'PLL multiplication factor',
+        init: '00006C00', mask: '00007FC0',
+        settings_array: { decrease: false, disabled_when_zero: false, inverted: false, min_value: '50', max_value: '432' }
+      }]
+    }]
+  };
+  const serializedPll = cConfigurator.serializeDefinition(pllDefinition);
+  const pllOptions = serializedPll[0].fields[0].settings;
+  assert.strictEqual(pllOptions.length, 383);
+  assert.strictEqual(pllOptions[0].value, '00000C80'); // 50 << 6
+  assert.strictEqual(pllOptions[pllOptions.length - 1].value, '00006C00'); // 432 << 6
+  assert.strictEqual(cConfigurator.maskShift('00007FC0'), 6);
+
+  const pllRegister = {
+    default: '00000000',
+    key: 'RCC_PLLCFGR',
+    fields: [
+      { key: 'PLLM', mask: '0000003F', init: '00000010' },
+      { key: 'PLLN', mask: '00007FC0', init: '00006C00' },
+      { key: 'PLLP', mask: '00030000', init: '00000000' },
+      { key: 'PLLSRC', mask: '00400000', init: '00000000' },
+      { key: 'PLLQ', mask: '0F000000', init: '09000000' }
+    ]
+  };
+  assert.strictEqual(setup.defaultRegisterValue(pllRegister, {}), 0x09006C10);
+  // Existing 0.7.4 setups contain an empty PLLN override because the UI had an
+  // empty select. Empty overrides must now fall back to the MCU JSON init value.
+  assert.strictEqual(setup.defaultRegisterValue(pllRegister, { 'RCC_PLLCFGR.PLLN': '' }), 0x09006C10);
 
   assert.strictEqual(rustMcu.normalizeJlinkDeviceName('R7FA6M4AF3CFB'), 'R7FA6M4AF');
   assert.strictEqual(rustMcu.normalizeJlinkDeviceName('STM32F412ZG'), 'STM32F412ZG');
@@ -94,6 +132,121 @@ try {
   });
 
   assert.strictEqual(setup.safeId('STM32F4 Full SDK'), 'stm32f4-full-sdk');
+  const cardMetadata = {
+    device: { uid: 'MCU_CARD_FOR_STM32_STM32F756ZG', mcuName: 'STM32F756ZG', flash: 1048576, ram: 327680 },
+    sdkConfig: { MCU_NAME: 'STM32F756ZG', CORE_NAME: 'M7', _MSDK_MCU_CARD_NAME_: 'MCU_CARD_FOR_STM32' }
+  };
+  assert.strictEqual(setup.metadataMcuName(cardMetadata), 'STM32F756ZG');
+  assert.strictEqual(setup.setupMcuName({ metadata: cardMetadata }), 'STM32F756ZG');
+
+  // Board BSP packages can be packed either as include/boards/<board> or as
+  // board/include/boards/<board>. Both must materialize into the canonical
+  // mikroSDK bsp/board/include/boards/<board> location.
+  const bspMaterializeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-bsp-board-'));
+  try {
+    const bspRoot = path.join(bspMaterializeRoot, 'sdk', 'bsp');
+    const legacyRoot = path.join(bspMaterializeRoot, 'legacy-package');
+    const legacyBoard = path.join(legacyRoot, 'include', 'boards', 'board_uni_ds_v8');
+    fs.mkdirSync(path.join(legacyBoard, 'extras'), { recursive: true });
+    fs.writeFileSync(path.join(legacyBoard, 'board.h'), '// board');
+    fs.writeFileSync(path.join(legacyBoard, 'board.cmake'), '# board');
+    fs.writeFileSync(path.join(legacyBoard, 'extras', 'pins.h'), '// pins');
+    const destination = setup.materializeBoardBspPackage(bspRoot, legacyRoot, 'board_uni_ds_v8', 'uni_ds_v8');
+    assert.strictEqual(destination, path.join(bspRoot, 'board', 'include', 'boards', 'board_uni_ds_v8'));
+    assert.ok(fs.existsSync(path.join(destination, 'board.h')));
+    assert.ok(fs.existsSync(path.join(destination, 'board.cmake')));
+    assert.ok(fs.existsSync(path.join(destination, 'extras', 'pins.h')));
+    assert.strictEqual(fs.existsSync(path.join(bspRoot, 'include', 'boards', 'board_uni_ds_v8')), false);
+
+    const modernRoot = path.join(bspMaterializeRoot, 'modern-package');
+    const modernBoard = path.join(modernRoot, 'board', 'include', 'boards', 'board_uni_ds_v8');
+    fs.mkdirSync(modernBoard, { recursive: true });
+    fs.writeFileSync(path.join(modernBoard, 'board.h'), '// modern board');
+    fs.writeFileSync(path.join(modernBoard, 'board.cmake'), '# modern board');
+    setup.materializeBoardBspPackage(bspRoot, modernRoot, 'board_uni_ds_v8', 'uni_ds_v8');
+    assert.strictEqual(fs.readFileSync(path.join(destination, 'board.h'), 'utf8'), '// modern board');
+  } finally {
+    fs.rmSync(bspMaterializeRoot, { recursive: true, force: true });
+  }
+
+  // MCU-card BSPs must be materialized under the MCU_NAME directory, matching
+  // the path mikroSDK's board CMakeLists resolves at configure time.
+  const cardBspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-bsp-card-'));
+  try {
+    const bspRoot = path.join(cardBspRoot, 'sdk', 'bsp');
+    const packageRoot = path.join(cardBspRoot, 'package');
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'mcu_card.h'), '// stm32f756zg card');
+    const legacyCardRoot = path.join(bspRoot, 'board', 'include', 'mcu_cards', 'mcu_card_for_stm32');
+    fs.mkdirSync(legacyCardRoot, { recursive: true });
+    fs.writeFileSync(path.join(legacyCardRoot, 'mcu_card.h'), '// legacy flat header');
+    const destination = setup.materializeMcuCardBspPackage(
+      bspRoot,
+      packageRoot,
+      'mcu_card_for_stm32',
+      'STM32F756ZG',
+      'mcu_card_for_stm32_stm32f756zg'
+    );
+    assert.strictEqual(destination, path.join(legacyCardRoot, 'STM32F756ZG'));
+    assert.strictEqual(fs.readFileSync(path.join(destination, 'mcu_card.h'), 'utf8'), '// stm32f756zg card');
+    assert.strictEqual(fs.existsSync(path.join(legacyCardRoot, 'mcu_card.h')), false);
+  } finally {
+    fs.rmSync(cardBspRoot, { recursive: true, force: true });
+  }
+
+  // Package cache identity/path is MCU-specific so two variants of one card
+  // package can coexist and uninstall can delete only one MCU_NAME leaf.
+  const packageLayoutRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-package-layout-'));
+  try {
+    const context = { globalStorageUri: { fsPath: packageLayoutRoot } };
+    const cardSpec = {
+      kind: 'bsp-card',
+      name: 'mcu_card_for_stm32',
+      version: 'latest',
+      mcuName: 'STM32F756ZG',
+      installRelativePath: 'bsp-card/mcu_card_for_stm32/STM32F756ZG'
+    };
+    assert.strictEqual(packageManagerModule.packageKey(cardSpec), 'bsp-card:mcu_card_for_stm32#STM32F756ZG@latest');
+    assert.strictEqual(
+      packageManagerModule.packageTarget(context, cardSpec),
+      path.join(packageLayoutRoot, 'c-runtime', 'packages', 'bsp-card', 'mcu_card_for_stm32', 'STM32F756ZG')
+    );
+  } finally {
+    fs.rmSync(packageLayoutRoot, { recursive: true, force: true });
+  }
+
+  // Uninstall cleanup removes the selected MCU-card's materialized SDK copy,
+  // preserves sibling MCUs, and removes the legacy flat 0.7.2 header.
+  const uninstallArtifactsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-uninstall-artifacts-'));
+  try {
+    const context = { globalStorageUri: { fsPath: uninstallArtifactsRoot } };
+    const sdkRoot = path.join(uninstallArtifactsRoot, 'c-runtime', 'packages', 'sdk', 'mikrosdk');
+    const cardRoot = path.join(sdkRoot, 'src', 'bsp', 'board', 'include', 'mcu_cards', 'mcu_card_for_stm32');
+    const selectedRoot = path.join(cardRoot, 'STM32F756ZG');
+    const siblingRoot = path.join(cardRoot, 'STM32F407ZG');
+    fs.mkdirSync(selectedRoot, { recursive: true });
+    fs.mkdirSync(siblingRoot, { recursive: true });
+    fs.writeFileSync(path.join(selectedRoot, 'mcu_card.h'), '// selected');
+    fs.writeFileSync(path.join(siblingRoot, 'mcu_card.h'), '// sibling');
+    fs.writeFileSync(path.join(cardRoot, 'mcu_card.h'), '// legacy');
+    const registry = { packages: [{ kind: 'sdk', name: 'mikrosdk', root: sdkRoot }] };
+    packageManager.removeMaterializedPackageArtifacts(context, {
+      key: 'bsp-card:mcu_card_for_stm32#STM32F756ZG@latest',
+      kind: 'bsp-card',
+      name: 'mcu_card_for_stm32',
+      folderName: 'mcu_card_for_stm32',
+      mcuName: 'STM32F756ZG'
+    }, registry);
+    assert.strictEqual(fs.existsSync(selectedRoot), false);
+    assert.strictEqual(fs.existsSync(path.join(cardRoot, 'mcu_card.h')), false);
+    assert.strictEqual(fs.existsSync(path.join(siblingRoot, 'mcu_card.h')), true);
+  } finally {
+    fs.rmSync(uninstallArtifactsRoot, { recursive: true, force: true });
+  }
+
+  const cardCmake = setup.completeSdkCmakeVariables(cardMetadata);
+  assert.strictEqual(cardCmake.MCU_NAME, 'STM32F756ZG');
+  assert.strictEqual(cardCmake._MSDK_MCU_CARD_NAME_, 'MCU_CARD_FOR_STM32');
   assert.deepStrictEqual(setup.splitFlags('-mcpu=cortex-m4 "-DVALUE=hello world"'), ['-mcpu=cortex-m4', '-DVALUE=hello world']);
   assert.deepStrictEqual(setup.armArchitectureFlags('M4EF', 'STM32F446RE'), ['-mcpu=cortex-m4', '-mthumb', '-mfloat-abi=hard', '-mfpu=fpv4-sp-d16']);
   assert.strictEqual(setup.defaultRegisterValue({
@@ -107,6 +260,58 @@ try {
     fields: [{ key: 'SW', mask: '00000003', init: '00000000' }]
   }, { 'RCC_CFGR.SW': '00000002' }), 0x2);
   assert.strictEqual(setup.registerFieldId({ key: 'RCC_CFGR' }, { key: 'SW' }), 'RCC_CFGR.SW');
+
+  // Compiler availability requires both CompilerToDevice and a matching
+  // compiler-specific core package in Devices.installer_package. Socket/card
+  // rows resolve the core package through their sdk_config.MCU_NAME device.
+  const compilerDbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-c-compiler-db-'));
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const dbPath = path.join(compilerDbRoot, 'c-runtime', 'packages', 'database', 'C_database', 'live', 'necto_db.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE Devices(uid TEXT PRIMARY KEY, name TEXT, sdk_config TEXT, installer_package TEXT, sdk_support INTEGER);
+      CREATE TABLE Compilers(uid TEXT PRIMARY KEY, name TEXT, version TEXT, vendor TEXT, language TEXT, path TEXT, default_options TEXT, c_compiler TEXT, cxx_compiler TEXT, gdb_path TEXT, asm_compiler TEXT, clangd_config TEXT, core_path TEXT, installer_package TEXT, sdk_config TEXT);
+      CREATE TABLE CompilerToDevice(device_uid TEXT, compiler_uid TEXT);
+      CREATE TABLE CompilerToBuildSystem(compiler_uid TEXT, build_system_uid TEXT);
+      CREATE TABLE SDKs(uid TEXT PRIMARY KEY, name TEXT, version TEXT);
+      CREATE TABLE Programmers(uid TEXT PRIMARY KEY, name TEXT, installer_package TEXT);
+      CREATE TABLE ProgrammerToDevice(programer_uid TEXT, device_uid TEXT, device_support_package TEXT);
+      INSERT INTO Devices VALUES ('STM32F756ZG','STM32F756ZG','{"MCU_NAME":"STM32F756ZG"}','{"gcc_arm_none_eabi":"arm_gcc_clang_stm32f7x","clang-llvm":"arm_gcc_clang_stm32f7x"}',1);
+      INSERT INTO Devices VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','MCU CARD','{"MCU_NAME":"STM32F756ZG","_MSDK_MCU_CARD_NAME_":"MCU_CARD_FOR_STM32"}','{"package":"mcu_card_for_stm32_stm32f756zg"}',1);
+      INSERT INTO Compilers VALUES ('gcc_arm_none_eabi','GCC for ARM','14.2','GNU','C','gcc/arm','{}','bin/arm-none-eabi-gcc','bin/arm-none-eabi-g++','bin/arm-none-eabi-gdb','bin/arm-none-eabi-as','','ARM/gcc_clang','gcc_arm_compiler','');
+      INSERT INTO Compilers VALUES ('clang-llvm','Clang for ARM','18.0','LLVM','C, C++','clang','{}','bin/clang','bin/clang','bin/lldb-mi','bin/llvm-as','','ARM/gcc_clang','llvm_clang_compiler','');
+      INSERT INTO Compilers VALUES ('mikrocarm','mikroC AI for ARM','3.0','MIKROE','mikroC','mikroc/arm','{}','mikroCARM','','','','','ARM/mikroC','mikroc_arm','');
+      INSERT INTO CompilerToBuildSystem VALUES ('gcc_arm_none_eabi','cmake');
+      INSERT INTO CompilerToBuildSystem VALUES ('clang-llvm','cmake');
+      INSERT INTO CompilerToBuildSystem VALUES ('mikrocarm','cmake');
+      INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','gcc_arm_none_eabi');
+      INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','clang-llvm');
+      INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','mikrocarm');
+      INSERT INTO SDKs VALUES ('mikrosdk','mikroSDK','2.0');
+      INSERT INTO Programmers VALUES ('codegrip','CODEGRIP','codegrip_gdb_server');
+      INSERT INTO ProgrammerToDevice VALUES ('codegrip','MCU_CARD_FOR_STM32_STM32F756ZG','');
+    `);
+    db.close();
+    const context = { globalStorageUri: { fsPath: compilerDbRoot } };
+    const mapped = databaseModule.listCompilers(context, 'MCU_CARD_FOR_STM32_STM32F756ZG', compilerSupport.supportedCompilerUids());
+    assert.deepStrictEqual(mapped.map((item) => item.uid).sort(), ['clang-llvm', 'gcc_arm_none_eabi']);
+    assert.ok(mapped.every((item) => item.corePackageName === 'arm_gcc_clang_stm32f7x'));
+
+    const setupMetadata = databaseModule.getSetupMetadata(context, {
+      deviceUid: 'MCU_CARD_FOR_STM32_STM32F756ZG',
+      compilerUid: 'gcc_arm_none_eabi',
+      sdkUid: 'mikrosdk',
+      programmerUid: 'codegrip'
+    });
+    assert.strictEqual(setupMetadata.device.mcuName, 'STM32F756ZG');
+    assert.strictEqual(setupMetadata.packageRequirements.card.name, 'mcu_card_for_stm32_stm32f756zg');
+    assert.strictEqual(setupMetadata.packageRequirements.card.folderName, 'mcu_card_for_stm32');
+    assert.strictEqual(setupMetadata.packageRequirements.card.mcuName, 'STM32F756ZG');
+  } finally {
+    fs.rmSync(compilerDbRoot, { recursive: true, force: true });
+  }
 
   const codegripDebugConfig = setup.codegripCppDebugConfiguration({
     name: 'RA6M4 CODEGRIP',
@@ -137,6 +342,143 @@ try {
   assert.ok(eraseScript.includes('\nerase\n'));
   assert.strictEqual(eraseScript.includes('loadfile'), false);
 
+  // BoardToCard now drives board MCU selection through CardToMCU. A
+  // dedicated one-MCU card entry is not required; STM32F756ZG must resolve
+  // through the generic MCU_CARD_FOR_STM32 relation.
+  const rustBoardDbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rust-board-db-'));
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const rustBoardDb = path.join(rustBoardDbRoot, 'database.db');
+    const db = new DatabaseSync(rustBoardDb);
+    db.exec(`
+      CREATE TABLE Board (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, BSP_PATH TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
+      CREATE TABLE Family (NAME TEXT PRIMARY KEY, VENDOR TEXT, TARGET TEXT);
+      CREATE TABLE MCU (NAME TEXT PRIMARY KEY, FAMILY TEXT, SYSTEM_LIB TEXT);
+      CREATE TABLE BoardToDevice (BOARD_UID TEXT, DEVICE_NAME TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (BOARD_UID, DEVICE_NAME));
+      CREATE TABLE MCUCard (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, BSP_PATH TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
+      CREATE TABLE BoardToCard (BOARD_UID TEXT, CARD_UID TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (BOARD_UID, CARD_UID));
+      CREATE TABLE CardToMCU (CARD_UID TEXT, DEVICE_NAME TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (CARD_UID, DEVICE_NAME));
+      INSERT INTO Board VALUES ('UNI_DS_V8','UNI-DS v8','MikroElektronika','bsp/boards/uni_ds_v8/board.cfg','{"mcuSelection":"card","mikrobusSource":"board-card"}',1);
+      INSERT INTO Family VALUES ('F4','STMicroelectronics','thumbv7em-none-eabihf');
+      INSERT INTO Family VALUES ('F7','STMicroelectronics','thumbv7em-none-eabihf');
+      INSERT INTO MCU VALUES ('STM32F407ZG','F4','system_stm32f_4xx');
+      INSERT INTO MCU VALUES ('STM32F756ZG','F7','system_stm32f_7xx');
+      INSERT INTO MCUCard VALUES ('MCU_CARD_FOR_STM32','MCU CARD for STM32','MikroElektronika','bsp/cards/mcu_card_for_stm32/card.cfg','{"hardwareDevices":["STM32F407ZG","STM32F756ZG"]}',1);
+      INSERT INTO BoardToCard VALUES ('UNI_DS_V8','MCU_CARD_FOR_STM32',0,'{}');
+      INSERT INTO CardToMCU VALUES ('MCU_CARD_FOR_STM32','STM32F407ZG',1,'{}');
+      INSERT INTO CardToMCU VALUES ('MCU_CARD_FOR_STM32','STM32F756ZG',0,'{}');
+    `);
+    db.close();
+    const boardRows = rustMcu.readBoardList(rustBoardDb);
+    assert.strictEqual(boardRows.length, 1);
+    assert.strictEqual(boardRows[0].hasMcuCards, true);
+    assert.strictEqual(boardRows[0].selectableMcuCount, 2);
+    const boardOptions = rustMcu.readBoardMcuOptions(rustBoardDb, 'UNI_DS_V8');
+    assert.deepStrictEqual(boardOptions.map((item) => item.mcuName), ['STM32F407ZG', 'STM32F756ZG']);
+    assert.strictEqual(boardOptions[1].vendor, 'STMicroelectronics');
+    assert.strictEqual(boardOptions[1].family, 'F7');
+    assert.strictEqual(boardOptions[1].target, 'thumbv7em-none-eabihf');
+    assert.strictEqual(boardOptions[1].systemLib, 'system_stm32f_7xx');
+    const f756Card = rustMcu.resolveBoardMcuOption(rustBoardDb, 'UNI_DS_V8', 'STM32F756ZG');
+    assert.strictEqual(f756Card.mcuCardUid, 'MCU_CARD_FOR_STM32');
+    assert.strictEqual(f756Card.mcuCardBspPath, 'bsp/cards/mcu_card_for_stm32/card.cfg');
+  } finally {
+    fs.rmSync(rustBoardDbRoot, { recursive: true, force: true });
+  }
+
+  assert.deepStrictEqual(rustMcu.mergeBspConfig({
+    headers: { CN1: { A: 'GPIO_A0', B: 'GPIO_B0' } },
+    boardOnly: true
+  }, {
+    headers: { CN1: { A: 'GPIO_C1' } },
+    cardOnly: true
+  }), {
+    headers: { CN1: { A: 'GPIO_C1', B: 'GPIO_B0' } },
+    boardOnly: true,
+    cardOnly: true
+  });
+
+  // A board setup is eligible for mikrobus.rs even when no shield is
+  // selected. Native board mappings must therefore generate directly from
+  // board.cfg/card.cfg rather than requiring BoardToShield.
+  assert.strictEqual(rustMcu.shouldGenerateWorkspaceMikrobus({
+    selectionMode: 'board',
+    boardUid: 'NATIVE_BOARD'
+  }), true);
+  assert.strictEqual(rustMcu.shouldGenerateWorkspaceMikrobus({
+    selectionMode: 'mcu',
+    boardUid: 'NATIVE_BOARD'
+  }), false);
+
+  const nativeBoardConfig = {
+    headers: {
+      MB1: {
+        AN: 'GPIO_A0',
+        RST: 'GPIO_B1'
+      }
+    },
+    mikrobus: {
+      1: {
+        AN: 'MB1.AN',
+        RST: 'MB1.RST',
+        CS: 'GPIO_C2'
+      }
+    }
+  };
+  assert.strictEqual(rustMcu.canBuildMikrobusRust(nativeBoardConfig, nativeBoardConfig), true);
+  const nativeBoardRust = rustMcu.buildMikrobusRust(nativeBoardConfig, nativeBoardConfig, 'Native Board');
+  assert.ok(nativeBoardRust.includes('Generated MikroBUS mapping for Native Board.'));
+  assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_AN: pin_name_t = GPIO_A0;'));
+  assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_RST: pin_name_t = GPIO_B1;'));
+  assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_CS: pin_name_t = GPIO_C2;'));
+  assert.strictEqual(nativeBoardRust.includes('with undefined'), false);
+
+  const noMikrobusConfig = { headers: { CN1: { A: 'GPIO_A0' } } };
+  assert.strictEqual(rustMcu.canBuildMikrobusRust(noMikrobusConfig, noMikrobusConfig), false);
+
+  const mikrobusManifestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rust-manifest-'));
+  try {
+    const manifestDir = path.dirname(rustMcu.setupMikrobusPath(mikrobusManifestRoot));
+    fs.mkdirSync(manifestDir, { recursive: true });
+    assert.strictEqual(rustMcu.isMikrobusGenerationResolved(mikrobusManifestRoot), false);
+    fs.writeFileSync(path.join(manifestDir, 'selection.json'), JSON.stringify({ mikrobusGenerated: false }));
+    assert.strictEqual(rustMcu.isMikrobusGenerationResolved(mikrobusManifestRoot), true);
+  } finally {
+    fs.rmSync(mikrobusManifestRoot, { recursive: true, force: true });
+  }
+
+  const rustWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rust-workspace-'));
+  const rustSetupRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rust-setup-'));
+  try {
+    fs.mkdirSync(path.join(rustWorkspaceRoot, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(rustWorkspaceRoot, 'src', 'main.rs'), 'fn main() {}\n');
+    fs.writeFileSync(path.join(rustWorkspaceRoot, 'mikrobus.rs'), '// stale root mapping\n');
+    const generatedMikrobus = rustMcu.setupMikrobusPath(rustSetupRoot);
+    fs.mkdirSync(path.dirname(generatedMikrobus), { recursive: true });
+    fs.writeFileSync(generatedMikrobus, '// generated mapping\n');
+
+    const copied = rustMcu.syncWorkspaceMikrobusFile(
+      { openedRoot: rustWorkspaceRoot },
+      { sdkRoot: rustSetupRoot }
+    );
+    assert.strictEqual(copied.copied, true);
+    assert.strictEqual(copied.relativePath, 'src/mikrobus.rs');
+    assert.strictEqual(fs.readFileSync(path.join(rustWorkspaceRoot, 'src', 'mikrobus.rs'), 'utf8'), '// generated mapping\n');
+    assert.strictEqual(fs.existsSync(path.join(rustWorkspaceRoot, 'mikrobus.rs')), false);
+
+    fs.rmSync(generatedMikrobus, { force: true });
+    const removed = rustMcu.syncWorkspaceMikrobusFile(
+      { openedRoot: rustWorkspaceRoot },
+      { sdkRoot: rustSetupRoot }
+    );
+    assert.strictEqual(removed.copied, false);
+    assert.deepStrictEqual(removed.deleted, ['src/mikrobus.rs']);
+    assert.strictEqual(fs.existsSync(path.join(rustWorkspaceRoot, 'src', 'mikrobus.rs')), false);
+  } finally {
+    fs.rmSync(rustWorkspaceRoot, { recursive: true, force: true });
+    fs.rmSync(rustSetupRoot, { recursive: true, force: true });
+  }
+
   const codegripCsv = [
     'vendor,name,programmers,debuggers,category,package_name,package_version,display_name,install_location,download_link,dependencies,release_date',
     'Renesas,R7FA6M4AF3CFB,CODEGRIP,CODEGRIP,CODEGRIP Device Pack,codegrip_pack_ra6m4af,1.0.2,RA6M4AF CODEGRIP Device Pack,%APPLICATION_DATA_DIR%/packages/programmers/codegrip/packs/ARM/Renesas/RA6,https://example/RA6M4AF.7z,"[""codegrip_gdb_server""]",2025-07-29T00:00:00Z'
@@ -162,7 +504,59 @@ try {
     assert.strictEqual(packageManager.isCodegripServerSpec({ kind: 'programmer', name: 'codegrip_gdb_server' }), true);
     assert.ok(packageManager.environmentSpecs().every((item) => item.kind !== 'programmer' && item.kind !== 'programmer-pack'));
     assert.ok(packageManager.environmentSpecs().some((item) => item.name === 'C_database'));
-    assert.ok(packageManager.environmentSpecs().some((item) => item.name === 'gcc_arm_compiler'));
+    assert.ok(packageManager.environmentSpecs().every((item) => item.kind !== 'toolchain'));
+    const recursiveToolRoot = path.join(codegripPayloadRoot, 'recursive-tool-test');
+    const recursiveTool = path.join(recursiveToolRoot, 'wrapper', 'bin', 'arm-none-eabi-gcc');
+    fs.mkdirSync(path.dirname(recursiveTool), { recursive: true });
+    fs.writeFileSync(recursiveTool, 'tool');
+    assert.strictEqual(packageManager.findRecursive(recursiveToolRoot, (_candidate, name) => name === 'arm-none-eabi-gcc', 8), recursiveTool);
+    packageManager.makeManagedToolchainExecutables(recursiveToolRoot, { kind: 'toolchain', toolchainBinaries: ['bin/arm-none-eabi-gcc'] });
+    if (process.platform !== 'win32') assert.ok((fs.statSync(recursiveTool).mode & 0o111) !== 0);
+    assert.ok(compilerSupport.supportedCompilerUids().includes('gcc_arm_none_eabi'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('xpack-riscv-none-embed-gcc'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('clang-llvm'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('clang-llvm-riscv'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mchp_xc8'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mchp_xc16'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mchp_xc32'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('llvm-rl78-elf'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('rx-elf-gcc'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mikrocarm'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mikrocpic'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mikrocpic32'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mikrocdspic'));
+    assert.ok(compilerSupport.supportedCompilerUids().includes('mikrocavr'));
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('gcc_arm_none_eabi'), 'GCC');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('clang-llvm'), 'Clang');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('mchp_xc8'), 'XC8');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('mchp_xc16'), 'XC16');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('mchp_xc32'), 'XC32');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('llvm-rl78-elf'), 'LLVM');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('rx-elf-gcc'), 'gcc');
+    assert.strictEqual(compilerSupport.coreMetadataCompilerLabel('mikrocarm'), 'mikroC AI');
+    assert.strictEqual(compilerSupport.isGccCompiler('gcc_arm_none_eabi'), true);
+    assert.strictEqual(compilerSupport.isGccCompiler('xpack-riscv-none-embed-gcc'), true);
+    assert.strictEqual(compilerSupport.isGccCompiler('rx-elf-gcc'), true);
+    assert.strictEqual(compilerSupport.isGccCompiler('clang-llvm'), false);
+    const compilerChoices = [
+      { uid: 'clang-llvm', name: 'Clang for ARM' },
+      { uid: 'gcc_arm_none_eabi', name: 'GCC for ARM' },
+      { uid: 'mikrocarm', name: 'mikroC AI for ARM' }
+    ];
+    assert.strictEqual(compilerSupport.preferredCompiler(compilerChoices)?.uid, 'gcc_arm_none_eabi');
+    assert.strictEqual(compilerSupport.preferredCompiler(compilerChoices, 'clang-llvm')?.uid, 'clang-llvm');
+    assert.strictEqual(compilerSupport.preferredCompiler([{ uid: 'clang-llvm' }, { uid: 'mikrocarm' }])?.uid, 'clang-llvm');
+    if (process.platform === 'linux') {
+      assert.strictEqual(compilerSupport.compilerAsset('gcc_riscv_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/gcc/riscv/linux/riscv32-unknown-elf-gcc.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('microchip_xc8_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/xc8/linux/xc8.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('microchip_xc16_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/xc16/linux/xc16.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('microchip_xc32_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/xc32/linux/xc32.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('llvm_clang_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/clang/linux/clang.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('gcc_rx_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/gcc/rx/linux/rx-elf-gcc.7z');
+      assert.strictEqual(compilerSupport.compilerAsset('llvm_rl78_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/llvm/rl78/linux/llvm-rl78-elf.7z');
+    }
+  assert.ok(packageManager.jsonAcceptHeader().includes('application/vnd.github+json'));
+  assert.ok(packageManager.jsonAcceptHeader().includes('application/json'));
   } finally {
     fs.rmSync(codegripPayloadRoot, { recursive: true, force: true });
   }
@@ -429,8 +823,12 @@ try {
         sdkConfig: { MCU_NAME: 'R7FA6M4AF3CFB', CORE_NAME: 'M33EF' }
       }
     }, {
-      c: process.execPath, cxx: process.execPath, asm: process.execPath,
-      adapter: { language: 'GNU' }
+      c: '/toolchain/bin/arm-none-eabi-gcc',
+      cxx: '/toolchain/bin/arm-none-eabi-g++',
+      asm: '/toolchain/bin/arm-none-eabi-as',
+      cmakeAsm: '/toolchain/bin/arm-none-eabi-as',
+      assembler: '/toolchain/bin/arm-none-eabi-as',
+      adapter: compilerSupport.adapterFor('gcc_arm_none_eabi')
     }, {
       compatibilityModuleRoot: toolchainRoot,
       infrastructureRoot: toolchainRoot,
@@ -438,11 +836,40 @@ try {
     });
     const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
     assert.ok(toolchainText.includes('add_compile_definitions(PREINIT_SUPPORTED)'));
+    assert.ok(toolchainText.includes('set(OSC_KHZ \"200000\" CACHE STRING \"\" FORCE)'));
   } finally {
     fs.rmSync(toolchainRoot, { recursive: true, force: true });
   }
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 11);
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 22);
+  const setupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
+  assert.ok(setupSource.includes('const assembler = resolveTool'));
+  assert.ok(setupSource.includes('const cmakeAsm = adapter.cmakeAsmViaCCompiler ? c'));
+  assert.ok(setupSource.includes("mikrobusC.openCompilerPackages"));
+  const configuratorSource = fs.readFileSync(path.join(__dirname, '..', 'c_configurator.js'), 'utf8');
+  const configuratorClientSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'c_mcu.js'), 'utf8');
+  const configuratorStyleSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.css'), 'utf8');
+  assert.ok(configuratorSource.includes('id="boardDeviceSearch"'));
+  assert.ok(configuratorSource.includes('id="compilerSelect"'));
+  assert.ok(configuratorSource.includes("message.type === 'selectCompiler'"));
+  assert.ok(configuratorSource.includes('compilerSupport.preferredCompiler(compilers, compilerUid)'));
+  assert.ok(configuratorStyleSource.includes('.metaGrid select, .clockInput input, .clockInput select, .field select'));
+  assert.ok(configuratorStyleSource.includes('background: var(--vscode-dropdown-background)'));
+  assert.ok(configuratorClientSource.includes('filteredBoardDevices'));
+  assert.ok(configuratorClientSource.includes("type: 'selectCompiler'"));
+  assert.ok(setupSource.includes('metadata.packageRequirements.card.mcuName ||'));
+  assert.ok(setupSource.includes('metadata.device?.mcuName ||'));
+  assert.ok(setupSource.includes('metadata.sdkConfig?.MCU_NAME ||'));
+  const packageManagerSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
+  assert.ok(packageManagerSource.includes('Compiler packages'));
+  assert.ok(packageManagerSource.includes("kind === 'compiler'"));
+  assert.ok(packageManagerSource.includes('CODEGRIP packages'));
+  assert.ok(packageManagerSource.includes("kind === 'codegrip'"));
+  assert.ok(packageManagerSource.includes('installedOnly'));
+
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.ok(packageJson.activationEvents.includes('onCommand:mikrobusC.openCompilerPackages'));
+  assert.ok(packageJson.contributes.commands.some((item) => item.command === 'mikrobusC.openCompilerPackages'));
 
   const infraRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-c-infra-'));
   try {
@@ -496,6 +923,8 @@ try {
     assert.ok(compatibilityText.includes('add_subdirectory'));
     assert.ok(compatibilityText.includes('function(core_install targetAlias)'));
     assert.ok(compatibilityText.includes('mikroeExportConfig.cmake.in'));
+    assert.ok(compatibilityText.includes('macro(add_fosc_macro target)'));
+    assert.ok(compatibilityText.includes('OSC_KHZ=${OSC_KHZ}'));
     assert.ok(fs.existsSync(path.join(compatibilityRoot, 'mikroeExportConfig.cmake.in')));
 
     const smokeRoot = path.join(infraRoot, 'smoke');
@@ -544,8 +973,11 @@ try {
     'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/preinit.7z');
   assert.strictEqual(catalog.resolveDirect({ kind: 'infrastructure', name: 'mikroe_utils_common', version: 'general_packages_assets' }).downloadUrl,
     'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/mikroe_utils_common.7z');
-  assert.strictEqual(catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: '2.19.1' }).downloadUrl,
-    'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/C_sdk.7z');
+  assert.strictEqual(catalog.resolveDirect({ kind: 'database', name: 'C_database', version: 'live' }).downloadUrl,
+    'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/database_live.7z');
+  assert.throws(() => catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest' }), /latest release must be resolved/);
+  assert.strictEqual(catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest', downloadUrl: 'https://example/mikrosdk.7z' }).downloadUrl,
+    'https://example/mikrosdk.7z');
 
   assert.strictEqual(catalog.resolveDirect({ kind: 'programmer-pack', name: 'codegrip_pack_ra6m4af', version: '1.0.2', downloadUrl: 'https://example/RA6M4AF.7z' }).downloadUrl,
     'https://example/RA6M4AF.7z');
@@ -564,6 +996,22 @@ try {
   assert.strictEqual(packageManager.safeName('../unsafe package'), '..-unsafe-package');
   assert.strictEqual(codegrip.responseStatusIsSuccess(0), true);
   assert.strictEqual(codegrip.responseStatusIsSuccess('1'), false);
+
+  const cSetupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
+  const cDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'c_database.js'), 'utf8');
+  const cMcuUiSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'c_mcu.js'), 'utf8');
+  const cPackageManagerSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
+  assert.ok(cSetupSource.includes('codegripCatalog.resolveDevice(setupMcuName(setup), token)'));
+  assert.ok(cSetupSource.includes('mcu: setupMcuName(setup)'));
+  assert.ok(cSetupSource.includes('defines.push(`#define ${mcuName}`)'));
+  assert.ok(!cSetupSource.includes('codegripCatalog.resolveDevice(setup.metadata.device.uid, token)'));
+  assert.ok(cDatabaseSource.includes('sdkConfig.MCU_NAME = mcuName'));
+  assert.ok(cDatabaseSource.includes("sdkConfig._MSDK_MCU_CARD_NAME_ = deviceConfig._MSDK_MCU_CARD_NAME_"));
+  assert.ok(cMcuUiSource.includes("appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell')"));
+  assert.ok(cMcuUiSource.includes("device.mcuName || device.uid"));
+  assert.ok(cPackageManagerSource.includes("return openEnvironmentPackages(context, kind)"));
+  assert.ok(cPackageManagerSource.includes("environmentViewKind"));
+  assert.ok(cPackageManagerSource.includes("Package files are still present after uninstall"));
 
   const rustConfiguratorSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
   const rustMcuUiSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.js'), 'utf8');

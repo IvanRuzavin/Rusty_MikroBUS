@@ -134,7 +134,7 @@
     const detail = document.createElement('p');
     detail.textContent = [setup.selectionMode === 'board' ? setup.mcuName : setup.family, `${setup.clockMhz} MHz`, setup.programmerName || 'SEGGER J-Link'].filter(Boolean).join(' · ');
     const shield = document.createElement('p'); shield.className = 'muted';
-    shield.textContent = setup.selectionMode === 'board' ? (setup.shieldName ? `Shield: ${setup.shieldName}` : 'Shield: None (mikrobus.rs is not generated)') : setup.target || '';
+    shield.textContent = setup.selectionMode === 'board' ? (setup.shieldName ? `Shield: ${setup.shieldName}` : 'Shield: None') : setup.target || '';
     const actions = document.createElement('div'); actions.className = 'setupActions';
     const apply = document.createElement('button'); apply.className = 'primary applyButton'; apply.textContent = usedHere ? 'Re-apply setup' : 'Apply to project'; apply.disabled = !project.hasCargoToml; apply.title = project.hasCargoToml ? '' : 'Open a project with Cargo.toml in its root.'; apply.addEventListener('click', () => { apply.disabled = true; apply.textContent = 'Applying…'; vscode.postMessage({ type: 'apply', id: setup.id }); });
     const edit = document.createElement('button'); edit.className = 'secondary editButton'; edit.textContent = 'Edit'; edit.addEventListener('click', () => vscode.postMessage({ type: 'edit', id: setup.id }));

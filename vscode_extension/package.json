@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Embedded Tools",
   "description": "Cross-platform Rust and C MikroBUS tools with reusable NECTO-style MCU setups, managed packages and programmer integration.",
-  "version": "0.6.5",
+  "version": "0.7.5",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -40,6 +40,7 @@
     "onCommand:mikrobusC.debug",
     "onCommand:mikrobusC.erase",
     "onCommand:mikrobusC.openInstalledPackages",
+    "onCommand:mikrobusC.openCompilerPackages",
     "onDebug:mikrobus-rust-debug",
     "onCommand:mikrobusC.installEnvironment",
     "onWebviewPanel:mikrobusC.hardwareConfigurator"
@@ -167,6 +168,10 @@
       {
         "command": "mikrobusC.openInstalledPackages",
         "title": "MikroBUS C: Installed Packages"
+      },
+      {
+        "command": "mikrobusC.openCompilerPackages",
+        "title": "MikroBUS C: Compiler Packages"
       },
       {
         "command": "mikrobusC.installEnvironment",
@@ -490,7 +495,7 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js",
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js",
     "test": "node test/c_support.test.js",
     "build": "npx @vscode/vsce package"
   },

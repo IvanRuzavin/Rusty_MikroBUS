@@ -5,14 +5,14 @@
 
 const VERSIONS = Object.freeze({
   cBundle: '0.0.1',
-  mikroSdk: '2.19.1',
+  mikroSdk: 'latest',
   armGcc: '14.2.1-1.1'
 });
 
 const C_URLS = Object.freeze({
-  database: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/C_database.7z',
-  core: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/C_core.zip',
-  sdk: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/C_sdk.7z',
+  database: 'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/database_live.7z',
+  coreMetadata: 'https://github.com/MikroElektronika/core_packages/releases/download/v2.0.0/metadata.json',
+  sdkLatestApi: 'https://api.github.com/repos/MikroElektronika/mikrosdk_v2/releases/latest',
   infrastructure: {
     unit_test_lib: 'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/unit_test_lib.7z',
     preinit: 'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/preinit.7z',
@@ -64,13 +64,13 @@ function resolveDirect(spec) {
   }
 
   if (kind === 'database' || name === 'c_database') {
-    return { version: VERSIONS.cBundle, downloadUrl: C_URLS.database };
+    return { version: String(spec.version || 'live'), downloadUrl: C_URLS.database };
   }
-  if (kind === 'core' || name === 'c_core') {
-    return { version: VERSIONS.cBundle, downloadUrl: C_URLS.core };
+  if (kind === 'core') {
+    throw new Error(`Core package '${spec.name}' must be resolved from core_packages metadata before installation.`);
   }
   if (kind === 'sdk' || name === 'mikrosdk') {
-    return { version: VERSIONS.mikroSdk, downloadUrl: C_URLS.sdk };
+    if (!spec.downloadUrl) throw new Error('mikroSDK latest release must be resolved before installation.');
   }
   if (kind === 'infrastructure' && C_URLS.infrastructure[name]) {
     return { version: String(spec.version || 'general_packages_assets'), downloadUrl: C_URLS.infrastructure[name] };

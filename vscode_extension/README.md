@@ -4,43 +4,41 @@ MikroBUS Embedded Tools adds reusable Rust and C MCU setups to VS Code. The exis
 
 ## C support at a glance
 
-- NECTO-compatible SQLite data drives the compatible MCU, compiler, mikroSDK, package and programmer choices.
-- `Compilers.core_path` plus `Devices.sdk_config.MCU_NAME` select the MCU core inside the single C core bundle.
-- The C SDK package is fixed to mikroSDK 2.19.1 and uses the hardcoded `C_sdk.7z` bundle, including the BSP content required by mikroSDK.
-- Compiler/programmer compatibility still comes from the database; package downloads themselves are direct and hardcoded.
-- Bare-metal setups build core files only.
-- Full mikroSDK setups build/install the core first, then build/install the supported SDK version.
-- Missing packages install automatically when setup building begins. There is no package-by-package approval prompt.
-- Managed C packages are listed in **MikroBUS C: Installed Packages** and can be inspected or uninstalled there.
-- CODEGRIP and SEGGER J-Link are supported as programmer/debug selections. CODEGRIP uses the existing USB discovery, programming and GDB-server integration.
+- The daily NECTO SQLite database drives MCU, compiler, SDK, package, board/card BSP and programmer compatibility.
+- Compiler choices come from `CompilerToDevice` and are offered only when the selected device also resolves a compiler-specific core package from `Devices.installer_package`.
+- `Compilers.c_compiler`, `cxx_compiler`, `asm_compiler`, `gdb_path`, `core_path` and `installer_package` are used directly by the managed toolchain/setup flow.
+- The Development Environment has separate managers for **Compiler packages**, **Programmers**, **CODEGRIP packages**, **MCU Core packages**, **MCU Card BSP packages**, and **Board BSP packages**.
+- Compiler, core and BSP packages are installed on demand when a setup needs them; the large monolithic C core bundle is no longer required.
+- Full SDK setups use the latest `mikrosdk.7z` release plus only the required board/card BSP packages.
+- Bare-metal setups build only the selected compiler-specific MCU core.
+- CODEGRIP and SEGGER J-Link remain available according to database programmer mappings.
 
-The first compiler adapter is `gcc_arm_none_eabi`. Additional C toolchains can be added without changing the package/database workflow by registering an adapter in `COMPILER_ADAPTERS` in `c_setup.js`.
+The C compiler adapter catalog covers every compiler currently connected to the `cmake` build system in the supplied NECTO database: GNU ARM, GNU RISC-V, Clang ARM/RISC-V, XC8/XC16/XC32, mikroC AI ARM/PIC/PIC32/dsPIC/AVR, LLVM RL78 and GCC RX.
 
 ## C workflow
 
-1. Install this VSIX and open a workspace.
-2. In the MikroBUS activity view, select **C** in the Rust/C environment switch.
-3. Click **Install / update C environment**. The C database, complete C core bundle, mikroSDK 2.19.1, ARM GCC and CODEGRIP are resolved from hardcoded download URLs.
-4. Click **Create & Build C Setup**.
-5. Select MCU, compiler, bare metal or full SDK, MCU package, programmer and clock. mikroSDK is fixed to 2.19.1 for this bundle.
-6. The extension reads `Compilers.core_path` and `Devices.sdk_config.MCU_NAME` from the C database to locate the correct MCU core inside `C_core.zip`.
-7. Open any C/C++ source in the project. The extension walks upward to the project-root `CMakeLists.txt`; **Apply C Setup** writes only the setup binding under that project root and never creates or modifies application source files.
-8. Build, flash and debug are available directly from the C editor title. For bound MikroBUS projects the generic Microsoft C/C++ active-file Run/Debug shortcut is hidden because single-file compilation is not valid for mikroSDK projects.
+1. Install the extension and open a workspace.
+2. In the MikroBUS activity view, select **C**.
+3. Open **Development Environment** and install/refresh the shared database/SDK/infrastructure packages. Compiler packages can be managed separately with **Compiler packages**.
+4. Click **Create & Build C Setup** and select an MCU or board.
+5. The compiler selector shows only compilers mapped to that target by `CompilerToDevice` that also have a matching core package mapping in `Devices.installer_package`.
+6. Select the compiler, SDK mode, package, programmer and clock configuration. Building the setup automatically installs the selected compiler package and its compiler-specific core package if they are missing.
+7. For a board/full-SDK setup, the required MCU-card and board BSP packages are installed and overlaid into the lightweight mikroSDK base.
+8. Apply the reusable setup to a project whose root contains `CMakeLists.txt`, then build/flash/debug from the C commands.
 
 Workspace output is placed in `.mikrobus/c-build`. Reusable setup artifacts and installed packages live under the extension-managed storage root.
 
-## Hardcoded C package sources
+## Managed C package sources
 
-C package resolution does not use Kibana, Elasticsearch, a catalog proxy, credentials, or package-index queries. The extension contains direct package URLs for:
+The C workflow does not query Kibana/Elasticsearch at runtime. Package identity and compatibility come from the local daily database, while downloads use direct package/release assets:
 
-- C database: `C_database.7z`
-- Complete C core collection: `C_core.zip`
-- mikroSDK: fixed `2.19.1` `C_sdk.7z` archive (including BSPs)
-- ARM GCC: the same xPack ARM GNU toolchain used by the existing embedded workflow
-- CODEGRIP: platform-specific NECTO package URLs for Windows, Linux and macOS
-- Shared NECTO support package URLs supplied for SRecord, debugger tools, clangd, CMake, clang-format and Tabnine where a platform URL is defined
+- database: daily `database_live.7z`;
+- MCU cores: `core_packages` metadata + each package's `release_tag`;
+- mikroSDK and BSPs: latest `mikrosdk_v2` GitHub release;
+- compiler toolchains: direct NECTO compiler assets associated with `Compilers.installer_package` (with the existing xPack ARM GCC package retained for GNU ARM);
+- infrastructure/programmers: the existing direct general-package and programmer assets.
 
-Core selection is data-driven rather than package-name-driven. The selected compiler supplies `Compilers.core_path`, and the selected device supplies `MCU_NAME` from `Devices.sdk_config`. The extension searches that compiler subtree in `C_core.zip` for the matching MCU definition and uses the containing core project.
+Core selection is compiler-specific. For normal device rows, `Devices.installer_package[compilerUid]` identifies the core archive. For MCU-card relation rows, `Devices.sdk_config.MCU_NAME` resolves the actual MCU row first, then that MCU's compiler-keyed core mapping is used. `Compilers.core_path` provides the expected architecture/compiler subtree.
 
 ## Package installation behavior
 
@@ -91,9 +89,9 @@ Install the generated VSIX with **Extensions → Install from VSIX…**. Cortex-
 
 ## C visual hardware configuration
 
-The C workflow now has the same visual starting point as the Rust workflow. Open **Create & Build C Setup** and choose **MCU** or **Board**. Board selection is resolved through the C database, and compatible ARM/GCC MCUs are shown when a board supports more than one device.
+The C workflow now has the same visual starting point as the Rust workflow. Open **Create & Build C Setup** and choose **MCU** or **Board**. Board selection is resolved through the C database, and compatible MCU rows are shown when a board supports more than one device. The board-MCU table has its own search field.
 
-For the selected target, the extension resolves `Compilers.core_path` plus `Devices.sdk_config.MCU_NAME`, loads the matching core definition (`ARM/gcc_clang/.../def/<MCU_NAME>.json`), and renders all visible `config_registers` fields as GUI selectors. Those selections are written into the generated `core_header.h` used for the C core build.
+For the selected target/compiler pair, the extension resolves `Compilers.core_path`, the compiler-keyed core package from `Devices.installer_package`, and `Devices.sdk_config.MCU_NAME`, then loads the matching core definition and renders all visible `config_registers` fields as GUI selectors. Those selections are written into the generated `core_header.h` used for the C core build.
 
 The managed C environment also installs the hardcoded `unit_test_lib`, `preinit`, and `mikroe_utils_common` general packages required by the mikroSDK/core CMake flow.
 
@@ -239,3 +237,56 @@ The probe-rs fallback now attempts a normal SWD connection first. Flash operatio
 - Rust configured-setup action buttons use the same single-row layout as C setup cards.
 - A Rust setup using CODEGRIP can be built without a CODEGRIP connected by USB. Setup creation only resolves/downloads the shared CODEGRIP server and the MCU-specific pack(s) from the live `Codegrip-Prog-Debug.csv` catalog.
 - If a Rust CODEGRIP setup has no saved USB connection, Flash, Debug, or Erase performs USB discovery on demand. One discovered device is selected automatically; multiple devices produce a quick-pick. The selected USB CODEGRIP is then stored in the reusable setup for later operations.
+
+## Rust BoardToCard MCU selection (0.6.6)
+
+Boards backed by `BoardToCard` are now shown once in the Rust board catalog and expose an MCU selector after the board is opened. The selector is populated from every valid `BoardToCard -> MCUCard -> CardToMCU` relationship rather than only `IS_DEFAULT` rows.
+
+Selecting an MCU automatically resolves the matching MCU card and stores its UID/name/BSP path in the reusable setup and workspace binding. Setup generation validates the relationship against the database and copies the selected `board.cfg` and `card.cfg` into `.setup/bsp/` with a `selection.json` manifest. When a board/shield setup generates `mikrobus.rs`, the selected card configuration is overlaid on the generic board configuration so MCU-card pin mappings are applied automatically.
+
+This means a dedicated one-MCU alias card is no longer required. For example, after removing `STM32F756ZG_MCU_CARD`, `UNI_DS_V8 + STM32F756ZG` resolves through `MCU_CARD_FOR_STM32` and uses `bsp/cards/mcu_card_for_stm32/card.cfg`.
+
+## Rust board MCU table, project mikrobus sync and database refresh (0.6.7)
+
+- Opening a board that uses `BoardToCard -> MCUCard -> CardToMCU` now shows its compatible MCUs in a dedicated table instead of a drop-down. The table uses the same MCU metadata as the main MCU catalog and also shows the resolved MCU card.
+- Board/shield setup generation now stores the generated `mikrobus.rs` inside the reusable setup at `.setup/bsp/mikrobus.rs`. Applying a setup copies that exact file beside the project's `main.rs`, overwriting an older mapping. Applying a setup with no generated `mikrobus.rs` removes stale project-level `mikrobus.rs` files from the project root or `src/`.
+- **Refresh database** in the Rust Hardware Configuration window now downloads the latest `database_mikro_sdk_rust.db` release asset through the managed package installer and atomically replaces the local managed database instead of only re-reading the existing file.
+
+## Native board mikroBUS generation without shields (0.6.8)
+
+- Rust board setups now attempt to generate `.setup/bsp/mikrobus.rs` for every selected board, even when **No shield** is selected.
+- If `board.cfg` exposes a native `mikrobus` mapping, it is resolved after any selected MCU-card overlay and written to `mikrobus.rs`.
+- When a shield is selected and provides its own `mikrobus` mapping, that shield routing takes precedence. A shield is therefore optional rather than a prerequisite for generation.
+- Boards with no compatible shields show the shield selector disabled/grayed out. Boards with compatible shields keep the selector enabled and still allow **No shield**.
+- The reusable setup manifest records whether mikroBUS generation was attempted successfully, so older v0.6.7 board setups are rebuilt once and boards without a resolvable mapping are not rebuilt on every Apply.
+
+## C on-demand core and BSP packages (0.7.0)
+
+- The C database package now uses the daily `database_live.7z` asset from `MikroElektronika/general_packages`. The Development Environment treats it as a live/refreshable package so the same URL can be downloaded again after the database is updated.
+- The monolithic `C_core` package is no longer part of the C Development Environment. The selected MCU core package is resolved from `Devices.installer_package`, matched against the official `core_packages` `metadata.json`, downloaded from its `release_tag`, and installed in its metadata-defined `packages/core/<architecture>/<compiler>/<package>` folder.
+- The Development Environment now opens separate package managers for **Programmers**, **MCU Core Packages**, **MCU Card BSP Packages**, and **Board BSP Packages**, with install/update/uninstall actions.
+- Full mikroSDK setups resolve the latest `mikrosdk.7z` release dynamically. The SDK base is lightweight; the selected MCU-card and board BSP archives are installed on demand from the same mikroSDK release.
+- MCU-card BSP destination folder names come from `_MSDK_MCU_CARD_NAME_` in the database rather than from the archive name. Board package destinations use `_MSDK_BOARD_NAME_`.
+- Before a full-SDK setup is built, the required core, MCU-card BSP, and board BSP packages are ensured automatically. The setup-specific BSP overlay is rebuilt cleanly so stale board/card files from a previous setup are not reused.
+- This release intentionally does **not** include Renesas `rfp-cli` integration or CMake file-graying/visibility work.
+
+### v0.7.0 follow-up: GNU ASM driver and package/MCU filtering
+
+- GNU ARM CMake builds now use `arm-none-eabi-gcc` as the ASM driver instead of invoking raw `arm-none-eabi-as`. This prevents CMake target definitions such as `PREINIT_SUPPORTED`, `_INCLUDE_INTERRUPT_CASES_`, and `OSC_KHZ=...` from becoming invalid `--defsym NAME` arguments.
+- The compatible-MCU table shown after selecting a board now has its own search field and result count.
+- Core, board, MCU-card, programmer and environment package views have a clickable installed-package counter that toggles an **installed only** filter. Packages with an available update are considered installed for this filter.
+- Development Environment now exposes a separate **CODEGRIP packages** window containing the installed CODEGRIP server and MCU-specific `programmer-pack` packages used by C or Rust setups.
+
+
+### v0.7.1 compiler packages and multi-toolchain setups
+
+- Added a separate **Compiler Packages** manager with search, installed-only filtering, install, update and uninstall actions.
+- Setup creation now enumerates compiler choices from `CompilerToDevice`; the selected compiler must also resolve a compiler-specific core package from `Devices.installer_package`.
+- Compiler packages are installed automatically when a setup requiring them is built.
+- The generated CMake toolchain resolves compiler binaries from the selected `Compilers` row instead of assuming ARM GCC.
+- GNU compiler families use their compiler driver for CMake ASM while retaining the raw `asm_compiler` binary for explicit assembler jobs. This also avoids the invalid raw-GNU-as `--defsym NAME` issue for target compile definitions.
+- The current adapter set covers all 14 compiler IDs mapped to CMake in the supplied database.
+
+### GNU ARM compiler / assembler handling
+
+For GNU ARM, `Compilers.c_compiler` and `Compilers.asm_compiler` are treated as two distinct installed binaries. The raw assembler remains available from the database metadata, but CMake ASM targets use the GCC driver so mikroSDK compile definitions are passed as `-D...` rather than invalid bare `--defsym` arguments. Generated toolchain files force this choice in the CMake cache and print both compiler paths during configuration.

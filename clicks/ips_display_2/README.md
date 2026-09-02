@@ -1,11 +1,44 @@
-# IPS Display 2 Click Rust example
+# IPS Display 2 Click — Static Rust Logo Demo
 
-Open `main.rs`, apply a configured MCU setup from **MikroBUS Rust: Configure MCU**, and press:
+Presentation demo for:
 
-- `Ctrl+Shift+B` to build;
-- `Ctrl+F5` to build and flash;
-- `F5` to debug.
+- **MCU:** STM32F756ZG
+- **MCU card:** MCU CARD for STM32
+- **Board:** UNI-DS v8
+- **Display:** IPS Display 2 Click (ST7789V, 240x240)
+- **Socket:** mikroBUS 1
 
-The example targets the ST7789V-based 240x240 IPS Display 2 Click. It contains the initialization sequence, rotation/window handling, RGB565 screen fill, pixel, line, rectangle, circle, and backlight control.
+The application initializes the display, uploads one full-screen Rust logo image, turns the backlight on, and then leaves the image on screen permanently.
 
-The pin block at the top of `main.rs` uses the SPI and GPIO pins exercised by the supplied STM32F412RE SDK tests. If your Click is on a different board or mikroBUS socket, replace only `PIN_SCK`, `PIN_MISO`, `PIN_MOSI`, `PIN_CS`, `PIN_RST`, `PIN_DC`, and `PIN_BACKLIGHT` with that socket's mapping.
+There is **no runtime animation** and no per-pixel drawing loop. The supplied PNG is preconverted to the display's native **RGB565** format so the MCU only has to transmit 115,200 bytes over SPI once.
+
+## Files
+
+- `assets/rust_logo_240x240.png` — presentation image used as the source asset.
+- `assets/rust_logo_240x240.rgb565` — preconverted image that is compiled into flash.
+- `main.rs` — initializes the display and uploads the image once.
+- `ips_display_2.rs` — IPS Display 2 Click driver with full-screen RGB565 transfer support.
+- `mikrobus.rs` — generated UNI-DS v8 mapping for the configured STM32F756ZG setup.
+- `tools/png_to_rgb565.py` — optional helper for replacing the image later.
+
+## Build / flash
+
+Open the project in VS Code with MikroBUS Rust Tools and use the already configured setup:
+
+**UNI-DS v8 + MCU CARD for STM32 + STM32F756ZG**
+
+Then:
+
+- `Ctrl+Shift+B` — build
+- `Ctrl+F5` — build and flash
+- `F5` — debug
+
+## Replacing the picture
+
+If you want another 240x240 PNG later:
+
+```bash
+python3 tools/png_to_rgb565.py my_picture.png assets/rust_logo_240x240.rgb565
+```
+
+The converter requires Pillow on the development PC. No PNG decoder is needed on the MCU.

@@ -9,6 +9,7 @@
     selectionMode: undefined,
     selectedBoard: undefined,
     boardDevices: [],
+    filteredBoardDevices: [],
     setups: [],
     editingSetupId: undefined,
     view: 'start'
@@ -26,12 +27,14 @@
   const missingState = document.getElementById('missingState');
   const mcuSearch = document.getElementById('mcuSearch');
   const boardSearch = document.getElementById('boardSearch');
+  const boardDeviceSearch = document.getElementById('boardDeviceSearch');
   const mcuTableBody = document.getElementById('mcuTableBody');
   const boardTableBody = document.getElementById('boardTableBody');
   const boardDeviceTableBody = document.getElementById('boardDeviceTableBody');
   const registerGrid = document.getElementById('registerGrid');
   const generateButton = document.getElementById('generate');
   const generationStatus = document.getElementById('generationStatus');
+  const compilerSelect = document.getElementById('compilerSelect');
 
   document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   document.getElementById('chooseMcuMode').addEventListener('click', () => showView('mcus'));
@@ -41,7 +44,13 @@
   document.getElementById('backToSelection').addEventListener('click', () => showView(state.selectionMode === 'board' ? 'boards' : 'mcus'));
   mcuSearch.addEventListener('input', renderMcuTable);
   boardSearch.addEventListener('input', renderBoardTable);
+  boardDeviceSearch.addEventListener('input', renderBoardDeviceTable);
   generateButton.addEventListener('click', buildConfiguration);
+  compilerSelect.addEventListener('change', () => {
+    if (!state.detail || !compilerSelect.value || compilerSelect.value === state.detail.compiler?.uid) return;
+    showLoading(`Loading ${state.detail.device?.mcuName || state.detail.device?.uid || 'MCU'} for ${compilerSelect.options[compilerSelect.selectedIndex]?.textContent || compilerSelect.value}...`);
+    vscode.postMessage({ type: 'selectCompiler', deviceUid: state.detail.device.uid, boardUid: state.detail.board?.uid, compilerUid: compilerSelect.value, selectionMode: state.selectionMode || 'mcu' });
+  });
 
   window.addEventListener('message', (event) => {
     const message = event.data;
@@ -80,6 +89,7 @@
       state.selectionMode = 'board';
       state.selectedBoard = message.board;
       state.boardDevices = Array.isArray(message.devices) ? message.devices : [];
+      boardDeviceSearch.value = '';
       document.getElementById('boardDeviceTitle').textContent = message.board?.name || message.board?.uid || 'Board';
       renderBoardDeviceTable();
       showView('boardDevices');
@@ -129,6 +139,7 @@
     Object.entries(views).forEach(([key, element]) => element.classList.toggle('hidden', key !== name));
     if (name === 'mcus') mcuSearch.focus();
     if (name === 'boards') boardSearch.focus();
+    if (name === 'boardDevices') boardDeviceSearch.focus();
   }
 
   function showLoading(text) {
@@ -150,10 +161,10 @@
       const row = clickableRow(() => {
         state.selectionMode = 'mcu';
         state.selectedBoard = undefined;
-        showLoading(`Loading ${mcu.uid} clock configuration...`);
+        showLoading(`Loading ${mcu.mcuName || mcu.uid} clock configuration...`);
         vscode.postMessage({ type: 'selectMcu', uid: mcu.uid });
       });
-      appendCell(row, mcu.uid, 'mcuNameCell');
+      appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell');
       appendCell(row, mcu.vendor || '—');
       appendCell(row, mcu.familyUid || '—');
       appendCell(row, mcu.maxSpeed ? `${trimNumber(mcu.maxSpeed)} MHz` : '—');
@@ -185,12 +196,17 @@
   }
 
   function renderBoardDeviceTable() {
-    boardDeviceTableBody.replaceChildren(...state.boardDevices.map((mcu) => {
+    const query = boardDeviceSearch.value.trim().toLowerCase();
+    state.filteredBoardDevices = query
+      ? state.boardDevices.filter((mcu) => textMatches([mcu.mcuName, mcu.uid, mcu.name, mcu.vendor, mcu.familyUid], query))
+      : state.boardDevices;
+    document.getElementById('boardDeviceCount').textContent = String(state.filteredBoardDevices.length);
+    boardDeviceTableBody.replaceChildren(...state.filteredBoardDevices.map((mcu) => {
       const row = clickableRow(() => {
-        showLoading(`Loading ${mcu.uid} clock configuration...`);
+        showLoading(`Loading ${mcu.mcuName || mcu.uid} clock configuration...`);
         vscode.postMessage({ type: 'selectBoardDevice', boardUid: state.selectedBoard.uid, deviceUid: mcu.uid });
       });
-      appendCell(row, mcu.uid, 'mcuNameCell');
+      appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell');
       appendCell(row, mcu.vendor || '—');
       appendCell(row, mcu.familyUid || '—');
       appendCell(row, mcu.maxSpeed ? `${trimNumber(mcu.maxSpeed)} MHz` : '—');
@@ -200,10 +216,11 @@
 
   function renderDetail(detail) {
     const device = detail.device || {};
-    document.getElementById('selectedName').textContent = device.uid || device.mcuName || '';
+    document.getElementById('selectedName').textContent = device.mcuName || device.uid || '';
     document.getElementById('selectedVendor').textContent = device.vendor || '—';
     document.getElementById('selectedFamily').textContent = device.familyUid || '—';
-    document.getElementById('selectedCompiler').textContent = `${detail.compiler?.name || detail.compiler?.uid || '—'} ${detail.compiler?.version || ''}`.trim();
+    compilerSelect.replaceChildren(...(detail.compilers || [detail.compiler].filter(Boolean)).map((item) => option(item.uid, `${item.name || item.uid}${item.version ? ` ${item.version}` : ''}`, item.uid === detail.compiler?.uid)));
+    compilerSelect.disabled = compilerSelect.options.length <= 1;
     document.getElementById('selectedCorePath').textContent = detail.device?.corePath || detail.compiler?.corePath || '—';
     document.getElementById('definitionPath').textContent = detail.definitionPath || '—';
     document.getElementById('clockMhz').value = detail.clockMHz || trimNumber(device.maxSpeed) || '';
@@ -212,12 +229,13 @@
     if (detail.board) {
       boardCard.classList.remove('hidden');
       document.getElementById('selectedBoardName').textContent = detail.board.name || detail.board.uid;
-      document.getElementById('selectedBoardInfo').textContent = `${detail.board.vendor || '—'} · ${detail.board.category || 'Board'} · ${detail.board.mikrobusCount || 0} mikroBUS socket(s) · MCU ${device.uid}`;
+      document.getElementById('selectedBoardInfo').textContent = `${detail.board.vendor || '—'} · ${detail.board.category || 'Board'} · ${detail.board.mikrobusCount || 0} mikroBUS socket(s) · MCU ${device.mcuName || device.uid}`;
     } else {
       boardCard.classList.add('hidden');
     }
 
-    const defaultName = detail.board ? `${detail.board.name || detail.board.uid} - ${device.uid}` : `${device.uid} C Setup`;
+    const targetName = device.mcuName || device.uid;
+    const defaultName = detail.board ? `${detail.board.name || detail.board.uid} - ${targetName}` : `${targetName} C Setup`;
     document.getElementById('setupName').value = defaultName;
     document.getElementById('setupMode').value = 'full-sdk';
     // Match NECTO's Application Output concept. Debug Terminal uses the

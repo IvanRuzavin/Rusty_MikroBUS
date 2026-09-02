@@ -6,8 +6,9 @@ const path = require('path');
 const vscode = require('vscode');
 const database = require('./c_database');
 const packages = require('./c_package_manager');
+const compilerSupport = require('./c_compiler_support');
 
-const SUPPORTED_COMPILERS = ['gcc_arm_none_eabi'];
+const SUPPORTED_COMPILERS = compilerSupport.supportedCompilerUids();
 const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink']);
 let cPanel;
 let pendingSetupId;
@@ -56,6 +57,43 @@ function fieldId(register, field) {
   return `${String(register?.key || '').trim()}.${String(field?.key || '').trim()}`;
 }
 
+function parseHex(value) {
+  return Number.parseInt(String(value ?? '0').replace(/^0x|\$/i, ''), 16) || 0;
+}
+
+function maskShift(mask) {
+  let value = (typeof mask === 'number' ? mask : parseHex(mask)) >>> 0;
+  if (!value) return 0;
+  let shift = 0;
+  while ((value & 1) === 0 && shift < 32) {
+    value >>>= 1;
+    shift += 1;
+  }
+  return shift;
+}
+
+function settingsArrayOptions(field) {
+  const range = field?.settings_array;
+  if (!range || typeof range !== 'object') return [];
+  const min = Number.parseInt(String(range.min_value ?? ''), 10);
+  const max = Number.parseInt(String(range.max_value ?? ''), 10);
+  const mask = parseHex(field.mask) >>> 0;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min > max || !mask) return [];
+  // Keep webview payloads bounded. PLL-style numeric fields are normally only
+  // a few hundred entries (STM32F756 PLLN is 50..432).
+  if ((max - min) > 4096) return [];
+  const shift = maskShift(mask);
+  const values = [];
+  for (let number = min; number <= max; number += 1) values.push(number);
+  if (range.decrease === true) values.reverse();
+  return values.map((number) => ({
+    label: `${field.label || field.key || 'Value'} = ${number}`,
+    // config_registers stores already-positioned register bit values. Convert
+    // the human numeric range to that same representation before saving it.
+    value: ((((number << shift) >>> 0) & mask) >>> 0).toString(16).toUpperCase().padStart(8, '0')
+  }));
+}
+
 function serializeDefinition(definition) {
   return (Array.isArray(definition.config_registers) ? definition.config_registers : []).map((register) => ({
     key: register.key,
@@ -69,10 +107,9 @@ function serializeDefinition(definition) {
         label: field.label || field.key,
         init: field.init,
         mask: field.mask,
-        settings: (Array.isArray(field.settings) ? field.settings : []).map((setting) => ({
-          label: setting.label,
-          value: setting.value
-        }))
+        settings: (Array.isArray(field.settings) && field.settings.length
+          ? field.settings.map((setting) => ({ label: setting.label, value: setting.value }))
+          : settingsArrayOptions(field))
       }))
   })).filter((register) => register.fields.length > 0);
 }
@@ -110,33 +147,31 @@ function loadSavedSetup(context, setupId) {
   return readJson(file, `C setup ${setupId}`);
 }
 
-function getCoreEntry(context) {
-  return packages.getInstalledPackage(context, { kind: 'core', name: 'C_core', version: '0.0.1' });
-}
-
 function environmentState(context) {
   const missing = [];
   try { database.validateDatabase(context); } catch { missing.push('C database'); }
-  if (!getCoreEntry(context)) missing.push('C core');
   return missing;
 }
 
-function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
+async function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
   const compilers = database.listCompilers(context, deviceUid, SUPPORTED_COMPILERS);
-  if (!compilers.length) throw new Error(`No supported ARM GCC compiler is mapped to ${deviceUid}.`);
-  const compiler = compilers.find((item) => item.uid === compilerUid) || compilers[0];
+  if (!compilers.length) throw new Error(`No supported C compiler is mapped to ${deviceUid}.`);
+  const compiler = compilerSupport.preferredCompiler(compilers, compilerUid);
   const info = database.getDeviceCoreInfo(context, deviceUid, compiler.uid);
   if (!info) throw new Error(`Unable to resolve core metadata for ${deviceUid}/${compiler.uid}.`);
 
-  const coreEntry = getCoreEntry(context);
-  if (!coreEntry?.root) throw new Error('Install the C core package before opening MCU clock configuration.');
-  const definitionFile = findDefinitionFile(coreEntry.root, info.corePath, info.defFile || `${info.mcuName}.json`);
-  if (!definitionFile) {
-    throw new Error(`C_core.zip does not contain ${info.corePath}/def/${info.defFile || `${info.mcuName}.json`}.`);
+  const requirements = database.getDevicePackageRequirements(context, deviceUid, compiler.uid, boardUid);
+  const coreSpec = await packages.corePackageSpec(context, requirements.core.name, compiler.uid);
+  let coreEntry = packages.getInstalledPackage(context, coreSpec);
+  if (!coreEntry?.root) {
+    coreEntry = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing ${coreSpec.displayName || coreSpec.name}`, cancellable: true },
+      (progress, token) => packages.ensurePackage(context, coreSpec, progress, token));
   }
+  const definitionFile = findDefinitionFile(coreEntry.root, info.corePath, info.defFile || `${info.mcuName}.json`);
+  if (!definitionFile) throw new Error(`Core package '${coreSpec.name}' does not contain ${info.defFile || `${info.mcuName}.json`}.`);
   const definition = readJson(definitionFile, `${deviceUid} clock definition`);
-  const sdks = database.listSdks(context, deviceUid, compiler.uid).filter((sdk) => String(sdk.version) === '2.19.1');
-  if (!sdks.length) throw new Error(`mikroSDK 2.19.1 is not mapped to ${deviceUid}/${compiler.uid}.`);
+  const sdks = database.listSdks(context, deviceUid, compiler.uid);
+  if (!sdks.length) throw new Error(`No non-legacy mikroSDK is mapped to ${deviceUid}/${compiler.uid}.`);
   const devicePackages = database.listDevicePackages(context, deviceUid);
   const programmers = database.listProgrammers(context, deviceUid, compiler.uid)
     .filter((programmer) => SUPPORTED_PROGRAMMERS.has(programmer.uid));
@@ -146,6 +181,7 @@ function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
   return {
     device: info,
     compiler,
+    compilers,
     sdk: sdks[0],
     packages: devicePackages,
     programmers,
@@ -174,7 +210,7 @@ async function sendInitialState(panel, context) {
   if (pendingSetupId) {
     const setup = loadSavedSetup(context, pendingSetupId);
     const selection = setup.selection || {};
-    const detail = loadDeviceDetail(
+    const detail = await loadDeviceDetail(
       context,
       selection.deviceUid || setup.metadata?.device?.uid,
       selection.compilerUid || setup.metadata?.compiler?.uid,
@@ -211,7 +247,7 @@ async function handleMessage(message, panel, context) {
     return;
   }
   if (message.type === 'selectMcu' && typeof message.uid === 'string') {
-    const detail = loadDeviceDetail(context, message.uid, message.compilerUid);
+    const detail = await loadDeviceDetail(context, message.uid, message.compilerUid);
     void panel.webview.postMessage({ type: 'deviceDetail', detail, selectionMode: 'mcu' });
     return;
   }
@@ -219,9 +255,9 @@ async function handleMessage(message, panel, context) {
     const board = database.getBoard(context, message.uid);
     if (!board) throw new Error(`Board '${message.uid}' was not found in the C database.`);
     const devices = database.listBoardDevices(context, message.uid, SUPPORTED_COMPILERS);
-    if (!devices.length) throw new Error(`${board.name || board.uid} has no supported ARM/GCC MCU mapping.`);
+    if (!devices.length) throw new Error(`${board.name || board.uid} has no supported C MCU mapping.`);
     if (devices.length === 1) {
-      const detail = loadDeviceDetail(context, devices[0].uid, undefined, board.uid);
+      const detail = await loadDeviceDetail(context, devices[0].uid, undefined, board.uid);
       void panel.webview.postMessage({ type: 'deviceDetail', detail, selectionMode: 'board' });
     } else {
       void panel.webview.postMessage({ type: 'boardDevices', board, devices });
@@ -229,8 +265,13 @@ async function handleMessage(message, panel, context) {
     return;
   }
   if (message.type === 'selectBoardDevice' && typeof message.boardUid === 'string' && typeof message.deviceUid === 'string') {
-    const detail = loadDeviceDetail(context, message.deviceUid, message.compilerUid, message.boardUid);
+    const detail = await loadDeviceDetail(context, message.deviceUid, message.compilerUid, message.boardUid);
     void panel.webview.postMessage({ type: 'deviceDetail', detail, selectionMode: 'board' });
+    return;
+  }
+  if (message.type === 'selectCompiler' && typeof message.deviceUid === 'string' && typeof message.compilerUid === 'string') {
+    const detail = await loadDeviceDetail(context, message.deviceUid, message.compilerUid, message.boardUid);
+    void panel.webview.postMessage({ type: 'deviceDetail', detail, selectionMode: message.selectionMode === 'board' ? 'board' : 'mcu' });
     return;
   }
   if (message.type === 'buildConfiguration') {
@@ -274,18 +315,18 @@ function html(webview, extensionUri) {
 <section id="startView" class="pageView selectionStart"><div class="viewHeader"><div><div class="eyebrow">NEW C CONFIGURATION</div><h2>What do you want to start from?</h2><p>Board selection resolves its compatible MCU from the C database; MCU selection starts directly from the device.</p></div></div>
 <div class="selectionCards"><button id="chooseMcuMode" class="selectionCard"><strong>MCU</strong><span>Choose a device directly, then configure its clock/register parameters, package and programmer.</span></button><button id="chooseBoardMode" class="selectionCard"><strong>Board</strong><span>Choose a development board, resolve a compatible MCU, then configure the same clock/register parameters.</span></button></div></section>
 
-<section id="catalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE DEVICES</div><h2>MCU catalog</h2><p>Only MCUs mapped to the supported ARM GCC compiler are shown.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="mcuSearch" type="search" placeholder="MCU, vendor, family..."></label><div class="resultCount"><strong id="mcuCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th><th>Flash</th><th>RAM</th></tr></thead><tbody id="mcuTableBody"></tbody></table></div></section>
+<section id="catalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE DEVICES</div><h2>MCU catalog</h2><p>MCUs are shown when at least one database-mapped CMake compiler is available.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="mcuSearch" type="search" placeholder="MCU, vendor, family..."></label><div class="resultCount"><strong id="mcuCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th><th>Flash</th><th>RAM</th></tr></thead><tbody id="mcuTableBody"></tbody></table></div></section>
 
-<section id="boardCatalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE BOARDS</div><h2>Board catalog</h2><p>Only boards with at least one supported ARM/GCC MCU are shown.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardSearch" type="search" placeholder="Board, vendor, category..."></label><div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div></div></div><div class="tableShell"><table class="dataTable boardTable"><thead><tr><th>Board</th><th>Vendor</th><th>Category</th><th>Compatible MCUs</th></tr></thead><tbody id="boardTableBody"></tbody></table></div></section>
+<section id="boardCatalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE BOARDS</div><h2>Board catalog</h2><p>Boards are shown when at least one compatible MCU has a database-mapped CMake compiler.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardSearch" type="search" placeholder="Board, vendor, category..."></label><div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div></div></div><div class="tableShell"><table class="dataTable boardTable"><thead><tr><th>Board</th><th>Vendor</th><th>Category</th><th>Compatible MCUs</th></tr></thead><tbody id="boardTableBody"></tbody></table></div></section>
 
-<section id="boardDeviceView" class="pageView hidden"><div class="viewNav managerNav"><button id="backToBoards" class="secondary">← Boards</button></div><div class="viewHeader"><div><div class="eyebrow">BOARD MCU</div><h2 id="boardDeviceTitle"></h2><p>This board supports multiple C targets. Select the MCU installed on the board or MCU card.</p></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th></tr></thead><tbody id="boardDeviceTableBody"></tbody></table></div></section>
+<section id="boardDeviceView" class="pageView hidden"><div class="viewNav managerNav"><button id="backToBoards" class="secondary">← Boards</button></div><div class="viewHeader"><div><div class="eyebrow">BOARD MCU</div><h2 id="boardDeviceTitle"></h2><p>This board supports multiple C targets. Select the MCU installed on the board or MCU card.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardDeviceSearch" type="search" placeholder="MCU, vendor, family..."></label><div class="resultCount"><strong id="boardDeviceCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th></tr></thead><tbody id="boardDeviceTableBody"></tbody></table></div></section>
 
 <section id="loadingView" class="loadingView hidden"><div class="chipIcon">C</div><h2 id="loadingText">Loading...</h2></section>
 
 <section id="configView" class="pageView hidden"><div class="viewNav"><button id="backToSelection" class="secondary">← Selection</button></div>
-<div class="deviceHeader"><div><div class="eyebrow">C MCU SETTINGS</div><div class="titleWithBadge"><h2 id="selectedName"></h2><span class="statusBadge available">Core JSON</span></div></div><div class="metaGrid"><div><span>Vendor</span><strong id="selectedVendor"></strong></div><div><span>Family</span><strong id="selectedFamily"></strong></div><div><span>Compiler</span><code id="selectedCompiler"></code></div><div><span>Core path</span><code id="selectedCorePath"></code></div></div></div>
+<div class="deviceHeader"><div><div class="eyebrow">C MCU SETTINGS</div><div class="titleWithBadge"><h2 id="selectedName"></h2><span class="statusBadge available">Core JSON</span></div></div><div class="metaGrid"><div><span>Vendor</span><strong id="selectedVendor"></strong></div><div><span>Family</span><strong id="selectedFamily"></strong></div><div><span>Compiler</span><select id="compilerSelect"></select></div><div><span>Core path</span><code id="selectedCorePath"></code></div></div></div>
 <section id="selectedBoardCard" class="clockSection card hidden"><div><h3 id="selectedBoardName"></h3><p id="selectedBoardInfo"></p></div></section>
-<section class="clockSection card"><div><h3>Setup</h3><p>Choose how this reusable C environment will be built.</p></div><div class="cSetupOptions"><label class="clockInput">Setup name<input id="setupName" type="text"></label><label class="clockInput">Mode<select id="setupMode"><option value="full-sdk">mikroSDK 2.19.1 + core</option><option value="bare-metal">Bare metal core</option></select></label><label class="clockInput">Application output<select id="applicationOutput"><option value="debug-terminal">Debug Terminal (printf_me)</option><option value="uart">UART</option></select></label><label class="clockInput">MCU package<select id="packageSelect"></select></label><label class="clockInput">Programmer<select id="programmerSelect"></select></label></div></section>
+<section class="clockSection card"><div><h3>Setup</h3><p>Choose how this reusable C environment will be built.</p></div><div class="cSetupOptions"><label class="clockInput">Setup name<input id="setupName" type="text"></label><label class="clockInput">Mode<select id="setupMode"><option value="full-sdk">Latest mikroSDK + selected MCU core</option><option value="bare-metal">Bare metal core</option></select></label><label class="clockInput">Application output<select id="applicationOutput"><option value="debug-terminal">Debug Terminal (printf_me)</option><option value="uart">UART</option></select></label><label class="clockInput">MCU package<select id="packageSelect"></select></label><label class="clockInput">Programmer<select id="programmerSelect"></select></label></div></section>
 <section class="clockSection card"><div><h3>System clock</h3><p>The default comes from <code>def/&lt;MCU_NAME&gt;.json</code>. The value is written to <code>FOSC_KHZ_VALUE</code>.</p></div><label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="0.001"></label></section>
 <section><div class="sectionHeading"><div><h3>Clock / configuration registers</h3><p>Visible options come directly from <code>config_registers</code> in the MCU JSON. Hidden fields preserve their JSON <code>init</code> value.</p></div></div><div id="registerGrid" class="registerGrid"></div></section>
 <div class="definitionPath"><span>Definition</span><code id="definitionPath"></code></div>
@@ -325,5 +366,5 @@ async function openCConfigurator(context, setupId) {
 
 module.exports = {
   openCConfigurator,
-  _test: { fieldId, serializeDefinition, findDefinitionFile }
+  _test: { fieldId, serializeDefinition, settingsArrayOptions, maskShift, findDefinitionFile }
 };

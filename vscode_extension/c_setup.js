@@ -8,6 +8,7 @@ const vscode = require('vscode');
 const database = require('./c_database');
 const packages = require('./c_package_manager');
 const codegripCatalog = require('./c_codegrip_catalog');
+const compilerSupport = require('./c_compiler_support');
 const { openCConfigurator } = require('./c_configurator');
 const {
   discoverUsbCodegrips,
@@ -18,30 +19,26 @@ const {
   stopCodegripServer
 } = require('./codegrip_backend');
 
-// Adding another C compiler family is intentionally isolated to one adapter.
-// The database drives devices/packages; an adapter only describes host tools.
-const COMPILER_ADAPTERS = Object.freeze({
-  gcc_arm_none_eabi: {
-    uid: 'gcc_arm_none_eabi',
-    language: 'GNU',
-    executableNames: {
-      c: ['arm-none-eabi-gcc'],
-      cxx: ['arm-none-eabi-g++'],
-      asm: ['arm-none-eabi-gcc', 'arm-none-eabi-as'],
-      gdb: ['arm-none-eabi-gdb'],
-      objcopy: ['arm-none-eabi-objcopy']
-    }
-  }
-});
+// Compiler compatibility comes from CompilerToDevice. Host invocation details
+// are centralized separately so package/UI/setup code use one compiler model.
+const COMPILER_ADAPTERS = compilerSupport.COMPILER_ADAPTERS;
 
 const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink']);
-const C_BUILD_SUPPORT_VERSION = 11;
+
+function metadataMcuName(metadata = {}) {
+  return String(metadata?.device?.mcuName || metadata?.sdkConfig?.MCU_NAME || metadata?.device?.uid || '').trim();
+}
+
+function setupMcuName(setup = {}) {
+  return metadataMcuName(setup.metadata || {});
+}
+const C_BUILD_SUPPORT_VERSION = 22;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
 
 function supportedCompilerUids() {
-  return Object.keys(COMPILER_ADAPTERS);
+  return compilerSupport.supportedCompilerUids();
 }
 
 function safeId(value) {
@@ -189,12 +186,12 @@ async function chooseSetupSelection(context) {
   ], { placeHolder: 'Select the setup type' });
   if (!modes) return;
 
-  const sdks = database.listSdks(context, devicePick.value.uid, compilerPick.value.uid).filter((sdk) => String(sdk.version) === '2.19.1');
+  const sdks = database.listSdks(context, devicePick.value.uid, compilerPick.value.uid);
   const sdkPick = await quickPick(sdks.map((sdk) => ({
     label: `${sdk.name} ${sdk.version}`,
     description: sdk.uid,
     value: sdk
-  })), { placeHolder: modes.value === 'full-sdk' ? 'Select the supported mikroSDK version' : 'Select metadata version used for compatibility', emptyMessage: `mikroSDK 2.19.1 is not mapped to ${devicePick.value.uid} for ${compilerPick.value.uid}.` });
+  })), { placeHolder: modes.value === 'full-sdk' ? 'Select the supported mikroSDK version' : 'Select metadata version used for compatibility', emptyMessage: `No non-legacy mikroSDK is mapped to ${devicePick.value.uid} for ${compilerPick.value.uid}.` });
   if (!sdkPick) return;
 
   const devicePackages = database.listDevicePackages(context, devicePick.value.uid);
@@ -214,7 +211,7 @@ async function chooseSetupSelection(context) {
     description: programmer.uid,
     detail: programmer.description || '',
     value: programmer
-  })), { placeHolder: 'Select programmer/debug probe', emptyMessage: `No CODEGRIP or J-Link programmer is mapped to ${devicePick.value.uid}.` });
+  })), { placeHolder: 'Select programmer/debug probe', emptyMessage: `No supported programmer is mapped to ${devicePick.value.uid}.` });
   if (!programmerPick) return;
 
   const applicationOutputPick = await quickPick([
@@ -266,16 +263,33 @@ function codegripPackSpec(pkg) {
   };
 }
 
-function packageSpecs(_context, metadata, mode, setup) {
+async function packageSpecs(context, metadata, mode, setup, token) {
+  const core = await packages.corePackageSpec(context, metadata.packageRequirements?.core?.name || metadata.corePackageName, metadata.compiler.uid, token);
   const result = [
-    { kind: 'database', name: 'C_database', version: '0.0.1', displayName: 'C setup database', environment: true },
-    { kind: 'core', name: 'C_core', version: '0.0.1', displayName: 'C core collection', environment: true },
-    { kind: 'sdk', name: 'mikrosdk', version: '2.19.1', displayName: 'mikroSDK 2.19.1', environment: true },
+    { kind: 'database', name: 'C_database', version: 'live', displayName: 'NECTO live database', environment: true },
+    core,
     { kind: 'infrastructure', name: 'unit_test_lib', version: 'general_packages_assets', displayName: 'Unit Test Library', environment: true },
     { kind: 'infrastructure', name: 'preinit', version: 'general_packages_assets', displayName: 'Preinit Routines', environment: true },
     { kind: 'infrastructure', name: 'mikroe_utils_common', version: 'general_packages_assets', displayName: 'MIKROE Common CMake Utilities', environment: true },
-    { kind: 'toolchain', name: metadata.compiler.packageName || 'gcc_arm_compiler', version: '14.2.1-1.1', displayName: metadata.compiler.name, environment: true }
+    await packages.compilerPackageSpec(context, metadata.compiler, token)
   ];
+  if (mode === 'full-sdk') {
+    result.push(await packages.sdkPackageSpec(token));
+    if (metadata.packageRequirements?.card) {
+      const cardRequirement = {
+        ...metadata.packageRequirements.card,
+        mcuName: String(
+          metadata.packageRequirements.card.mcuName ||
+          metadata.device?.mcuName ||
+          metadata.sdkConfig?.MCU_NAME ||
+          metadata.device?.uid ||
+          ''
+        ).trim()
+      };
+      result.push(await packages.bspPackageSpec('bsp-card', cardRequirement, token));
+    }
+    if (metadata.packageRequirements?.board) result.push(await packages.bspPackageSpec('bsp-board', metadata.packageRequirements.board, token));
+  }
   if (metadata.programmer.uid === 'codegrip') {
     result.push({ kind: 'programmer', name: 'codegrip_gdb_server', version: '1.7.0', displayName: 'CODEGRIP Suite', environment: true });
     for (const pkg of setup?.codegripCatalog?.packages || []) result.push(codegripPackSpec(pkg));
@@ -283,8 +297,8 @@ function packageSpecs(_context, metadata, mode, setup) {
   return result;
 }
 
-function buildPackageSpecs(context, metadata, mode, setup) {
-  return packageSpecs(context, metadata, mode, setup);
+async function buildPackageSpecs(context, metadata, mode, setup, token) {
+  return packageSpecs(context, metadata, mode, setup, token);
 }
 
 function findRecursive(root, predicate, maximumDepth = 6) {
@@ -319,37 +333,43 @@ function executableExtensions(name) {
   return process.platform === 'win32' && !path.extname(name) ? [`${name}.exe`, name] : [name];
 }
 
-function resolveTool(toolchainEntry, names, relativeName) {
-  const roots = [configuredArmGccRoot(), toolchainEntry?.root].filter(Boolean);
+function resolveTool(toolchainEntry, names, relativeName, additionalRoots = []) {
+  const roots = [...additionalRoots, toolchainEntry?.root].filter(Boolean);
   const relative = String(relativeName || '').replace(/[\\/]+/g, path.sep);
   for (const root of roots) {
     const direct = relative ? path.join(root, relative) : undefined;
     const candidates = direct ? [direct, ...executableExtensions(direct)] : [];
     for (const candidate of candidates) if (fs.existsSync(candidate)) return candidate;
-    for (const name of names) {
-      const found = findRecursive(root, (_candidate, fileName) => executableExtensions(name).includes(fileName), 5);
+    for (const name of names || []) {
+      const found = findRecursive(root, (_candidate, fileName) => executableExtensions(name).includes(fileName), 8);
       if (found) return found;
     }
   }
-  return packages.findOnPath(names);
+  return packages.findOnPath(names || []);
 }
 
 function resolveToolchain(setup, installed) {
   const adapter = COMPILER_ADAPTERS[setup.metadata.compiler.uid];
   if (!adapter) throw new Error(`No C compiler adapter is registered for ${setup.metadata.compiler.uid}.`);
-  const toolchainKey = packages.packageKey({
-    kind: 'toolchain',
-    name: setup.metadata.compiler.packageName,
-    version: '14.2.1-1.1'
-  });
-  const entry = installed.get(toolchainKey) || packages.getInstalledPackage(setup.context, toolchainKey);
-  const c = resolveTool(entry, adapter.executableNames.c, setup.metadata.compiler.cCompiler);
-  const cxx = resolveTool(entry, adapter.executableNames.cxx, setup.metadata.compiler.cxxCompiler) || c;
-  const asm = resolveTool(entry, adapter.executableNames.asm, setup.metadata.compiler.asmCompiler) || c;
-  const gdb = resolveTool(entry, adapter.executableNames.gdb, setup.metadata.compiler.gdbPath);
-  const objcopy = resolveTool(entry, adapter.executableNames.objcopy, 'bin/arm-none-eabi-objcopy');
+  const packageName = String(setup.metadata.compiler.packageName || '').trim();
+  const allInstalled = [...installed.values(), ...packages.listInstalledPackages(setup.context, true)];
+  const entry = allInstalled.find((item) => item.kind === 'toolchain' && item.name === packageName);
+  const configuredRoots = setup.metadata.compiler.uid === 'gcc_arm_none_eabi' ? [configuredArmGccRoot()].filter(Boolean) : [];
+  // Compilers.path is NECTO's package-relative toolchain location; the
+  // executable fields (c_compiler/cxx_compiler/asm_compiler/gdb_path) are the
+  // authoritative binary paths. Always resolve the C compiler from c_compiler.
+  const c = resolveTool(entry, adapter.executableNames.c, setup.metadata.compiler.cCompiler, configuredRoots);
+  const hasCxx = Boolean(String(setup.metadata.compiler.cxxCompiler || '').trim()) || (adapter.executableNames.cxx || []).length > 0;
+  const cxx = hasCxx ? resolveTool(entry, adapter.executableNames.cxx, setup.metadata.compiler.cxxCompiler, configuredRoots) : undefined;
+  // Keep the raw assembler from Compilers.asm_compiler available for explicit
+  // jobs, but use the compiler driver for CMake ASM whenever the adapter says
+  // so. This is required for normal target_compile_definitions() on startup ASM.
+  const assembler = resolveTool(entry, adapter.executableNames.asm, setup.metadata.compiler.asmCompiler, configuredRoots);
+  const cmakeAsm = adapter.cmakeAsmViaCCompiler ? c : (assembler || c);
+  const gdb = resolveTool(entry, adapter.executableNames.gdb, setup.metadata.compiler.gdbPath, configuredRoots);
+  const objcopy = resolveTool(entry, adapter.executableNames.objcopy, '', configuredRoots);
   if (!c) throw new Error(`The ${setup.metadata.compiler.name} package is installed but its C compiler was not found.`);
-  return { c, cxx, asm, gdb, objcopy, adapter, root: entry?.root || path.dirname(c) };
+  return { c, cxx, asm: cmakeAsm, cmakeAsm, assembler, gdb, objcopy, adapter, root: entry?.root || path.dirname(c), packageEntry: entry };
 }
 
 function resolveBuildTool(name, alternatives = []) {
@@ -399,9 +419,12 @@ function defaultRegisterValue(register, selectedValues = {}) {
   for (const field of Array.isArray(register.fields) ? register.fields : []) {
     const mask = Number.parseInt(String(field.mask || '0').replace(/^0x|\$/i, ''), 16) || 0;
     const fieldId = registerFieldId(register, field);
-    const selected = Object.prototype.hasOwnProperty.call(selectedValues || {}, fieldId)
-      ? selectedValues[fieldId]
-      : field.init;
+    const hasSelectedValue = Object.prototype.hasOwnProperty.call(selectedValues || {}, fieldId)
+      && String(selectedValues[fieldId] ?? '').trim() !== '';
+    // Range-backed fields (for example STM32 PLLN) used to be rendered as an
+    // empty <select>, which saved an empty string into registerValues. Treat an
+    // empty UI value as "no override" so the MCU JSON init value is preserved.
+    const selected = hasSelectedValue ? selectedValues[fieldId] : field.init;
     const initial = Number.parseInt(String(selected || '0').replace(/^0x|\$/i, ''), 16) || 0;
     value = (value & ~mask) | (initial & mask);
   }
@@ -413,7 +436,8 @@ function generateCoreHeader(coreSource, metadata, clockMHz, outputDirectory, reg
   const definitionPath = path.join(coreSource, 'def', metadata.device.defFile);
   if (!fs.existsSync(templatePath)) throw new Error(`Core header template was not found: ${templatePath}`);
   if (!fs.existsSync(definitionPath)) throw new Error(`MCU definition was not found: ${definitionPath}`);
-  const definition = readJson(definitionPath, `${metadata.device.uid} definition`);
+  const mcuName = metadataMcuName(metadata);
+  const definition = readJson(definitionPath, `${mcuName} definition`);
   const defines = [];
   for (const register of Array.isArray(definition.config_registers) ? definition.config_registers : []) {
     const key = String(register.key || '').trim();
@@ -425,7 +449,7 @@ function generateCoreHeader(coreSource, metadata, clockMHz, outputDirectory, reg
   const clockKHz = Math.round(Number(clockMHz) * 1000);
   defines.push(`#define FOSC_KHZ_VALUE ${Number.isFinite(clockKHz) ? clockKHz : 0}`);
   defines.push(Number.isFinite(clockKHz) ? '#define FOSC_KHZ_VALUE_DEFINED' : '#define FOSC_KHZ_VALUE_NOT_DEFINED');
-  defines.push(`#define ${metadata.device.uid}`);
+  defines.push(`#define ${mcuName}`);
   defines.push('#define MCU_NAME_DEFINED');
   fs.mkdirSync(outputDirectory, { recursive: true });
   const outputPath = path.join(outputDirectory, 'core_header.h');
@@ -558,10 +582,10 @@ function sdkMemoryVariables(metadata = {}) {
   const flash = Number(metadata?.device?.flash ?? 0);
   const ram = Number(metadata?.device?.ram ?? 0);
   if (!Number.isFinite(flash) || flash <= 0) {
-    throw new Error(`${metadata?.device?.uid || 'Selected MCU'} does not define a valid Devices.flash value in bytes.`);
+    throw new Error(`${metadataMcuName(metadata) || 'Selected MCU'} does not define a valid Devices.flash value in bytes.`);
   }
   if (!Number.isFinite(ram) || ram <= 0) {
-    throw new Error(`${metadata?.device?.uid || 'Selected MCU'} does not define a valid Devices.ram value in bytes.`);
+    throw new Error(`${metadataMcuName(metadata) || 'Selected MCU'} does not define a valid Devices.ram value in bytes.`);
   }
   return { MCU_FLASH: Math.trunc(flash), MCU_RAM: Math.trunc(ram) };
 }
@@ -594,42 +618,51 @@ function validateSdkDriverPackages(installPrefix, metadata = {}) {
   const expected = expectedSdkDriverPackages(metadata);
   const missing = expected.filter((packageName) => !findInstalledPackageConfig(installPrefix, packageName));
   if (missing.length) {
-    throw new Error(`mikroSDK driver bootstrap for ${metadata?.device?.uid || 'selected MCU'} is incomplete. Missing: ${missing.join(', ')}.`);
+    throw new Error(`mikroSDK driver bootstrap for ${metadataMcuName(metadata) || 'selected MCU'} is incomplete. Missing: ${missing.join(', ')}.`);
   }
   return expected;
 }
 
 function writeToolchain(filePath, setup, resolved, options) {
   const metadata = setup.metadata;
-  // Keep the generated compatibility module first. The general package is
-  // shipped as mikroeUtilsCommon.cmake while mikroSDK/core sources include
-  // mikroeUtils, and its stock add_preinit_lib() assumes NECTO's package tree.
   const modulePaths = [
     options.compatibilityModuleRoot,
     options.infrastructureRoot,
     options.coreSource && path.join(options.coreSource, 'cmake'),
     path.join(options.installPrefix, 'lib', 'cmake')
   ].filter(Boolean).map(quoteCmake).join(';');
-  // NECTO stores board metadata as _MSDK_BOARD_NAME_ / _MSDK_SHIELD_,
-  // while mikroSDK's BSP CMake consumes MSDK_BOARD_NAME / MSDK_SHIELD. Keep
-  // the original metadata variables too, but always publish the CMake aliases.
   const settings = {
     ...completeSdkCmakeVariables(metadata),
     TOOLCHAIN_ID: metadata.compiler.uid,
     OSC: setup.clockMHz,
-    // mikroSDK selects its logger implementation through the LOG_INTERFACE
-    // CMake variable. It then exports INTERFACE_LOGGER_UART or
-    // INTERFACE_LOGGER_STDOUT to applications through MikroSDK.Log.
+    OSC_KHZ: Number.isFinite(Number(setup.clockMHz)) ? Math.round(Number(setup.clockMHz) * 1000) : '',
     LOG_INTERFACE: applicationOutputCmakeValue(setup.applicationOutput)
   };
   const cacheSettings = Object.entries(settings).map(([key, value]) => `set(${key} "${quoteCmake(cmakeValue(value))}" CACHE STRING "" FORCE)`).join('\n');
-  const compilerFlags = splitFlags(metadata.device.compilerFlags).map((flag) => `"${quoteCmake(flag)}"`).join(' ');
-  const linkerFlags = splitFlags(metadata.device.linkerFlags).map((flag) => `"${quoteCmake(flag)}"`).join(' ');
-  const architectureFlags = armArchitectureFlags(metadata.sdkConfig.CORE_NAME, metadata.device.uid).map((flag) => `"${flag}"`).join(' ');
-  const compatibilityFlags = coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c)).map((flag) => `"${flag}"`).join(' ');
-  const linker = options.linkerScript ? `add_link_options("-T${quoteCmake(options.linkerScript)}")` : '';
+  const deviceCompilerFlags = splitFlags(metadata.device.compilerFlags);
+  const deviceLinkerFlags = splitFlags(metadata.device.linkerFlags);
+  const armFlags = /^(gnu-arm|clang-arm)$/.test(String(resolved.adapter?.family || ''))
+    ? armArchitectureFlags(metadata.sdkConfig.CORE_NAME, metadataMcuName(metadata))
+    : [];
+  const compatibilityFlags = resolved.adapter?.family === 'gnu-arm'
+    ? coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c))
+    : [];
+  const adapterFlags = compilerSupport.compilerSpecificFlags(resolved.adapter, metadata, armFlags, compatibilityFlags);
+  const compileFlags = [...adapterFlags.compile, ...deviceCompilerFlags].filter(Boolean);
+  const linkFlags = [...adapterFlags.link, ...deviceLinkerFlags].filter(Boolean);
+  const compileLine = compileFlags.length ? `add_compile_options(${compileFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
+  const linkLine = linkFlags.length ? `add_link_options(${linkFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
+  const family = String(resolved.adapter?.family || '');
+  const acceptsGnuLinkerScript = /^(gnu-|clang-|xc32)/.test(family);
+  const linker = options.linkerScript && acceptsGnuLinkerScript ? `add_link_options("-T${quoteCmake(options.linkerScript)}")` : '';
   const startup = options.startupFile ? `set(MIKROBUS_STARTUP_FILE "${quoteCmake(options.startupFile)}" CACHE FILEPATH "" FORCE)` : '';
-  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\nset(CMAKE_C_COMPILER "${quoteCmake(resolved.c)}")\nset(CMAKE_CXX_COMPILER "${quoteCmake(resolved.cxx)}")\nset(CMAKE_ASM_COMPILER "${quoteCmake(resolved.asm)}")\n${cacheSettings}\nset(TOOLCHAIN_LANGUAGE "${resolved.adapter.language}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nset(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\nadd_compile_options(${architectureFlags} ${compatibilityFlags} -fms-extensions -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 ${compilerFlags})\nadd_link_options(${architectureFlags} --specs=nosys.specs -Wl,-gc-sections,--print-memory-usage ${linkerFlags})\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
+  const cmakeAsmCompiler = resolved.adapter?.cmakeAsmViaCCompiler ? resolved.c : (resolved.cmakeAsm || resolved.asm || resolved.c);
+  const compilerLines = [
+    `set(CMAKE_C_COMPILER "${quoteCmake(resolved.c)}" CACHE FILEPATH "" FORCE)`,
+    resolved.cxx ? `set(CMAKE_CXX_COMPILER "${quoteCmake(resolved.cxx)}" CACHE FILEPATH "" FORCE)` : '',
+    cmakeAsmCompiler ? `set(CMAKE_ASM_COMPILER "${quoteCmake(cmakeAsmCompiler)}" CACHE FILEPATH "" FORCE)` : ''
+  ].filter(Boolean).join('\n');
+  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n${compilerLines}\nmessage(STATUS "MikroBUS compiler: ${quoteCmake(metadata.compiler.uid)} -> ${quoteCmake(resolved.c)}")\nmessage(STATUS "MikroBUS CMake ASM driver: ${quoteCmake(cmakeAsmCompiler)}")\n${cacheSettings}\nset(TOOLCHAIN_LANGUAGE "${quoteCmake(resolved.adapter.language)}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nset(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\n${compileLine}\n${linkLine}\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
   fs.writeFileSync(filePath, text, 'utf8');
 }
 
@@ -841,6 +874,16 @@ function generateMikroeUtilsCompatibility(infrastructure, generatedRoot) {
     `    DESTINATION "\${CMAKE_INSTALL_LIBDIR}/../include/core"\n` +
     `  )\n` +
     `endfunction()\n\n` +
+    `# The published add_fosc_macro() emits a C-style expression such as\n` +
+    `# OSC_KHZ=216*1000UL for every language. GNU as rejects the UL suffix.\n` +
+    `# The generated toolchain provides OSC_KHZ as an integer number of kHz,\n` +
+    `# which is valid as both a C preprocessor definition and an ASM --defsym.\n` +
+    `macro(add_fosc_macro target)\n` +
+    `  if(NOT DEFINED OSC_KHZ OR "\${OSC_KHZ}" STREQUAL "")\n` +
+    `    message(FATAL_ERROR "OSC_KHZ is not set by the generated toolchain.")\n` +
+    `  endif()\n` +
+    `  target_compile_definitions(\${target} PRIVATE OSC_KHZ=\${OSC_KHZ})\n` +
+    `endmacro()\n\n` +
     `# mikroeUtilsCommon.cmake assumes ../../../../preinit from NECTO's normal\n` +
     `# package hierarchy. The extension keeps preinit in c-runtime/packages,\n` +
     `# so resolve it through PREINIT_ROUTINE_PATH instead.\n` +
@@ -955,7 +998,7 @@ function materializeCodegripRuntime(context, setup, installed) {
       installDirectory
     });
   }
-  if (!devicePacks.length) throw new Error(`No CODEGRIP device pack was resolved for ${setup.metadata.device.uid}.`);
+  if (!devicePacks.length) throw new Error(`No CODEGRIP device pack was resolved for ${setupMcuName(setup)}.`);
   if (process.platform !== 'win32') {
     try { fs.chmodSync(serverExecutable, 0o755); } catch {}
   }
@@ -971,19 +1014,107 @@ function materializeCodegripRuntime(context, setup, installed) {
   return setup.codegripRuntime;
 }
 
+
+function ensureBspSkeleton(context, sdkSource) {
+  const bspRoot = path.join(sdkSource, 'bsp');
+  const skeleton = path.join(context.extensionPath, 'resources', 'c_bsp_skeleton');
+  if (!fs.existsSync(skeleton)) throw new Error(`Bundled BSP skeleton is missing: ${skeleton}`);
+  // The lightweight mikroSDK archive intentionally carries no full BSP catalog.
+  // Rebuild only the setup-specific board/card overlay so uninstalled or previously
+  // selected BSPs do not remain usable accidentally from an earlier setup build.
+  fs.rmSync(path.join(bspRoot, 'board', 'include', 'boards'), { recursive: true, force: true });
+  fs.rmSync(path.join(bspRoot, 'board', 'include', 'mcu_cards'), { recursive: true, force: true });
+  copyDirectoryContents(skeleton, bspRoot);
+  return bspRoot;
+}
+
+function findBspBoardSource(root, folderName) {
+  const normalized = String(folderName || '').trim().toLowerCase();
+  if (!root || !normalized) return undefined;
+
+  // mikroSDK BSP assets have existed in both of these layouts. Always consume
+  // the board directory itself and normalize it into the SDK skeleton below.
+  for (const candidate of [
+    path.join(root, 'board', 'include', 'boards', normalized),
+    path.join(root, 'include', 'boards', normalized),
+    path.join(root, normalized)
+  ]) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return candidate;
+  }
+
+  // Be tolerant of case differences in archive folder names.
+  const named = findDirectoryNamed(root, normalized, 7);
+  if (named && (fs.existsSync(path.join(named, 'board.cmake')) || fs.existsSync(path.join(named, 'board.h')))) return named;
+
+  // Last-resort compatibility for one-board archives that omit the expected
+  // folder level entirely. The DB-provided folderName remains authoritative
+  // for the destination path.
+  const cmake = findRecursive(root, (_candidate, name) => name.toLowerCase() === 'board.cmake', 7);
+  if (cmake) return path.dirname(cmake);
+  const header = findRecursive(root, (_candidate, name) => name.toLowerCase() === 'board.h', 7);
+  return header ? path.dirname(header) : undefined;
+}
+
+function materializeBoardBspPackage(bspRoot, entryRoot, folderName, packageName = folderName) {
+  const normalized = String(folderName || '').trim().toLowerCase();
+  if (!normalized) throw new Error(`Board BSP '${packageName}' has no database-defined destination folder.`);
+  const source = findBspBoardSource(entryRoot, normalized);
+  if (!source) throw new Error(`Board BSP '${packageName}' does not contain board.h or board.cmake.`);
+  const destination = path.join(bspRoot, 'board', 'include', 'boards', normalized);
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  copyDirectoryContents(source, destination);
+  return destination;
+}
+
+function materializeMcuCardBspPackage(bspRoot, entryRoot, folderName, mcuName, packageName = folderName) {
+  const normalizedFolder = String(folderName || '').trim().toLowerCase();
+  const normalizedMcu = String(mcuName || '').trim();
+  if (!normalizedFolder) throw new Error(`MCU-card BSP '${packageName}' has no database-defined destination folder.`);
+  if (!normalizedMcu) throw new Error(`MCU-card BSP '${packageName}' has no MCU_NAME in Devices.sdk_config.`);
+  const header = findRecursive(entryRoot, (_candidate, name) => name.toLowerCase() === 'mcu_card.h', 8);
+  if (!header) throw new Error(`MCU-card BSP '${packageName}' does not contain mcu_card.h.`);
+  const cardRoot = path.join(bspRoot, 'board', 'include', 'mcu_cards', normalizedFolder);
+  const destination = path.join(cardRoot, normalizedMcu);
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  fs.copyFileSync(header, path.join(destination, 'mcu_card.h'));
+  fs.rmSync(path.join(cardRoot, 'mcu_card.h'), { force: true });
+  return destination;
+}
+
+function materializeSelectedBsp(context, sdkSource, setup, specs, installed) {
+  const bspRoot = ensureBspSkeleton(context, sdkSource);
+  for (const spec of specs.filter((item) => item.kind === 'bsp-board' || item.kind === 'bsp-card')) {
+    const entry = installed.get(packages.packageKey(spec)) || packages.getInstalledPackage(context, spec);
+    if (!entry?.root) throw new Error(`BSP package '${spec.name}' was not installed.`);
+    if (spec.kind === 'bsp-board') {
+      const folderName = String(spec.folderName || setup.metadata.packageRequirements?.board?.folderName || '').toLowerCase();
+      materializeBoardBspPackage(bspRoot, entry.root, folderName, spec.name);
+      continue;
+    }
+    // MCU-card packages are MCU-specific even when the upstream archive only
+    // contains a plain mcu_card.h. mikroSDK resolves the card header through
+    // <card>/<MCU_NAME>/mcu_card.h, so preserve the database MCU_NAME level.
+    const folderName = String(spec.folderName || setup.metadata.packageRequirements?.card?.folderName || '').toLowerCase();
+    const mcuName = String(spec.mcuName || setup.metadata.packageRequirements?.card?.mcuName || setupMcuName(setup) || '').trim();
+    materializeMcuCardBspPackage(bspRoot, entry.root, folderName, mcuName, spec.name);
+  }
+}
+
 async function ensureAndBuildSetup(context, setup, progress, token) {
   refreshSetupMetadata(context, setup);
   if (setup.metadata.programmer.uid === 'codegrip' && !(setup.codegripCatalog?.packages || []).length) {
-    progress.report({ message: `Reading live CODEGRIP device-pack catalog for ${setup.metadata.device.uid}...` });
-    setup.codegripCatalog = await codegripCatalog.resolveDevice(setup.metadata.device.uid, token);
+    progress.report({ message: `Reading live CODEGRIP device-pack catalog for ${setupMcuName(setup)}...` });
+    setup.codegripCatalog = await codegripCatalog.resolveDevice(setupMcuName(setup), token);
   }
   writeJsonAtomic(setupFile(context, setup.id), setup);
   setup.context = context;
-  const specs = buildPackageSpecs(context, setup.metadata, setup.mode, setup);
+  const specs = await buildPackageSpecs(context, setup.metadata, setup.mode, setup, token);
   progress.report({ message: 'Resolving required packages...' });
   const installed = await packages.ensurePackages(context, specs, progress, token);
   if (setup.metadata.programmer.uid === 'codegrip') {
-    progress.report({ message: `Preparing CODEGRIP device packs for ${setup.metadata.device.uid}...` });
+    progress.report({ message: `Preparing CODEGRIP device packs for ${setupMcuName(setup)}...` });
     materializeCodegripRuntime(context, setup, installed);
   }
   const cmake = resolveBuildTool('cmake');
@@ -992,9 +1123,13 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     throw new Error('CMake and Ninja are required. Install them system-wide or set mikrobusRust.cCmakePath and mikrobusRust.cNinjaPath.');
   }
   const resolved = resolveToolchain(setup, installed);
-  const coreRoot = packageRoot(installed, 'core', 'C_core', '0.0.1');
+  output.appendLine(`Compiler DB C binary: ${setup.metadata.compiler.cCompiler || '(not set)'} -> ${resolved.c || '(not found)'}`);
+  output.appendLine(`Compiler DB ASM binary: ${setup.metadata.compiler.asmCompiler || '(not set)'} -> ${resolved.assembler || '(not found)'}`);
+  output.appendLine(`CMake ASM driver: ${resolved.cmakeAsm || resolved.asm || '(not found)'}`);
+  const coreSpec = specs.find((spec) => spec.kind === 'core' && spec.name === setup.metadata.corePackageName);
+  const coreRoot = coreSpec ? packageRoot(installed, coreSpec.kind, coreSpec.name, coreSpec.version) : undefined;
   const coreSource = locateCoreSource(coreRoot, setup.metadata.compiler.corePath, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME);
-  if (!coreSource || !fs.existsSync(path.join(coreSource, 'CMakeLists.txt'))) throw new Error(`C_core.zip does not contain a core for ${setup.metadata.compiler.corePath}/${setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME}.`);
+  if (!coreSource || !fs.existsSync(path.join(coreSource, 'CMakeLists.txt'))) throw new Error(`Core package '${setup.metadata.corePackageName}' does not contain a usable core for ${setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME}.`);
   const setupRoot = setupDirectory(context, setup.id);
   const buildRoot = path.join(setupRoot, 'build');
   const installPrefix = path.join(setupRoot, 'install');
@@ -1021,7 +1156,7 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
   fs.copyFileSync(coreHeader, generatedHeaderCopy);
   const coreToolchain = path.join(generatedRoot, 'core-toolchain.cmake');
   writeToolchain(coreToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix });
-  progress.report({ message: `Building ${setup.metadata.device.uid} core...` });
+  progress.report({ message: `Building ${setupMcuName(setup)} core...` });
   await withTemporaryCoreHeader(coreSource, coreHeader, () => configureBuildInstall(cmake, coreSource, coreBuildRoot, {
     CMAKE_MAKE_PROGRAM: ninja,
     CMAKE_TOOLCHAIN_FILE: coreToolchain,
@@ -1035,15 +1170,17 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     MCU_IS_DUALCORE: 'FALSE'
   }, token));
 
-  const linkerScript = findFirstByExtension(path.dirname(installPrefix), ['.ld']);
+  const linkerScript = findFirstByExtension(path.dirname(installPrefix), ['.ld', '.lds', '.gld', '.lkr']);
   const startupFile = findFirstByExtension(path.dirname(installPrefix), ['.s', '.S']);
   const projectToolchain = path.join(generatedRoot, 'toolchain.cmake');
   writeToolchain(projectToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix, linkerScript, startupFile });
 
   if (setup.mode === 'full-sdk') {
-    const sdkRoot = packageRoot(installed, 'sdk', 'mikrosdk', '2.19.1');
+    const sdkSpec = specs.find((spec) => spec.kind === 'sdk' && spec.name === 'mikrosdk');
+    const sdkRoot = sdkSpec ? packageRoot(installed, sdkSpec.kind, sdkSpec.name, sdkSpec.version) : undefined;
     const sdkSource = locateSdkSource(sdkRoot);
-    if (!sdkSource || !fs.existsSync(path.join(sdkSource, 'CMakeLists.txt'))) throw new Error(`The hardcoded mikroSDK 2.19.1 package has no recognizable source root.`);
+    if (!sdkSource || !fs.existsSync(path.join(sdkSource, 'CMakeLists.txt'))) throw new Error('The latest mikroSDK package has no recognizable source root.');
+    materializeSelectedBsp(context, sdkSource, setup, specs, installed);
     const sdkToolchain = path.join(generatedRoot, 'sdk-toolchain.cmake');
     writeToolchain(sdkToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix, linkerScript, sdkSetupBuild: true });
     const sdkDefinitions = {
@@ -1068,14 +1205,14 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     // into the setup prefix, validate the expected base modules, then configure
     // a clean final build so MikroSDK.Board sees ADC/GPIO/I2C/PWM/SPI/UART/
     // OneWire during its own configure step.
-    progress.report({ message: `Bootstrapping mikroSDK 2.19.1 driver modules...` });
+    progress.report({ message: `Bootstrapping mikroSDK driver modules...` });
     const sdkBootstrapBuild = path.join(buildRoot, 'sdk-bootstrap');
     fs.rmSync(sdkBootstrapBuild, { recursive: true, force: true });
     await configureBuildInstall(cmake, sdkSource, sdkBootstrapBuild, sdkDefinitions, token);
     const sdkDriverPackages = validateSdkDriverPackages(installPrefix, setup.metadata);
     setup.sdkDriverPackages = sdkDriverPackages;
 
-    progress.report({ message: `Building mikroSDK 2.19.1 board configuration...` });
+    progress.report({ message: `Building mikroSDK board configuration...` });
     const sdkBuild = path.join(buildRoot, 'sdk');
     fs.rmSync(sdkBuild, { recursive: true, force: true });
     await configureBuildInstall(cmake, sdkSource, sdkBuild, sdkDefinitions, token);
@@ -1129,7 +1266,7 @@ function programmerRuntime(context, setup) {
 async function selectCodegrip(context, setup) {
   const runtime = programmerRuntime(context, setup);
   if (!runtime.executable || !runtime.packsPath) throw new Error('Installed CODEGRIP server or device pack could not be located.');
-  const result = await discoverUsbCodegrips({ ...runtime, mcu: setup.metadata.device.uid, channel: output });
+  const result = await discoverUsbCodegrips({ ...runtime, mcu: setupMcuName(setup), channel: output });
   const selected = await quickPick(result.devices.map((device) => ({
     label: device.deviceName || 'CODEGRIP',
     description: device.serialNumber,
@@ -1143,7 +1280,7 @@ async function createSetupFromSelection(context, selection) {
   try {
     if (!selection) return;
     const metadata = database.getSetupMetadata(context, selection);
-    const setupName = String(selection.name || `${selection.deviceUid} C Setup`).trim();
+    const setupName = String(selection.name || `${metadata.device.mcuName || selection.deviceUid} C Setup`).trim();
     let existing;
     if (selection.setupId) {
       const existingFile = setupFile(context, selection.setupId);
@@ -1252,7 +1389,7 @@ async function applySetup(context, explicitSetupId) {
     if (!setup) {
       const selected = await quickPick(available.map((item) => ({
         label: item.name,
-        description: `${item.metadata.device.uid} · ${item.mode === 'full-sdk' ? `mikroSDK ${item.metadata.sdk.version}` : 'bare metal'}`,
+        description: `${setupMcuName(item)} · ${item.mode === 'full-sdk' ? `mikroSDK ${item.metadata.sdk.version}` : 'bare metal'}`,
         detail: item.metadata.programmer.name,
         value: item
       })), { placeHolder: 'Select a built C setup', emptyMessage: 'No built C setups exist. Create one first.' });
@@ -1295,6 +1432,8 @@ async function rebuildBoundSetup(context) {
 function safeWorkspaceBuildPath(root) {
   return path.join(root, '.mikrobus', 'c-build');
 }
+
+
 
 async function buildWorkspace(context) {
   try {
@@ -1437,8 +1576,8 @@ async function flashJlink(setup, hex) {
   if (!tools.commander) {
     throw new Error('J-Link Commander was not found. Set mikrobusRust.jlinkCommanderPath or install SEGGER J-Link/NECTO SEGGER programmer files.');
   }
-  const device = normalizeJlinkDeviceName(setup.metadata.device.uid);
-  output.appendLine(`J-Link target: ${device} (MCU ${setup.metadata.device.uid})`);
+  const device = normalizeJlinkDeviceName(setupMcuName(setup));
+  output.appendLine(`J-Link target: ${device} (MCU ${setupMcuName(setup)})`);
   const commandFile = path.join(path.dirname(hex), '.mikrobus-jlink-flash.jlink');
   fs.writeFileSync(commandFile, [
     device ? `device ${device}` : '',
@@ -1464,8 +1603,8 @@ function startJlinkGdbServer(setup) {
   if (!tools.gdbServer) {
     throw new Error('J-Link GDB Server was not found. Set mikrobusRust.jlinkGdbServerPath or install SEGGER J-Link/NECTO SEGGER programmer files.');
   }
-  const device = normalizeJlinkDeviceName(setup.metadata.device.uid);
-  output.appendLine(`J-Link GDB target: ${device} (MCU ${setup.metadata.device.uid})`);
+  const device = normalizeJlinkDeviceName(setupMcuName(setup));
+  output.appendLine(`J-Link GDB target: ${device} (MCU ${setupMcuName(setup)})`);
   const port = 2331;
   const args = ['-if', 'SWD', '-speed', '4000', '-port', String(port), '-nogui'];
   if (device) args.push('-device', device);
@@ -1493,13 +1632,36 @@ async function stopJlinkGdbServer(runtime) {
   try { processHandle.kill(); } catch {}
 }
 
+
+function codegripProgressToStatus(progress) {
+  return (value) => {
+    const percent = Number(value);
+    if (!Number.isFinite(percent) || percent < 0) return;
+    progress.report({ message: `${Math.max(0, Math.min(100, Math.round(percent)))}%` });
+  };
+}
+
+async function withProgrammerStatus(setup, action, task) {
+  const programmer = setup?.metadata?.programmer?.name || setup?.metadata?.programmer?.uid || 'programmer';
+  return vscode.window.withProgress({
+    // ProgressLocation.Window is the VS Code status bar. Keep this visible for
+    // the complete physical programming operation, including Debug pre-flash.
+    location: vscode.ProgressLocation.Window,
+    title: `MikroBUS C: ${action} ${setupMcuName(setup)} with ${programmer}...`,
+    cancellable: false
+  }, async (progress) => {
+    progress.report({ message: 'Starting...' });
+    return task(progress);
+  });
+}
+
 async function flashWorkspace(context) {
   try {
     const built = await buildWorkspace(context);
     if (!built) return;
     const { setup, elf, hex } = built;
     if (setup.metadata.programmer.uid === 'segger_jlink') {
-      await flashJlink(setup, hex);
+      await withProgrammerStatus(setup, 'Programming', () => flashJlink(setup, hex));
     } else if (setup.metadata.programmer.uid === 'codegrip') {
       if (!setup.programmerProfile) {
         setup.programmerProfile = await selectCodegrip(context, setup);
@@ -1507,7 +1669,14 @@ async function flashWorkspace(context) {
         writeJsonAtomic(setupFile(context, setup.id), setup);
       }
       const runtime = programmerRuntime(context, setup);
-      await programCodegrip({ ...runtime, profile: setup.programmerProfile, mcu: setup.metadata.device.uid, hexFile: hex || await ensureHex(setup, elf), channel: output });
+      await withProgrammerStatus(setup, 'Programming', async (progress) => programCodegrip({
+        ...runtime,
+        profile: setup.programmerProfile,
+        mcu: setupMcuName(setup),
+        hexFile: hex || await ensureHex(setup, elf),
+        channel: output,
+        onProgress: codegripProgressToStatus(progress)
+      }));
     } else {
       throw new Error(`Programmer '${setup.metadata.programmer.uid}' is not implemented by this C adapter.`);
     }
@@ -1535,7 +1704,7 @@ async function eraseJlink(setup, projectRoot = cProjectRoot()) {
   if (!tools.commander) {
     throw new Error('J-Link Commander was not found. Set mikrobusRust.jlinkCommanderPath or install SEGGER J-Link/NECTO SEGGER programmer files.');
   }
-  const device = normalizeJlinkDeviceName(setup.metadata.device.uid);
+  const device = normalizeJlinkDeviceName(setupMcuName(setup));
   const runtimeDirectory = path.join(projectRoot, '.mikrobus');
   fs.mkdirSync(runtimeDirectory, { recursive: true });
   const commandFile = path.join(runtimeDirectory, '.mikrobus-jlink-erase.jlink');
@@ -1543,7 +1712,7 @@ async function eraseJlink(setup, projectRoot = cProjectRoot()) {
   const args = [];
   if (device) args.push('-device', device);
   args.push('-if', 'SWD', '-speed', '4000', '-AutoConnect', '1', '-NoGui', '1', '-ExitOnError', '1', '-CommandFile', commandFile);
-  output.appendLine(`J-Link erase target: ${device} (MCU ${setup.metadata.device.uid})`);
+  output.appendLine(`J-Link erase target: ${device} (MCU ${setupMcuName(setup)})`);
   try {
     await runLogged(tools.commander, args);
   } finally {
@@ -1555,7 +1724,7 @@ async function eraseWorkspace(context) {
   try {
     const setup = getBoundSetup(context);
     const answer = await vscode.window.showWarningMessage(
-      `Erase MCU ${setup.metadata.device.uid} using ${setup.metadata.programmer.name || setup.metadata.programmer.uid}?`,
+      `Erase MCU ${setupMcuName(setup)} using ${setup.metadata.programmer.name || setup.metadata.programmer.uid}?`,
       { modal: true },
       'Erase MCU'
     );
@@ -1574,14 +1743,14 @@ async function eraseWorkspace(context) {
       await eraseCodegrip({
         ...runtime,
         profile: setup.programmerProfile,
-        mcu: setup.metadata.device.uid,
+        mcu: setupMcuName(setup),
         eraseCommand,
         channel: output
       });
     } else {
       throw new Error(`Erase with '${setup.metadata.programmer.uid}' is not implemented.`);
     }
-    vscode.window.showInformationMessage(`Erased ${setup.metadata.device.uid} with ${setup.metadata.programmer.name || setup.metadata.programmer.uid}.`);
+    vscode.window.showInformationMessage(`Erased ${setupMcuName(setup)} with ${setup.metadata.programmer.name || setup.metadata.programmer.uid}.`);
   } catch (error) {
     vscode.window.showErrorMessage(`MikroBUS C erase: ${error.message || error}`);
     output.show(true);
@@ -1727,12 +1896,12 @@ async function debugWorkspace(context, debugOptions = {}) {
       // Program the exact generated HEX first, then let Cortex-Debug own the
       // J-Link GDB server process. Native servertype=jlink is important here:
       // VS Code Restart/Stop can then restart/terminate the server cleanly.
-      await flashJlink(setup, hex);
+      await withProgrammerStatus(setup, 'Programming for debug', () => flashJlink(setup, hex));
       const jlinkTools = resolveJlinkTools();
       if (!jlinkTools.gdbServer) {
         throw new Error('J-Link GDB Server was not found. Set mikrobusRust.jlinkGdbServerPath or install SEGGER J-Link/NECTO SEGGER programmer files.');
       }
-      const jlinkDevice = normalizeJlinkDeviceName(setup.metadata.device.uid);
+      const jlinkDevice = normalizeJlinkDeviceName(setupMcuName(setup));
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       configuration = {
         type: 'cortex-debug', request: 'launch', name: `MikroBUS C J-Link: ${setup.name}`,
@@ -1754,7 +1923,14 @@ async function debugWorkspace(context, debugOptions = {}) {
       }
       await cppTools.activate();
       const runtime = programmerRuntime(context, setup);
-      debugRuntime = await prepareCodegripDebug({ ...runtime, profile: setup.programmerProfile, mcu: setup.metadata.device.uid, hexFile: hex || await ensureHex(setup, elf), channel: output });
+      debugRuntime = await withProgrammerStatus(setup, 'Programming for debug', async (progress) => prepareCodegripDebug({
+        ...runtime,
+        profile: setup.programmerProfile,
+        mcu: setupMcuName(setup),
+        hexFile: hex || await ensureHex(setup, elf),
+        channel: output,
+        onProgress: codegripProgressToStatus(progress)
+      }));
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const generation = debugInstanceId;
       activeExternalDebugRuntime = { runtime: debugRuntime, setupId: setup.id, generation };
@@ -1812,7 +1988,7 @@ function getCSetupDashboardState(context) {
     selectionMode: setup.selectionMode || setup.selection?.selectionMode || (setup.boardUid ? 'board' : 'mcu'),
     boardName: setup.boardName || setup.metadata?.board?.name,
     boardUid: setup.boardUid || setup.metadata?.board?.uid,
-    mcuName: setup.metadata?.device?.uid || setup.metadata?.sdkConfig?.MCU_NAME,
+    mcuName: setupMcuName(setup),
     family: setup.metadata?.device?.family,
     clockMHz: setup.clockMHz,
     mode: setup.mode,
@@ -2067,6 +2243,7 @@ function registerCSupport(context) {
   guardedCommand(context, 'mikrobusC.debug', () => debugWorkspace(context));
   guardedCommand(context, 'mikrobusC.erase', () => eraseWorkspace(context));
   guardedCommand(context, 'mikrobusC.openInstalledPackages', () => packages.openInstalledPackages(context));
+  guardedCommand(context, 'mikrobusC.openCompilerPackages', () => packages.openCompilerPackages(context));
   guardedCommand(context, 'mikrobusC.installEnvironment', () => installCEnvironment(context));
   guardedCommand(context, 'mikrobusC.rebuildSetupById', (setupId) => rebuildSetupById(context, setupId));
   guardedCommand(context, 'mikrobusC.reconfigureSetupById', (setupId) => reconfigureSetupById(context, setupId));
@@ -2116,10 +2293,15 @@ module.exports = {
     codegripPackSpec,
     materializeCodegripRuntime,
     findCodegripServerExecutable,
+    findBspBoardSource,
+    materializeBoardBspPackage,
+    materializeMcuCardBspPackage,
     cleanAppliedSetupArtifacts,
     selectionFromSetup,
     expectedSdkDriverPackages,
     validateSdkDriverPackages,
+    metadataMcuName,
+    setupMcuName,
     C_BUILD_SUPPORT_VERSION
   }
 };

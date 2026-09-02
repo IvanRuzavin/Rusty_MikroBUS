@@ -524,8 +524,9 @@ async function openConfiguredCodegrip(options) {
   const runtime = await startCodegripServer(options);
   const control = new CodegripControlClient(runtime.controlPort, {
     timeoutMs: options.commandTimeoutMs || 120000,
-    onProgress(progress) {
+    onProgress(progress, response) {
       if (progress !== undefined) options.channel?.appendLine(`CODEGRIP progress: ${progress}%`);
+      if (typeof options.onProgress === 'function') options.onProgress(progress, response);
     }
   });
   runtime.control = control;

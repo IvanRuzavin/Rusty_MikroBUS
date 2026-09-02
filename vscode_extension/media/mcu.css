@@ -157,7 +157,7 @@ code { overflow-wrap: anywhere; }
 .clockSection h3, .sectionHeading h3 { margin: 0 0 4px; font-size: 15px; }
 .clockSection p, .sectionHeading p { margin: 0; color: var(--vscode-descriptionForeground); }
 .clockInput { display: flex; flex-direction: column; gap: 5px; min-width: 180px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-.clockInput input, .clockInput select, .field select {
+.metaGrid select, .clockInput input, .clockInput select, .field select {
   color: var(--vscode-input-foreground);
   background: var(--vscode-dropdown-background);
   border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
@@ -165,7 +165,7 @@ code { overflow-wrap: anywhere; }
   border-radius: 3px;
   outline: none;
 }
-.clockInput input:focus, .clockInput select:focus, .field select:focus { border-color: var(--vscode-focusBorder); }
+.metaGrid select:focus, .clockInput input:focus, .clockInput select:focus, .field select:focus { border-color: var(--vscode-focusBorder); }
 .sectionHeading { margin-bottom: 12px; }
 .registerGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .registerCard { padding: 14px; min-width: 0; }
@@ -324,3 +324,5 @@ button.selectionCard:hover { background: var(--vscode-list-hoverBackground); bor
 @media (max-width: 850px) {
   .cSetupOptions { grid-template-columns: 1fr; min-width: 0; width: 100%; }
 }
+.boardSelectionInputs { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; justify-content: flex-end; }
+.boardSelectionInputs .clockInput { min-width: 230px; }

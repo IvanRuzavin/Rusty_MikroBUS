@@ -154,10 +154,10 @@ function saveConfiguredSetup(context, payload, result) {
   const existing = requestedId
     ? registry.setups.find((setup) => setup.id === requestedId)
     : payload.selectionMode === 'board' && payload.boardUid
-      ? registry.setups.find((setup) => setup.selectionMode === 'board' && setup.boardUid === payload.boardUid && setup.shieldUid === payload.shieldUid)
+      ? registry.setups.find((setup) => setup.selectionMode === 'board' && setup.boardUid === payload.boardUid && String(setup.mcuName || '').toLowerCase() === String(result.mcuName || payload.mcuName || '').toLowerCase() && setup.shieldUid === payload.shieldUid)
       : registry.setups.find((setup) => setup.selectionMode !== 'board' && String(setup.mcuName || '').toLowerCase() === String(result.mcuName || '').toLowerCase());
   const id = existing?.id || requestedId || (payload.selectionMode === 'board'
-    ? setupIdForMcu(`${payload.boardUid}-${payload.shieldUid || 'no-shield'}`)
+    ? setupIdForMcu(`${payload.boardUid}-${result.mcuName || payload.mcuName}-${payload.shieldUid || 'no-shield'}`)
     : setupIdForMcu(result.mcuName));
 
   const record = {
@@ -174,6 +174,9 @@ function saveConfiguredSetup(context, payload, result) {
     selectionMode: payload.selectionMode === 'board' ? 'board' : 'mcu',
     boardUid: payload.boardUid || undefined,
     boardName: payload.boardName || undefined,
+    mcuCardUid: result.mcuCardUid || payload.mcuCardUid || undefined,
+    mcuCardName: result.mcuCardName || payload.mcuCardName || undefined,
+    mcuCardBspPath: result.mcuCardBspPath || payload.mcuCardBspPath || undefined,
     shieldUid: payload.shieldUid || undefined,
     shieldName: payload.shieldName || undefined,
     programmerUid: result.programmerUid || payload.programmerUid || 'SEGGER_JLINK',
@@ -577,6 +580,9 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
     selectionMode: setup.selectionMode || 'mcu',
     boardUid: setup.boardUid,
     boardName: setup.boardName,
+    mcuCardUid: setup.mcuCardUid,
+    mcuCardName: setup.mcuCardName,
+    mcuCardBspPath: setup.mcuCardBspPath,
     shieldUid: setup.shieldUid,
     shieldName: setup.shieldName,
     programmerUid: setup.programmerUid,
@@ -620,17 +626,15 @@ async function useSetupWithCurrentWorkspace(context, setupId) {
     throw new Error(`Cannot apply a setup because Cargo.toml is not present in the project root: ${workspace.openedRoot}`);
   }
   const result = await ensurePortableSetupWorkspace(context, setup);
-
-  let generatedMikrobus;
-  if (shouldGenerateWorkspaceMikrobus(setup)) {
-    generatedMikrobus = generateWorkspaceMikrobusFile(context, workspace, setup);
-  }
+  const mikrobusSync = syncWorkspaceMikrobusFile(workspace, result);
   const binding = writeWorkspaceBinding(workspace, setup, result);
-  const mikrobusMessage = generatedMikrobus
-    ? ` Generated ${generatedMikrobus}.`
-    : setup.selectionMode === 'board' && !setup.shieldUid
-      ? ' No shield is selected, so mikrobus.rs was not generated.'
-      : '';
+  const mikrobusMessage = mikrobusSync.copied
+    ? ` Copied ${mikrobusSync.relativePath}.`
+    : mikrobusSync.deleted.length > 0
+      ? ` Removed stale ${mikrobusSync.deleted.join(' and ')} because this setup has no generated mikrobus.rs.`
+      : setup.selectionMode === 'board'
+        ? ' This board does not expose a resolvable mikroBUS mapping for the selected configuration, so no mikrobus.rs was generated.'
+        : '';
   vscode.window.showInformationMessage(
     `${setup.mcuName} (${setup.clockMhz} MHz) is now applied to ${workspace.openedRoot}. The project does not need its own SDK tree.${mikrobusMessage}`
   );
@@ -646,10 +650,70 @@ async function useSetupWithCurrentWorkspace(context, setupId) {
 }
 
 function shouldGenerateWorkspaceMikrobus(setup) {
-  return setup?.selectionMode === 'board' && Boolean(setup.boardUid) && Boolean(setup.shieldUid);
+  return setup?.selectionMode === 'board' && Boolean(setup.boardUid);
 }
 
-function readBoardShieldBsp(databasePath, boardUid, shieldUid) {
+function setupMikrobusPath(sdkRoot) {
+  return path.join(path.resolve(sdkRoot), '.setup', 'bsp', 'mikrobus.rs');
+}
+
+function setupBspSelectionPath(sdkRoot) {
+  return path.join(path.resolve(sdkRoot), '.setup', 'bsp', 'selection.json');
+}
+
+function isMikrobusGenerationResolved(sdkRoot) {
+  if (fs.existsSync(setupMikrobusPath(sdkRoot))) return true;
+  const manifestPath = setupBspSelectionPath(sdkRoot);
+  if (!fs.existsSync(manifestPath)) return false;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    return manifest?.mikrobusGenerated === false;
+  } catch {
+    return false;
+  }
+}
+
+function workspaceMikrobusCandidates(workspace) {
+  const candidates = [
+    path.join(workspace.openedRoot, 'mikrobus.rs'),
+    path.join(workspace.openedRoot, 'src', 'mikrobus.rs')
+  ];
+  const mainRust = findWorkspaceMainRust(workspace);
+  if (mainRust) candidates.unshift(path.join(path.dirname(mainRust), 'mikrobus.rs'));
+  return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+}
+
+function syncWorkspaceMikrobusFile(workspace, generationResult) {
+  const generated = setupMikrobusPath(generationResult.sdkRoot);
+  const candidates = workspaceMikrobusCandidates(workspace);
+
+  if (fs.existsSync(generated)) {
+    const mainRust = findWorkspaceMainRust(workspace);
+    if (!mainRust) {
+      throw new Error('The setup contains mikrobus.rs, but main.rs was not found in the project root or src directory.');
+    }
+    const destination = path.resolve(path.dirname(mainRust), 'mikrobus.rs');
+    fs.copyFileSync(generated, destination);
+    for (const candidate of candidates) {
+      if (candidate !== destination) fs.rmSync(candidate, { force: true });
+    }
+    return {
+      copied: true,
+      relativePath: path.relative(workspace.openedRoot, destination).split(path.sep).join('/'),
+      deleted: []
+    };
+  }
+
+  const deleted = [];
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    fs.rmSync(candidate, { force: true });
+    deleted.push(path.relative(workspace.openedRoot, candidate).split(path.sep).join('/'));
+  }
+  return { copied: false, relativePath: undefined, deleted };
+}
+
+function readBoardShieldBsp(databasePath, boardUid, shieldUid, mcuName) {
   return withDatabase(databasePath, (db) => {
     const row = db.prepare(`
       SELECT Board.BSP_PATH AS boardBspPath, Shield.BSP_PATH AS shieldBspPath,
@@ -661,19 +725,51 @@ function readBoardShieldBsp(databasePath, boardUid, shieldUid) {
       LIMIT 1
     `).get(boardUid, shieldUid);
     if (!row) throw new Error(`The selected board/shield relationship is no longer present in the Rust database.`);
-    return normalizeSqlRow(row);
+    const normalized = normalizeSqlRow(row);
+    const option = resolveBoardMcuOption(databasePath, boardUid, mcuName);
+    return {
+      ...normalized,
+      mcuCardUid: option?.mcuCardUid,
+      mcuCardName: option?.mcuCardName,
+      mcuCardBspPath: option?.mcuCardBspPath
+    };
   });
 }
 
+function mergeBspConfig(base, overlay) {
+  if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) return base;
+  const out = base && typeof base === 'object' && !Array.isArray(base) ? { ...base } : {};
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) out[key] = mergeBspConfig(out[key], value);
+    else out[key] = value;
+  }
+  return out;
+}
+
 function resolveBoardPin(boardConfig, reference) {
-  const match = String(reference || '').match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
+  const raw = String(reference || '').trim();
+  if (/^GPIO_[A-Za-z0-9_]+$/.test(raw)) return raw;
+  const match = raw.match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
   if (!match) return undefined;
   return boardConfig?.headers?.[match[1]]?.[match[2]] || undefined;
 }
 
-function buildMikrobusRust(boardConfig, shieldConfig, boardName, shieldName) {
+function hasMikrobusMappings(config) {
+  const mikrobus = config?.mikrobus;
+  return Boolean(mikrobus && typeof mikrobus === 'object' && !Array.isArray(mikrobus) && Object.keys(mikrobus).length > 0);
+}
+
+function canBuildMikrobusRust(boardConfig, routingConfig) {
+  if (!hasMikrobusMappings(routingConfig)) return false;
+  return Object.values(routingConfig.mikrobus).some((signals) =>
+    signals && typeof signals === 'object' && Object.values(signals).some((reference) => Boolean(resolveBoardPin(boardConfig, reference)))
+  );
+}
+
+function buildMikrobusRust(boardConfig, routingConfig, boardName, shieldName) {
+  const sourceName = shieldName ? `${boardName} with ${shieldName}` : boardName;
   const lines = [
-    `//! Generated MikroBUS mapping for ${boardName} with ${shieldName}.`,
+    `//! Generated MikroBUS mapping for ${sourceName}.`,
     '//! Generated by MikroBUS Rust Tools. Re-apply the setup to regenerate this file.',
     '',
     '#![allow(dead_code)]',
@@ -681,7 +777,7 @@ function buildMikrobusRust(boardConfig, shieldConfig, boardName, shieldName) {
     'use drv_name::*;',
     ''
   ];
-  const sockets = Object.entries(shieldConfig?.mikrobus || {}).sort(([left], [right]) => Number(left) - Number(right));
+  const sockets = Object.entries(routingConfig?.mikrobus || {}).sort(([left], [right]) => Number(left) - Number(right));
   for (const [socket, signals] of sockets) {
     lines.push(`// mikroBUS ${socket}`);
     for (const [signal, reference] of Object.entries(signals)) {
@@ -704,21 +800,6 @@ function findWorkspaceMainRust(workspace) {
     candidates.unshift(active);
   }
   return candidates.find((candidate) => fs.existsSync(candidate));
-}
-
-function generateWorkspaceMikrobusFile(context, workspace, setup) {
-  const paths = getManagedPaths(context);
-  validateDatabaseSchema(paths.database);
-  const bsp = readBoardShieldBsp(paths.database, setup.boardUid, setup.shieldUid);
-  const boardPath = resolveManagedBspFile(paths, bsp.boardBspPath);
-  const shieldPath = resolveManagedBspFile(paths, bsp.shieldBspPath);
-  const mainRust = findWorkspaceMainRust(workspace);
-  if (!mainRust) throw new Error('The board setup was applied, but main.rs was not found in the project root or src directory.');
-  const boardConfig = JSON.parse(readRequired(boardPath));
-  const shieldConfig = JSON.parse(readRequired(shieldPath));
-  const destination = path.join(path.dirname(mainRust), 'mikrobus.rs');
-  fs.writeFileSync(destination, buildMikrobusRust(boardConfig, shieldConfig, bsp.boardName, bsp.shieldName), 'utf8');
-  return path.relative(workspace.openedRoot, destination).split(path.sep).join('/');
 }
 
 function resolveManagedBspFile(paths, configuredPath) {
@@ -750,6 +831,9 @@ function serializeWorkspaceBinding(binding) {
     selectionMode: binding.selectionMode,
     boardUid: binding.boardUid,
     boardName: binding.boardName,
+    mcuCardUid: binding.mcuCardUid,
+    mcuCardName: binding.mcuCardName,
+    mcuCardBspPath: binding.mcuCardBspPath,
     shieldUid: binding.shieldUid,
     shieldName: binding.shieldName,
     programmerUid: binding.programmerUid,
@@ -2318,6 +2402,13 @@ async function handleMcuMessage(message, panel, context) {
     return;
   }
 
+  if (message.type === 'refreshDatabase') {
+    await vscode.commands.executeCommand('mikrobusRust.refreshDatabase');
+    await sendInitialState(panel, context);
+    void panel.webview.postMessage({ type: 'databaseRefreshComplete' });
+    return;
+  }
+
   if (message.type === 'openSetup') {
     await vscode.commands.executeCommand('mikrobusRust.openSetup');
     return;
@@ -2340,8 +2431,23 @@ async function handleMcuMessage(message, panel, context) {
 
   if (message.type === 'selectBoard' && typeof message.uid === 'string') {
     const paths = getManagedPaths(context);
-    const boardDetail = loadBoardDetail(paths, message.uid);
-    const setup = listConfiguredSetups(context).find((item) => item.boardUid === message.uid);
+    const boardDetail = loadBoardDetail(paths, message.uid, undefined, { deferCardMcuSelection: true });
+    void panel.webview.postMessage({
+      type: 'boardDetail',
+      ...boardDetail,
+      setup: undefined
+    });
+    return;
+  }
+
+  if (message.type === 'selectBoardMcu' && typeof message.boardUid === 'string' && typeof message.mcuName === 'string') {
+    const paths = getManagedPaths(context);
+    const boardDetail = loadBoardDetail(paths, message.boardUid, message.mcuName);
+    const setup = listConfiguredSetups(context).find((item) =>
+      item.selectionMode === 'board' &&
+      item.boardUid === message.boardUid &&
+      String(item.mcuName || '').toLowerCase() === String(message.mcuName || '').toLowerCase()
+    );
     void panel.webview.postMessage({
       type: 'boardDetail',
       ...boardDetail,
@@ -2355,7 +2461,7 @@ async function handleMcuMessage(message, panel, context) {
     if (!setup) throw new Error(`Configured setup '${message.id}' was not found.`);
     const paths = getManagedPaths(context);
     if (setup.selectionMode === 'board' && setup.boardUid) {
-      const boardDetail = loadBoardDetail(paths, setup.boardUid);
+      const boardDetail = loadBoardDetail(paths, setup.boardUid, setup.mcuName);
       void panel.webview.postMessage({ type: 'boardDetail', ...boardDetail, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
       return;
     }
@@ -2445,6 +2551,9 @@ async function handleMcuMessage(message, panel, context) {
       selectionMode: setup.selectionMode || 'mcu',
       boardUid: setup.boardUid,
       boardName: setup.boardName,
+      mcuCardUid: setup.mcuCardUid,
+      mcuCardName: setup.mcuCardName,
+      mcuCardBspPath: setup.mcuCardBspPath,
       shieldUid: setup.shieldUid,
       shieldName: setup.shieldName,
       programmerUid: setup.programmerUid || 'SEGGER_JLINK',
@@ -2554,81 +2663,135 @@ function readBoardList(databasePath) {
     );
     const supportsMcuCards = ['BoardToCard', 'MCUCard', 'CardToMCU'].every((table) => availableTables.has(table));
 
-    const rows = supportsMcuCards
-      ? db.prepare(`
-          SELECT
-            Board.UID AS uid,
-            Board.NAME AS name,
-            Board.VENDOR AS vendor,
-            Board.BSP_PATH AS bspPath,
-            Board.CONFIG_JSON AS configJson,
-            BoardToDevice.DEVICE_NAME AS mcuName,
-            NULL AS mcuCardUid,
-            NULL AS mcuCardName,
-            NULL AS mcuCardConfigJson
-          FROM Board
-          JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
-          WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
-
-          UNION ALL
-
-          SELECT
-            Board.UID AS uid,
-            Board.NAME AS name,
-            Board.VENDOR AS vendor,
-            Board.BSP_PATH AS bspPath,
-            Board.CONFIG_JSON AS configJson,
-            CardToMCU.DEVICE_NAME AS mcuName,
-            MCUCard.UID AS mcuCardUid,
-            MCUCard.NAME AS mcuCardName,
-            MCUCard.CONFIG_JSON AS mcuCardConfigJson
-          FROM Board
-          JOIN BoardToCard ON BoardToCard.BOARD_UID = Board.UID
-          JOIN MCUCard ON MCUCard.UID = BoardToCard.CARD_UID
-          JOIN CardToMCU ON CardToMCU.CARD_UID = MCUCard.UID
-          WHERE Board.ENABLED = 1
-            AND MCUCard.ENABLED = 1
-            AND BoardToCard.IS_DEFAULT = 1
-            AND CardToMCU.IS_DEFAULT = 1
-            AND NOT EXISTS (
-              SELECT 1
-              FROM BoardToDevice
-              WHERE BoardToDevice.BOARD_UID = Board.UID
-                AND BoardToDevice.IS_DEFAULT = 1
-            )
-
-          ORDER BY name COLLATE NOCASE
-        `).all()
-      : db.prepare(`
-          SELECT
-            Board.UID AS uid,
-            Board.NAME AS name,
-            Board.VENDOR AS vendor,
-            Board.BSP_PATH AS bspPath,
-            Board.CONFIG_JSON AS configJson,
-            BoardToDevice.DEVICE_NAME AS mcuName,
-            NULL AS mcuCardUid,
-            NULL AS mcuCardName,
-            NULL AS mcuCardConfigJson
-          FROM Board
-          JOIN BoardToDevice ON BoardToDevice.BOARD_UID = Board.UID
-          WHERE Board.ENABLED = 1 AND BoardToDevice.IS_DEFAULT = 1
-          ORDER BY Board.NAME COLLATE NOCASE
-        `).all();
+    const rows = db.prepare(`
+      SELECT
+        Board.UID AS uid,
+        Board.NAME AS name,
+        Board.VENDOR AS vendor,
+        Board.BSP_PATH AS bspPath,
+        Board.CONFIG_JSON AS configJson,
+        (
+          SELECT BoardToDevice.DEVICE_NAME
+          FROM BoardToDevice
+          WHERE BoardToDevice.BOARD_UID = Board.UID
+          ORDER BY BoardToDevice.IS_DEFAULT DESC, BoardToDevice.DEVICE_NAME COLLATE NOCASE
+          LIMIT 1
+        ) AS mcuName
+      FROM Board
+      WHERE Board.ENABLED = 1
+      ORDER BY Board.NAME COLLATE NOCASE
+    `).all();
 
     return rows.map((row) => {
       const normalized = normalizeSqlRow(row);
       const config = parseDatabaseJson(normalized.configJson);
-      const mcuCardConfig = parseDatabaseJson(normalized.mcuCardConfigJson);
+      let selectableMcuCount = 0;
+      let hasMcuCards = false;
+      if (supportsMcuCards) {
+        const cardInfo = normalizeSqlRow(db.prepare(`
+          SELECT
+            COUNT(DISTINCT CardToMCU.DEVICE_NAME) AS selectableMcuCount,
+            COUNT(DISTINCT BoardToCard.CARD_UID) AS cardCount
+          FROM BoardToCard
+          JOIN MCUCard ON MCUCard.UID = BoardToCard.CARD_UID AND MCUCard.ENABLED = 1
+          JOIN CardToMCU ON CardToMCU.CARD_UID = MCUCard.UID
+          JOIN MCU ON MCU.NAME = CardToMCU.DEVICE_NAME
+          WHERE BoardToCard.BOARD_UID = ?
+        `).get(normalized.uid));
+        selectableMcuCount = Number(cardInfo?.selectableMcuCount || 0);
+        hasMcuCards = Number(cardInfo?.cardCount || 0) > 0;
+      }
       return {
         ...normalized,
+        hasMcuCards,
+        selectableMcuCount,
         config: {
           ...config,
-          hardwareDevice: config.hardwareDevice || mcuCardConfig.hardwareDevice || normalized.mcuName
+          hardwareDevice: config.hardwareDevice || normalized.mcuName || undefined
         }
       };
     });
   });
+}
+
+function readBoardMcuOptions(databasePath, boardUid) {
+  return withDatabase(databasePath, (db) => {
+    const availableTables = new Set(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name))
+    );
+    const fixedRows = db.prepare(`
+      SELECT
+        BoardToDevice.DEVICE_NAME AS mcuName,
+        BoardToDevice.IS_DEFAULT AS boardDefault,
+        FAMILY.VENDOR AS vendor,
+        FAMILY.TARGET AS target,
+        MCU.SYSTEM_LIB AS systemLib,
+        MCU.FAMILY AS family
+      FROM BoardToDevice
+      JOIN MCU ON MCU.NAME = BoardToDevice.DEVICE_NAME
+      JOIN FAMILY ON FAMILY.NAME = MCU.FAMILY
+      WHERE BoardToDevice.BOARD_UID = ?
+      ORDER BY BoardToDevice.IS_DEFAULT DESC, BoardToDevice.DEVICE_NAME COLLATE NOCASE
+    `).all(boardUid).map(normalizeSqlRow);
+    if (fixedRows.length > 0) {
+      return fixedRows.map((row, index) => ({
+        ...row,
+        isDefault: Boolean(row.boardDefault) || index === 0,
+        fixedBoardMcu: true
+      }));
+    }
+
+    if (!['BoardToCard', 'MCUCard', 'CardToMCU'].every((table) => availableTables.has(table))) return [];
+    const rows = db.prepare(`
+      SELECT
+        CardToMCU.DEVICE_NAME AS mcuName,
+        MCUCard.UID AS mcuCardUid,
+        MCUCard.NAME AS mcuCardName,
+        MCUCard.BSP_PATH AS mcuCardBspPath,
+        MCUCard.CONFIG_JSON AS mcuCardConfigJson,
+        BoardToCard.IS_DEFAULT AS boardCardDefault,
+        CardToMCU.IS_DEFAULT AS cardMcuDefault,
+        FAMILY.VENDOR AS vendor,
+        FAMILY.TARGET AS target,
+        MCU.SYSTEM_LIB AS systemLib,
+        MCU.FAMILY AS family
+      FROM BoardToCard
+      JOIN MCUCard ON MCUCard.UID = BoardToCard.CARD_UID AND MCUCard.ENABLED = 1
+      JOIN CardToMCU ON CardToMCU.CARD_UID = MCUCard.UID
+      JOIN MCU ON MCU.NAME = CardToMCU.DEVICE_NAME
+      JOIN FAMILY ON FAMILY.NAME = MCU.FAMILY
+      WHERE BoardToCard.BOARD_UID = ?
+      ORDER BY
+        BoardToCard.IS_DEFAULT DESC,
+        CardToMCU.IS_DEFAULT DESC,
+        CardToMCU.DEVICE_NAME COLLATE NOCASE,
+        MCUCard.NAME COLLATE NOCASE
+    `).all(boardUid).map(normalizeSqlRow);
+
+    // The GUI selects an MCU, not a card. If a database ever maps the same MCU
+    // through multiple compatible cards, keep the highest-priority relation
+    // (BoardToCard default, then CardToMCU default, then stable card-name order).
+    const byMcu = new Map();
+    for (const row of rows) {
+      const key = String(row.mcuName || '').toLowerCase();
+      if (!key || byMcu.has(key)) continue;
+      const cardConfig = parseDatabaseJson(row.mcuCardConfigJson);
+      byMcu.set(key, {
+        ...row,
+        isDefault: Boolean(row.boardCardDefault) && Boolean(row.cardMcuDefault),
+        fixedBoardMcu: false,
+        mcuCardConfig: cardConfig,
+        hardwareDevice: row.mcuName
+      });
+    }
+    return [...byMcu.values()].sort((left, right) => String(left.mcuName).localeCompare(String(right.mcuName), undefined, { sensitivity: 'base', numeric: true }));
+  });
+}
+
+function resolveBoardMcuOption(databasePath, boardUid, mcuName) {
+  const target = String(mcuName || '').trim().toLowerCase();
+  if (!target) return undefined;
+  return readBoardMcuOptions(databasePath, boardUid).find((item) => String(item.mcuName || '').toLowerCase() === target);
 }
 
 function readProgrammersForDevice(databasePath, mcuName) {
@@ -2672,15 +2835,40 @@ function readShieldsForBoard(databasePath, boardUid) {
   }));
 }
 
-function loadBoardDetail(paths, boardUid) {
+function loadBoardDetail(paths, boardUid, preferredMcuName, options = {}) {
   validateDatabaseSchema(paths.database);
   const board = readBoardList(paths.database).find((item) => item.uid === boardUid);
   if (!board) throw new Error(`Board '${boardUid}' is not present in the Rust database.`);
+  const mcuOptions = readBoardMcuOptions(paths.database, boardUid);
+  let selectedMcuName = String(preferredMcuName || '').trim();
+  if (selectedMcuName && !mcuOptions.some((item) => String(item.mcuName).toLowerCase() === selectedMcuName.toLowerCase())) {
+    selectedMcuName = '';
+  }
+  const deferCardMcuSelection = Boolean(options.deferCardMcuSelection) && Boolean(board.hasMcuCards);
+  if (!deferCardMcuSelection && !selectedMcuName && mcuOptions.length === 1) selectedMcuName = mcuOptions[0].mcuName;
+  if (!deferCardMcuSelection && !selectedMcuName) {
+    const defaults = mcuOptions.filter((item) => item.isDefault);
+    if (defaults.length === 1) selectedMcuName = defaults[0].mcuName;
+  }
+  const selected = selectedMcuName
+    ? mcuOptions.find((item) => String(item.mcuName).toLowerCase() === selectedMcuName.toLowerCase())
+    : undefined;
+  const selectedBoard = selected?.mcuCardUid ? {
+    ...board,
+    mcuName: selected.mcuName,
+    mcuCardUid: selected.mcuCardUid,
+    mcuCardName: selected.mcuCardName,
+    mcuCardBspPath: selected.mcuCardBspPath,
+    mcuCardConfig: selected.mcuCardConfig,
+    config: { ...board.config, hardwareDevice: selected.mcuName }
+  } : selected ? { ...board, mcuName: selected.mcuName } : board;
   return {
-    board,
-    mcu: loadMcuDetail(paths, board.mcuName),
+    board: selectedBoard,
+    mcuOptions,
+    selectedMcuName: selected?.mcuName,
+    mcu: selected ? loadMcuDetail(paths, selected.mcuName) : undefined,
     shields: readShieldsForBoard(paths.database, boardUid),
-    programmers: readProgrammersForDevice(paths.database, board.mcuName)
+    programmers: selected ? readProgrammersForDevice(paths.database, selected.mcuName) : []
   };
 }
 
@@ -2955,9 +3143,12 @@ function setupIdForPayload(context, payload) {
   if (requested) return requested;
   if (payload.selectionMode === 'board' && payload.boardUid) {
     const existing = listConfiguredSetups(context).find((setup) =>
-      setup.selectionMode === 'board' && setup.boardUid === payload.boardUid && setup.shieldUid === payload.shieldUid
+      setup.selectionMode === 'board' &&
+      setup.boardUid === payload.boardUid &&
+      String(setup.mcuName || '').toLowerCase() === String(payload.mcuName || '').toLowerCase() &&
+      setup.shieldUid === payload.shieldUid
     );
-    return existing?.id || setupIdForMcu(`${payload.boardUid}-${payload.shieldUid || 'no-shield'}`);
+    return existing?.id || setupIdForMcu(`${payload.boardUid}-${payload.mcuName}-${payload.shieldUid || 'no-shield'}`);
   }
   const existing = listConfiguredSetups(context).find((setup) =>
     setup.selectionMode !== 'board' && String(setup.mcuName || '').toLowerCase() === String(payload.mcuName || '').toLowerCase()
@@ -2998,7 +3189,8 @@ async function ensurePortableSetupWorkspace(context, setup) {
     Boolean(setup?.codegripRuntime?.packsRoot) &&
     fs.existsSync(setup.codegripRuntime.packsRoot)
   );
-  if (portableSetupIsComplete(sdkRoot) && codegripRuntimeReady) {
+  const mikrobusReady = !shouldGenerateWorkspaceMikrobus(setup) || isMikrobusGenerationResolved(sdkRoot);
+  if (portableSetupIsComplete(sdkRoot) && codegripRuntimeReady && mikrobusReady) {
     return {
       ...setup,
       sdkRoot,
@@ -3016,6 +3208,9 @@ async function ensurePortableSetupWorkspace(context, setup) {
     selectionMode: setup.selectionMode || 'mcu',
     boardUid: setup.boardUid,
     boardName: setup.boardName,
+    mcuCardUid: setup.mcuCardUid,
+    mcuCardName: setup.mcuCardName,
+    mcuCardBspPath: setup.mcuCardBspPath,
     shieldUid: setup.shieldUid,
     shieldName: setup.shieldName,
     programmerUid: setup.programmerUid,
@@ -3044,8 +3239,19 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   }
 
   validateDatabaseSchema(paths.database);
-  progress.report({ message: 'Installing managed board and shield BSP configuration files...' });
+  progress.report({ message: 'Installing managed board, MCU-card and shield BSP configuration files...' });
   copyDirectoryRequired(paths.bsp, path.join(paths.sdk, 'bsp'));
+
+  let boardSelection;
+  if (payload.selectionMode === 'board' && payload.boardUid) {
+    const board = readBoardList(paths.database).find((item) => item.uid === payload.boardUid);
+    if (!board) throw new Error(`Board '${payload.boardUid}' is not present in the Rust database.`);
+    const mcuOption = resolveBoardMcuOption(paths.database, payload.boardUid, mcuName);
+    if (!mcuOption) {
+      throw new Error(`${mcuName} is not linked to board '${payload.boardUid}' through BoardToDevice or BoardToCard → CardToMCU.`);
+    }
+    boardSelection = { board, mcuOption };
+  }
 
   const metadata = readMcuMetadata(paths.database, mcuName);
   const programmerUid = String(payload.programmerUid || 'SEGGER_JLINK').trim();
@@ -3085,6 +3291,60 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   fs.rmSync(stagingRoot, { recursive: true, force: true });
   fs.mkdirSync(path.join(stagingRoot, 'core', 'src'), { recursive: true });
   fs.mkdirSync(path.join(stagingRoot, 'sdk'), { recursive: true });
+  if (boardSelection) {
+    const selectedBspRoot = path.join(stagingRoot, 'bsp');
+    fs.mkdirSync(selectedBspRoot, { recursive: true });
+
+    const boardSource = resolveManagedBspFile(paths, boardSelection.board.bspPath);
+    copyRequired(boardSource, path.join(selectedBspRoot, 'board.cfg'));
+    let boardConfig = JSON.parse(readRequired(boardSource));
+
+    if (boardSelection.mcuOption.mcuCardBspPath) {
+      const cardSource = resolveManagedBspFile(paths, boardSelection.mcuOption.mcuCardBspPath);
+      copyRequired(cardSource, path.join(selectedBspRoot, 'card.cfg'));
+      boardConfig = mergeBspConfig(boardConfig, JSON.parse(readRequired(cardSource)));
+    }
+
+    let shieldConfig;
+    let shieldName;
+    if (payload.shieldUid) {
+      const bsp = readBoardShieldBsp(paths.database, payload.boardUid, payload.shieldUid, mcuName);
+      const shieldSource = resolveManagedBspFile(paths, bsp.shieldBspPath);
+      copyRequired(shieldSource, path.join(selectedBspRoot, 'shield.cfg'));
+      shieldConfig = JSON.parse(readRequired(shieldSource));
+      shieldName = bsp.shieldName;
+    }
+
+    // A shield may provide an alternate mikroBUS routing, but it is never a
+    // prerequisite for generation. Without a selected shield, use the native
+    // mikroBUS mapping from board.cfg (after MCU-card pin overlays are applied).
+    const routingConfig = hasMikrobusMappings(shieldConfig) ? shieldConfig : boardConfig;
+    const mikrobusGenerated = canBuildMikrobusRust(boardConfig, routingConfig);
+    const mikrobusSource = mikrobusGenerated
+      ? (routingConfig === shieldConfig ? 'shield' : 'board')
+      : null;
+    if (mikrobusGenerated) {
+      fs.writeFileSync(
+        path.join(selectedBspRoot, 'mikrobus.rs'),
+        buildMikrobusRust(boardConfig, routingConfig, boardSelection.board.name, mikrobusSource === 'shield' ? shieldName : undefined),
+        'utf8'
+      );
+    }
+
+    fs.writeFileSync(path.join(selectedBspRoot, 'selection.json'), JSON.stringify({
+      boardUid: boardSelection.board.uid,
+      boardName: boardSelection.board.name,
+      mcuName,
+      mcuCardUid: boardSelection.mcuOption.mcuCardUid || null,
+      mcuCardName: boardSelection.mcuOption.mcuCardName || null,
+      boardBspPath: boardSelection.board.bspPath,
+      mcuCardBspPath: boardSelection.mcuOption.mcuCardBspPath || null,
+      shieldUid: payload.shieldUid || null,
+      shieldName: shieldName || null,
+      mikrobusGenerated,
+      mikrobusSource
+    }, null, 2) + '\n', 'utf8');
+  }
 
   try {
     const coreSetup = path.join(stagingRoot, 'core');
@@ -3180,7 +3440,10 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       relativePlatform,
       selectionMode: payload.selectionMode === 'board' ? 'board' : 'mcu',
       boardUid: payload.boardUid || undefined,
-      boardName: payload.boardName || undefined,
+      boardName: boardSelection?.board?.name || payload.boardName || undefined,
+      mcuCardUid: boardSelection?.mcuOption?.mcuCardUid || undefined,
+      mcuCardName: boardSelection?.mcuOption?.mcuCardName || undefined,
+      mcuCardBspPath: boardSelection?.mcuOption?.mcuCardBspPath || undefined,
       shieldUid: payload.shieldUid || undefined,
       shieldName: payload.shieldName || undefined,
       programmerUid: selectedProgrammer.uid,
@@ -3348,7 +3611,7 @@ function getMcuHtml(webview, extensionUri) {
           <div>
             <div class="eyebrow">AVAILABLE BOARDS</div>
             <h2>Board catalog</h2>
-            <p>Select a board to choose its optional shield, clock settings, and programmer.</p>
+            <p>Select a board, then choose its MCU when the board uses an MCU card. Shield, clock settings, and programmer are configured afterward.</p>
           </div>
           <div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div>
         </div>
@@ -3356,6 +3619,34 @@ function getMcuHtml(webview, extensionUri) {
           <table class="dataTable boardTable">
             <thead><tr><th>Board</th><th>Vendor</th><th>Rust compatibility MCU</th><th>Status</th></tr></thead>
             <tbody id="boardTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="boardMcuCatalogView" class="pageView hidden">
+        <div class="viewNav managerNav"><button id="backToBoardsFromBoardMcus" class="secondary">← Boards</button></div>
+        <div class="viewHeader">
+          <div>
+            <div class="eyebrow">BOARD MCU</div>
+            <h2 id="boardMcuCatalogTitle">Compatible MCUs</h2>
+            <p>Select the MCU fitted through this board's MCU card. The corresponding BoardToCard → CardToMCU relationship is used automatically.</p>
+          </div>
+          <div class="resultCount"><strong id="boardMcuCount">0</strong><span>MCUs</span></div>
+        </div>
+        <div class="tableShell">
+          <table class="dataTable mcuTable">
+            <thead>
+              <tr>
+                <th>MCU</th>
+                <th>Vendor</th>
+                <th>Family</th>
+                <th>Rust target</th>
+                <th>System library</th>
+                <th>MCU card</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="boardMcuTableBody"></tbody>
           </table>
         </div>
       </section>
@@ -3371,7 +3662,7 @@ function getMcuHtml(webview, extensionUri) {
           <button id="showSetupsFromConfig" class="secondary">Configured setups</button>
         </div>
 
-        <div class="deviceHeader">
+        <div id="mcuDeviceHeader" class="deviceHeader">
           <div>
             <div class="eyebrow">MCU SETTINGS</div>
             <div class="titleWithBadge">
@@ -3387,7 +3678,7 @@ function getMcuHtml(webview, extensionUri) {
           </div>
         </div>
 
-        <section class="clockSection card">
+        <section id="systemClockCard" class="clockSection card">
           <div>
             <h3>System clock</h3>
             <p>Changing this value updates <code>FOSC_KHZ_VALUE</code> when the setup is built.</p>
@@ -3397,20 +3688,22 @@ function getMcuHtml(webview, extensionUri) {
 
         <section id="boardSelectionCard" class="clockSection card hidden">
           <div>
-            <h3 id="selectedBoardName">Board and optional shield</h3>
+            <h3 id="selectedBoardName">Board, MCU and optional shield</h3>
             <p id="selectedBoardDevice"></p>
           </div>
-          <label class="clockInput">Shield (optional)<select id="shieldSelect"></select></label>
+          <div class="boardSelectionInputs">
+            <label class="clockInput">Shield (optional)<select id="shieldSelect" disabled></select></label>
+          </div>
         </section>
 
-        <section>
+        <section id="registerSection">
           <div class="sectionHeading">
             <div><h3>Clock / configuration registers</h3><p>Options come directly from the selected MCU JSON. Hidden fields keep their JSON initialization value.</p></div>
           </div>
           <div id="registerGrid" class="registerGrid"></div>
         </section>
 
-        <section class="clockSection card programmerSection">
+        <section id="programmerSection" class="clockSection card programmerSection">
           <div>
             <h3>Programmer / debugger</h3>
             <p>The available programmers come from <code>DeviceToProgrammer</code>.</p>
@@ -3434,7 +3727,7 @@ function getMcuHtml(webview, extensionUri) {
           </div>
         </section>
 
-        <div class="generateBar">
+        <div id="generateBar" class="generateBar">
           <div id="generationStatus" class="generationStatus"></div>
           <button id="generate" class="primary">Build Configuration</button>
         </div>
@@ -3529,10 +3822,18 @@ module.exports = {
     expandDebugVariables,
     validateDatabaseSchema,
     readBoardList,
+    readBoardMcuOptions,
+    resolveBoardMcuOption,
+    loadBoardDetail,
     readProgrammersForDevice,
     readShieldsForBoard,
     buildMikrobusRust,
+    canBuildMikrobusRust,
+    mergeBspConfig,
     shouldGenerateWorkspaceMikrobus,
+    isMikrobusGenerationResolved,
+    setupMikrobusPath,
+    syncWorkspaceMikrobusFile,
     resolveManagedBspFile,
     normalizeRustCrateEntryPoint,
     readCargoPackageName,

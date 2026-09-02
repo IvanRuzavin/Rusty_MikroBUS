@@ -1,7 +1,8 @@
 {
   "rust-analyzer.linkedProjects": [
-    "c:/Users/IvanRus/AppData/Roaming/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/stm32f412re/Cargo.toml",
-    "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/nucleo_144_with_stm32f412zg-nucleo_144_click_shield/Cargo.toml"
+    "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-no-shield/Cargo.toml",
+    "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-stm32f756zg-no-shield/Cargo.toml",
+    "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-stm32f427zi-no-shield/Cargo.toml"
   ],
   "rust-analyzer.cargo.target": "thumbv7em-none-eabi"
 }
