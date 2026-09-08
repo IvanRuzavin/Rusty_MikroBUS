@@ -10,7 +10,7 @@ body {
   margin: 0;
   padding: 0;
   color: var(--vscode-foreground);
-  background: var(--vscode-sideBar-background);
+  background: var(--vscode-editor-background);
   font-family: var(--vscode-font-family);
 }
 
@@ -21,15 +21,17 @@ button {
 .page {
   width: 100%;
   margin: 0;
-  padding: 12px 10px 20px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px;
 }
 
 .hero {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
+  gap: 18px;
+  margin-bottom: 20px;
 }
 
 .eyebrow {
@@ -42,15 +44,15 @@ button {
 
 h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: 24px;
   line-height: 1.2;
 }
 
 .subtitle {
   margin: 7px 0 0;
   color: var(--vscode-descriptionForeground);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .secondary,
@@ -63,7 +65,7 @@ h1 {
 
 .secondary {
   flex: 0 0 auto;
-  padding: 5px 8px;
+  padding: 8px 14px;
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
 }
@@ -77,7 +79,7 @@ h1 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
-  margin-bottom: 10px;
+  margin-bottom: 18px;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 5px;
   background: var(--vscode-panel-border);
@@ -85,21 +87,21 @@ h1 {
 
 .summary > div {
   min-width: 0;
-  min-height: 54px;
-  padding: 9px 10px;
-  background: var(--vscode-sideBar-background);
+  min-height: 68px;
+  padding: 13px 14px;
+  background: var(--vscode-editor-background);
 }
 
 .summary strong {
   display: block;
   margin-bottom: 2px;
-  font-size: 20px;
+  font-size: 24px;
   line-height: 1;
 }
 
 .summary span {
   color: var(--vscode-descriptionForeground);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .storage {
@@ -115,7 +117,7 @@ h1 {
 }
 
 .platformStorage {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
 }
 
 .storage code {
@@ -151,17 +153,17 @@ h1 {
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
+  gap: 12px;
 }
 
 .card {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  padding: 10px;
+  padding: 15px;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 5px;
-  background: var(--vscode-sideBar-background);
+  background: var(--vscode-editor-background);
 }
 
 .status-installed {
@@ -185,8 +187,8 @@ h1 {
 
 .card h2 {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.25;
+  font-size: 15px;
+  line-height: 1.3;
 }
 
 .kind {
@@ -254,7 +256,7 @@ h1 {
 
 .actions button {
   max-width: 100%;
-  padding: 5px 8px;
+  padding: 8px 14px;
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
   font-size: 10px;

@@ -7,9 +7,10 @@ const vscode = require('vscode');
 const database = require('./c_database');
 const packages = require('./c_package_manager');
 const compilerSupport = require('./c_compiler_support');
+const rfp = require('./c_rfp_backend');
 
 const SUPPORTED_COMPILERS = compilerSupport.supportedCompilerUids();
-const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink']);
+const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID]);
 let cPanel;
 let pendingSetupId;
 
@@ -38,19 +39,29 @@ function findRecursive(root, predicate, maximumDepth = 10) {
 }
 
 function findDefinitionFile(coreRoot, corePath, fileName) {
+  const rawFileName = String(fileName || '').trim();
   const normalizedPath = String(corePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
-  const expected = String(fileName || '').toLowerCase();
+  // Some dsPIC core archives use DSPIC...json while Devices/SDK metadata uses
+  // dsPIC... (and a few historical packages use the opposite spelling). Try
+  // both the database spelling and an all-uppercase spelling before falling
+  // back to a case-insensitive recursive lookup.
+  const candidateNames = [...new Set([rawFileName, rawFileName.toUpperCase()].filter(Boolean))];
+  const expectedNames = new Set(candidateNames.map((name) => name.toLowerCase()));
   const directRoot = path.join(coreRoot, ...String(corePath || '').split(/[\\/]+/).filter(Boolean));
   const roots = fs.existsSync(directRoot) ? [directRoot, coreRoot] : [coreRoot];
   for (const root of roots) {
+    for (const name of candidateNames) {
+      const direct = path.join(root, 'def', name);
+      if (fs.existsSync(direct)) return direct;
+    }
     const preferred = findRecursive(root, (candidate, name) => {
-      if (name.toLowerCase() !== expected) return false;
+      if (!expectedNames.has(name.toLowerCase())) return false;
       const normalizedCandidate = candidate.replace(/\\/g, '/').toLowerCase();
       return !normalizedPath || normalizedCandidate.includes(`/${normalizedPath}/`);
     });
     if (preferred) return preferred;
   }
-  return findRecursive(coreRoot, (_candidate, name) => name.toLowerCase() === expected);
+  return findRecursive(coreRoot, (_candidate, name) => expectedNames.has(name.toLowerCase()));
 }
 
 function fieldId(register, field) {
@@ -171,18 +182,28 @@ async function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
   if (!definitionFile) throw new Error(`Core package '${coreSpec.name}' does not contain ${info.defFile || `${info.mcuName}.json`}.`);
   const definition = readJson(definitionFile, `${deviceUid} clock definition`);
   const sdks = database.listSdks(context, deviceUid, compiler.uid);
-  if (!sdks.length) throw new Error(`No non-legacy mikroSDK is mapped to ${deviceUid}/${compiler.uid}.`);
+  // sdk_support=0 means "not advertised as a released mikroSDK target", not
+  // necessarily "no SDK mapping exists". RL78/G24 and RL78/L23, for example,
+  // are intentionally useful as bare-metal targets but also have valid
+  // SDKToDevice mappings. Keep bare metal as the default while allowing the
+  // user to opt into full mikroSDK when a mapping exists.
+  const bareMetalOnly = sdks.length === 0;
+  const bareMetalRecommended = Number(info.sdkSupport || 0) === 0;
   const devicePackages = database.listDevicePackages(context, deviceUid);
   const programmers = database.listProgrammers(context, deviceUid, compiler.uid)
     .filter((programmer) => SUPPORTED_PROGRAMMERS.has(programmer.uid));
-  if (!programmers.length) throw new Error(`No supported CODEGRIP or J-Link programmer is mapped to ${deviceUid}.`);
-  const board = boardUid ? database.getBoard(context, boardUid) : undefined;
+  if (!programmers.length) throw new Error(`No supported programmer is available for ${deviceUid}.`);
+  const board = boardUid
+    ? database.getBoard(context, boardUid)
+    : (!bareMetalOnly && bareMetalRecommended ? database.getPreferredGenericBoard(context, deviceUid) : undefined);
 
   return {
     device: info,
     compiler,
     compilers,
     sdk: sdks[0],
+    bareMetalOnly,
+    bareMetalRecommended,
     packages: devicePackages,
     programmers,
     board,
@@ -276,7 +297,8 @@ async function handleMessage(message, panel, context) {
   }
   if (message.type === 'buildConfiguration') {
     const payload = message.payload || {};
-    const required = ['deviceUid', 'compilerUid', 'sdkUid', 'programmerUid', 'name'];
+    const required = ['deviceUid', 'compilerUid', 'programmerUid', 'name'];
+    if (payload.mode !== 'bare-metal') required.push('sdkUid');
     const missing = required.filter((key) => !String(payload[key] || '').trim());
     if (missing.length) throw new Error(`Configuration is incomplete: ${missing.join(', ')}.`);
     if (!(Number(payload.clockMHz) > 0)) throw new Error('Clock must be a positive value in MHz.');
@@ -315,18 +337,18 @@ function html(webview, extensionUri) {
 <section id="startView" class="pageView selectionStart"><div class="viewHeader"><div><div class="eyebrow">NEW C CONFIGURATION</div><h2>What do you want to start from?</h2><p>Board selection resolves its compatible MCU from the C database; MCU selection starts directly from the device.</p></div></div>
 <div class="selectionCards"><button id="chooseMcuMode" class="selectionCard"><strong>MCU</strong><span>Choose a device directly, then configure its clock/register parameters, package and programmer.</span></button><button id="chooseBoardMode" class="selectionCard"><strong>Board</strong><span>Choose a development board, resolve a compatible MCU, then configure the same clock/register parameters.</span></button></div></section>
 
-<section id="catalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE DEVICES</div><h2>MCU catalog</h2><p>MCUs are shown when at least one database-mapped CMake compiler is available.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="mcuSearch" type="search" placeholder="MCU, vendor, family..."></label><div class="resultCount"><strong id="mcuCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th><th>Flash</th><th>RAM</th></tr></thead><tbody id="mcuTableBody"></tbody></table></div></section>
+<section id="catalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE DEVICES</div><h2>MCU catalog</h2><p>MCUs are shown when at least one database-mapped CMake compiler is available.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="mcuSearch" type="search" placeholder="MCU, vendor, family..."></label><label class="vendorFilter"><span>Vendor</span><select id="cMcuVendorFilter"><option value="">All vendors</option></select></label><div class="resultCount"><strong id="mcuCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Support</th><th>Vendor</th><th>Family</th><th>Max clock</th><th>Flash</th><th>RAM</th></tr></thead><tbody id="mcuTableBody"></tbody></table></div></section>
 
-<section id="boardCatalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE BOARDS</div><h2>Board catalog</h2><p>Boards are shown when at least one compatible MCU has a database-mapped CMake compiler.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardSearch" type="search" placeholder="Board, vendor, category..."></label><div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div></div></div><div class="tableShell"><table class="dataTable boardTable"><thead><tr><th>Board</th><th>Vendor</th><th>Category</th><th>Compatible MCUs</th></tr></thead><tbody id="boardTableBody"></tbody></table></div></section>
+<section id="boardCatalogView" class="pageView hidden"><div class="viewNav managerNav"><button class="secondary backStart">← MCU or Board</button></div><div class="viewHeader"><div><div class="eyebrow">AVAILABLE BOARDS</div><h2>Board catalog</h2><p>Boards are shown when at least one compatible MCU has a database-mapped CMake compiler.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardSearch" type="search" placeholder="Board, vendor, category..."></label><label class="vendorFilter"><span>Vendor</span><select id="cBoardVendorFilter"><option value="">All vendors</option></select></label><div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div></div></div><div class="tableShell"><table class="dataTable boardTable"><thead><tr><th>Board</th><th>Vendor</th><th>Category</th><th>Compatible MCUs</th></tr></thead><tbody id="boardTableBody"></tbody></table></div></section>
 
-<section id="boardDeviceView" class="pageView hidden"><div class="viewNav managerNav"><button id="backToBoards" class="secondary">← Boards</button></div><div class="viewHeader"><div><div class="eyebrow">BOARD MCU</div><h2 id="boardDeviceTitle"></h2><p>This board supports multiple C targets. Select the MCU installed on the board or MCU card.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardDeviceSearch" type="search" placeholder="MCU, vendor, family..."></label><div class="resultCount"><strong id="boardDeviceCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Vendor</th><th>Family</th><th>Max clock</th></tr></thead><tbody id="boardDeviceTableBody"></tbody></table></div></section>
+<section id="boardDeviceView" class="pageView hidden"><div class="viewNav managerNav"><button id="backToBoards" class="secondary">← Boards</button></div><div class="viewHeader"><div><div class="eyebrow">BOARD MCU</div><h2 id="boardDeviceTitle"></h2><p>This board supports multiple C targets. Select the MCU installed on the board or MCU card.</p></div><div class="catalogTools"><label class="searchBox"><span>Search</span><input id="boardDeviceSearch" type="search" placeholder="MCU, vendor, family..."></label><label class="vendorFilter"><span>Vendor</span><select id="cBoardDeviceVendorFilter"><option value="">All vendors</option></select></label><div class="resultCount"><strong id="boardDeviceCount">0</strong><span>MCUs</span></div></div></div><div class="tableShell"><table class="dataTable"><thead><tr><th>MCU</th><th>Support</th><th>Vendor</th><th>Family</th><th>Max clock</th></tr></thead><tbody id="boardDeviceTableBody"></tbody></table></div></section>
 
 <section id="loadingView" class="loadingView hidden"><div class="chipIcon">C</div><h2 id="loadingText">Loading...</h2></section>
 
 <section id="configView" class="pageView hidden"><div class="viewNav"><button id="backToSelection" class="secondary">← Selection</button></div>
 <div class="deviceHeader"><div><div class="eyebrow">C MCU SETTINGS</div><div class="titleWithBadge"><h2 id="selectedName"></h2><span class="statusBadge available">Core JSON</span></div></div><div class="metaGrid"><div><span>Vendor</span><strong id="selectedVendor"></strong></div><div><span>Family</span><strong id="selectedFamily"></strong></div><div><span>Compiler</span><select id="compilerSelect"></select></div><div><span>Core path</span><code id="selectedCorePath"></code></div></div></div>
 <section id="selectedBoardCard" class="clockSection card hidden"><div><h3 id="selectedBoardName"></h3><p id="selectedBoardInfo"></p></div></section>
-<section class="clockSection card"><div><h3>Setup</h3><p>Choose how this reusable C environment will be built.</p></div><div class="cSetupOptions"><label class="clockInput">Setup name<input id="setupName" type="text"></label><label class="clockInput">Mode<select id="setupMode"><option value="full-sdk">Latest mikroSDK + selected MCU core</option><option value="bare-metal">Bare metal core</option></select></label><label class="clockInput">Application output<select id="applicationOutput"><option value="debug-terminal">Debug Terminal (printf_me)</option><option value="uart">UART</option></select></label><label class="clockInput">MCU package<select id="packageSelect"></select></label><label class="clockInput">Programmer<select id="programmerSelect"></select></label></div></section>
+<section class="clockSection card"><div><h3>Setup</h3><p>Choose how this reusable C environment will be built.</p><p id="bareMetalHint" class="hidden"></p></div><div class="cSetupOptions"><label class="clockInput">Setup name<input id="setupName" type="text"></label><label class="clockInput">Mode<select id="setupMode"><option value="full-sdk">Latest mikroSDK + selected MCU core</option><option value="bare-metal">Bare metal core</option></select></label><label class="clockInput">Application output<select id="applicationOutput"><option value="debug-terminal">Debug Terminal (printf_me)</option><option value="uart">UART</option></select></label><label class="clockInput">MCU package<select id="packageSelect"></select></label><label class="clockInput">Programmer<select id="programmerSelect"></select></label></div></section>
 <section class="clockSection card"><div><h3>System clock</h3><p>The default comes from <code>def/&lt;MCU_NAME&gt;.json</code>. The value is written to <code>FOSC_KHZ_VALUE</code>.</p></div><label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="0.001"></label></section>
 <section><div class="sectionHeading"><div><h3>Clock / configuration registers</h3><p>Visible options come directly from <code>config_registers</code> in the MCU JSON. Hidden fields preserve their JSON <code>init</code> value.</p></div></div><div id="registerGrid" class="registerGrid"></div></section>
 <div class="definitionPath"><span>Definition</span><code id="definitionPath"></code></div>

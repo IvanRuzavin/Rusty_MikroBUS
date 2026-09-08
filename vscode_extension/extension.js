@@ -62,7 +62,7 @@ async function setActiveEnvironment(context, environment) {
   const selected = cLanguageSupport && String(environment).toLowerCase() === 'c' ? 'c' : 'rust';
   await context.globalState.update('mikrobus.activeEnvironment', selected);
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.activeEnvironment', selected);
-  if (setupView) setupView.title = selected === 'c' ? 'C Environment' : 'Rust Setups';
+  if (setupView) setupView.title = selected === 'c' ? 'C Environment' : 'Rust Environment';
   postDashboardState(setupView, context);
   return selected;
 }
@@ -74,7 +74,7 @@ class MikrobusSetupViewProvider {
 
   resolveWebviewView(webviewView) {
     setupView = webviewView;
-    webviewView.title = getActiveEnvironment(this.context) === 'c' ? 'C Environment' : 'Rust Setups';
+    webviewView.title = getActiveEnvironment(this.context) === 'c' ? 'C Environment' : 'Rust Environment';
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -121,6 +121,14 @@ function activate(context) {
   const refreshSetupView = vscode.commands.registerCommand('mikrobusRust.refreshSetupView', async () => {
     postDashboardState(setupView, context);
   });
+  const openClickExamples = vscode.commands.registerCommand('mikrobusC.openClickExamples', async () => {
+    if (!cLanguageSupport) return;
+    await sharedProgrammerPackages.openClickExamples(context);
+  });
+  const openDemoExamples = vscode.commands.registerCommand('mikrobusC.openDemoExamples', async () => {
+    if (!cLanguageSupport) return;
+    await sharedProgrammerPackages.openDemoExamples(context);
+  });
   const refreshDatabase = vscode.commands.registerCommand('mikrobusRust.refreshDatabase', async () => {
     await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -140,6 +148,8 @@ function activate(context) {
     openSetup,
     openEnvironment,
     refreshSetupView,
+    openClickExamples,
+    openDemoExamples,
     refreshDatabase,
     vscode.workspace.onDidChangeWorkspaceFolders(() => postDashboardState(setupView, context)),
     vscode.workspace.onDidCreateFiles(() => postDashboardState(setupView, context)),
@@ -228,6 +238,14 @@ async function handleDashboardMessage(message, view, context) {
       else await openEnvironmentSetup(context);
       return;
     }
+    if (message.type === 'clickExamples' && activeEnvironment === 'c') {
+      await vscode.commands.executeCommand('mikrobusC.openClickExamples');
+      return;
+    }
+    if (message.type === 'demoExamples' && activeEnvironment === 'c') {
+      await vscode.commands.executeCommand('mikrobusC.openDemoExamples');
+      return;
+    }
     if (message.type === 'cApply' && typeof message.id === 'string') { await vscode.commands.executeCommand('mikrobusC.applySetup', message.id); postDashboardState(view, context); return; }
     if (message.type === 'cRebuild' && typeof message.id === 'string') { await rebuildSetupById(context, message.id); postDashboardState(view, context); return; }
     if (message.type === 'cReconfigure' && typeof message.id === 'string') { await reconfigureSetupById(context, message.id); postDashboardState(view, context); return; }
@@ -303,7 +321,9 @@ async function handleSetupMessage(message, view, context) {
   }
 
   if (message.type === 'openSettings') {
-    await vscode.commands.executeCommand('workbench.action.openSettings', 'mikrobusRust.storageRoot');
+    const changed = await sharedProgrammerPackages.changeManagedRoot(context);
+    if (changed && environmentPanel) postStatus(environmentPanel, scanPackages(context), context);
+    postDashboardState(setupView, context);
     return;
   }
 
@@ -1931,7 +1951,7 @@ function getDashboardHtml(webview, extensionUri) {
 <body>
   <main class="dashboard">
     <header>
-      <div><p class="eyebrow">MIKROBUS EMBEDDED</p><h1 id="environmentTitle">Rust setups</h1></div>
+      <div><p class="eyebrow">MIKROBUS EMBEDDED</p><h1 id="environmentTitle">Rust Environment</h1></div>
       <button id="refresh" class="iconButton" title="Refresh">↻</button>
     </header>
     <div id="environmentSwitch" class="environmentSwitch" role="group" aria-label="Programming environment">
@@ -1962,6 +1982,8 @@ function getDashboardHtml(webview, extensionUri) {
     <footer>
       <button id="configure" class="secondary">Configure MCU or Board</button>
       <button id="environment" class="secondary">Development environment</button>
+      <button id="clickExamples" class="secondary hidden">Click Board Examples</button>
+      <button id="demoExamples" class="secondary hidden">Demo Examples</button>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

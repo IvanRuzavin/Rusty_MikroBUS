@@ -28,6 +28,9 @@
   const mcuSearch = document.getElementById('mcuSearch');
   const boardSearch = document.getElementById('boardSearch');
   const boardDeviceSearch = document.getElementById('boardDeviceSearch');
+  const mcuVendorFilter = document.getElementById('cMcuVendorFilter');
+  const boardVendorFilter = document.getElementById('cBoardVendorFilter');
+  const boardDeviceVendorFilter = document.getElementById('cBoardDeviceVendorFilter');
   const mcuTableBody = document.getElementById('mcuTableBody');
   const boardTableBody = document.getElementById('boardTableBody');
   const boardDeviceTableBody = document.getElementById('boardDeviceTableBody');
@@ -45,6 +48,9 @@
   mcuSearch.addEventListener('input', renderMcuTable);
   boardSearch.addEventListener('input', renderBoardTable);
   boardDeviceSearch.addEventListener('input', renderBoardDeviceTable);
+  mcuVendorFilter.addEventListener('change', renderMcuTable);
+  boardVendorFilter.addEventListener('change', renderBoardTable);
+  boardDeviceVendorFilter.addEventListener('change', renderBoardDeviceTable);
   generateButton.addEventListener('click', buildConfiguration);
   compilerSelect.addEventListener('change', () => {
     if (!state.detail || !compilerSelect.value || compilerSelect.value === state.detail.compiler?.uid) return;
@@ -79,6 +85,8 @@
       state.mcus = Array.isArray(message.mcus) ? message.mcus : [];
       state.boards = Array.isArray(message.boards) ? message.boards : [];
       state.setups = Array.isArray(message.setups) ? message.setups : [];
+      populateVendorFilter(mcuVendorFilter, state.mcus);
+      populateVendorFilter(boardVendorFilter, state.boards);
       renderMcuTable();
       renderBoardTable();
       if (state.view === 'loading') showView('start');
@@ -90,6 +98,8 @@
       state.selectedBoard = message.board;
       state.boardDevices = Array.isArray(message.devices) ? message.devices : [];
       boardDeviceSearch.value = '';
+      boardDeviceVendorFilter.value = '';
+      populateVendorFilter(boardDeviceVendorFilter, state.boardDevices);
       document.getElementById('boardDeviceTitle').textContent = message.board?.name || message.board?.uid || 'Board';
       renderBoardDeviceTable();
       showView('boardDevices');
@@ -151,11 +161,25 @@
     return values.filter(Boolean).some((value) => String(value).toLowerCase().includes(query));
   }
 
+  function populateVendorFilter(select, items) {
+    if (!select) return;
+    const previous = select.value;
+    const vendors = [...new Set((items || []).map((item) => String(item?.vendor || '').trim()).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true }));
+    select.replaceChildren(
+      Object.assign(document.createElement('option'), { value: '', textContent: 'All vendors' }),
+      ...vendors.map((vendor) => Object.assign(document.createElement('option'), { value: vendor, textContent: vendor }))
+    );
+    if (previous && vendors.includes(previous)) select.value = previous;
+  }
+
   function renderMcuTable() {
     const query = mcuSearch.value.trim().toLowerCase();
-    state.filteredMcus = query
-      ? state.mcus.filter((mcu) => textMatches([mcu.uid, mcu.name, mcu.vendor, mcu.familyUid], query))
-      : state.mcus;
+    const vendor = mcuVendorFilter.value;
+    state.filteredMcus = state.mcus.filter((mcu) =>
+      (!vendor || String(mcu.vendor || '') === vendor) &&
+      (!query || textMatches([mcu.uid, mcu.name, mcu.vendor, mcu.familyUid, Number(mcu.sdkSupport || 0) === 0 ? 'bare metal' : 'mikrosdk'], query))
+    );
     document.getElementById('mcuCount').textContent = String(state.filteredMcus.length);
     mcuTableBody.replaceChildren(...state.filteredMcus.map((mcu) => {
       const row = clickableRow(() => {
@@ -165,6 +189,7 @@
         vscode.postMessage({ type: 'selectMcu', uid: mcu.uid });
       });
       appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell');
+      appendCell(row, Number(mcu.sdkSupport || 0) === 0 ? 'Bare metal' : 'mikroSDK');
       appendCell(row, mcu.vendor || '—');
       appendCell(row, mcu.familyUid || '—');
       appendCell(row, mcu.maxSpeed ? `${trimNumber(mcu.maxSpeed)} MHz` : '—');
@@ -176,9 +201,11 @@
 
   function renderBoardTable() {
     const query = boardSearch.value.trim().toLowerCase();
-    state.filteredBoards = query
-      ? state.boards.filter((board) => textMatches([board.uid, board.name, board.vendor, board.category], query))
-      : state.boards;
+    const vendor = boardVendorFilter.value;
+    state.filteredBoards = state.boards.filter((board) =>
+      (!vendor || String(board.vendor || '') === vendor) &&
+      (!query || textMatches([board.uid, board.name, board.vendor, board.category], query))
+    );
     document.getElementById('boardCount').textContent = String(state.filteredBoards.length);
     boardTableBody.replaceChildren(...state.filteredBoards.map((board) => {
       const row = clickableRow(() => {
@@ -197,9 +224,11 @@
 
   function renderBoardDeviceTable() {
     const query = boardDeviceSearch.value.trim().toLowerCase();
-    state.filteredBoardDevices = query
-      ? state.boardDevices.filter((mcu) => textMatches([mcu.mcuName, mcu.uid, mcu.name, mcu.vendor, mcu.familyUid], query))
-      : state.boardDevices;
+    const vendor = boardDeviceVendorFilter.value;
+    state.filteredBoardDevices = state.boardDevices.filter((mcu) =>
+      (!vendor || String(mcu.vendor || '') === vendor) &&
+      (!query || textMatches([mcu.mcuName, mcu.uid, mcu.name, mcu.vendor, mcu.familyUid], query))
+    );
     document.getElementById('boardDeviceCount').textContent = String(state.filteredBoardDevices.length);
     boardDeviceTableBody.replaceChildren(...state.filteredBoardDevices.map((mcu) => {
       const row = clickableRow(() => {
@@ -207,6 +236,7 @@
         vscode.postMessage({ type: 'selectBoardDevice', boardUid: state.selectedBoard.uid, deviceUid: mcu.uid });
       });
       appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell');
+      appendCell(row, Number(mcu.sdkSupport || 0) === 0 ? 'Bare metal' : 'mikroSDK');
       appendCell(row, mcu.vendor || '—');
       appendCell(row, mcu.familyUid || '—');
       appendCell(row, mcu.maxSpeed ? `${trimNumber(mcu.maxSpeed)} MHz` : '—');
@@ -237,7 +267,21 @@
     const targetName = device.mcuName || device.uid;
     const defaultName = detail.board ? `${detail.board.name || detail.board.uid} - ${targetName}` : `${targetName} C Setup`;
     document.getElementById('setupName').value = defaultName;
-    document.getElementById('setupMode').value = 'full-sdk';
+    const setupMode = document.getElementById('setupMode');
+    const bareMetalOnly = Boolean(detail.bareMetalOnly);
+    const bareMetalRecommended = Boolean(detail.bareMetalRecommended || Number(device.sdkSupport || 0) === 0);
+    setupMode.value = (bareMetalOnly || bareMetalRecommended) ? 'bare-metal' : 'full-sdk';
+    setupMode.disabled = bareMetalOnly;
+    const bareMetalHint = document.getElementById('bareMetalHint');
+    const showModeHint = bareMetalOnly || bareMetalRecommended;
+    bareMetalHint.classList.toggle('hidden', !showModeHint);
+    if (bareMetalOnly) {
+      bareMetalHint.textContent = 'No non-legacy mikroSDK is mapped to this MCU, so only a bare-metal core setup is available.';
+    } else if (bareMetalRecommended) {
+      bareMetalHint.textContent = 'Devices.sdk_support is 0 for this MCU. Bare metal is the default, but a mapped mikroSDK is available if you want to build the full SDK.';
+    } else {
+      bareMetalHint.textContent = '';
+    }
     // Match NECTO's Application Output concept. Debug Terminal uses the
     // mikroSDK STDOUT logger, whose LOG_MAP_USB_UART macro does not require
     // USB_UART_RX / USB_UART_TX board definitions.
@@ -342,7 +386,7 @@
       boardName: detail.board?.name,
       deviceUid: detail.device.uid,
       compilerUid: detail.compiler.uid,
-      sdkUid: detail.sdk.uid,
+      sdkUid: detail.sdk?.uid,
       packageUid: document.getElementById('packageSelect').value || undefined,
       programmerUid: document.getElementById('programmerSelect').value
     };

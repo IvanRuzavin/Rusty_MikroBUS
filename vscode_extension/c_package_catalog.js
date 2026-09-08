@@ -10,6 +10,7 @@ const VERSIONS = Object.freeze({
 });
 
 const C_URLS = Object.freeze({
+  mikrocCmake: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/mikroc_cmake.7z',
   database: 'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/database_live.7z',
   coreMetadata: 'https://github.com/MikroElektronika/core_packages/releases/download/v2.0.0/metadata.json',
   sdkLatestApi: 'https://api.github.com/repos/MikroElektronika/mikrosdk_v2/releases/latest',
@@ -63,6 +64,9 @@ function resolveDirect(spec) {
     return { version: String(spec.version || 'current'), downloadUrl: String(spec.downloadUrl) };
   }
 
+  if (kind === 'shared' && name === 'mikroc_cmake') {
+    return { version: String(spec.version || '0.0.1'), downloadUrl: C_URLS.mikrocCmake };
+  }
   if (kind === 'database' || name === 'c_database') {
     return { version: String(spec.version || 'live'), downloadUrl: C_URLS.database };
   }

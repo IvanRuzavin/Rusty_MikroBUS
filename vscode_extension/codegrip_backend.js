@@ -594,6 +594,7 @@ module.exports = {
   startCodegripServer,
   stopCodegripServer,
   configureControlClient,
+  nectoDefaultOptionValues,
   programCodegrip,
   eraseCodegrip,
   prepareCodegripDebug,

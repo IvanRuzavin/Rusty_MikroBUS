@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
+const rfp = require('./c_rfp_backend');
 
 function expandHome(value) {
   const text = String(value || '').trim();
@@ -56,8 +57,7 @@ function resolveDatabasePath(context) {
     discoveredLegacyDatabase,
     path.join(legacyRoot, 'necto_db.db'),
     path.join(legacyRoot, 'database', 'necto_db.db'),
-    path.join(getManagedRoot(context), 'database', 'necto_db.db'),
-    path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'databases', 'necto_db.db')
+    path.join(getManagedRoot(context), 'database', 'necto_db.db')
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
 }
@@ -189,11 +189,11 @@ function listDevices(context, supportedCompilerUids) {
       d.flash,
       d.ram,
       d.def_file AS defFile,
-      d.sdk_config AS sdkConfig
+      d.sdk_config AS sdkConfig,
+      COALESCE(d.sdk_support, 0) AS sdkSupport
     FROM Devices d
     JOIN CompilerToDevice ctd ON ctd.device_uid = d.uid
-    WHERE COALESCE(d.sdk_support, 0) = 1
-      AND ctd.compiler_uid IN (${placeholders(supportedCompilerUids.length)})
+    WHERE ctd.compiler_uid IN (${placeholders(supportedCompilerUids.length)})
       AND d.uid NOT LIKE 'MCU_CARD_%'
       AND d.uid NOT LIKE 'SIBRAIN_%'
     ORDER BY d.uid COLLATE NOCASE
@@ -220,8 +220,7 @@ function listBoards(context, supportedCompilerUids) {
     JOIN BoardToDevice btd ON btd.board_uid = b.uid
     JOIN Devices d ON d.uid = btd.device_uid
     JOIN CompilerToDevice ctd ON ctd.device_uid = d.uid
-    WHERE COALESCE(d.sdk_support, 0) = 1
-      AND ctd.compiler_uid IN (${placeholders(supportedCompilerUids.length)})
+    WHERE ctd.compiler_uid IN (${placeholders(supportedCompilerUids.length)})
     GROUP BY b.uid, b.name, b.vendor, b.category, b.default_device, b.soldered_device, b.mikrobus_count
     ORDER BY b.name COLLATE NOCASE, b.uid COLLATE NOCASE
   `).all(...supportedCompilerUids).map(normalizeRow));
@@ -240,6 +239,7 @@ function listBoardDevices(context, boardUid, supportedCompilerUids) {
       d.ram,
       d.def_file AS defFile,
       d.sdk_config AS sdkConfig,
+      COALESCE(d.sdk_support, 0) AS sdkSupport,
       CASE
         WHEN d.uid = NULLIF(b.soldered_device, '') THEN 0
         WHEN d.uid = NULLIF(b.default_device, '') THEN 1
@@ -250,7 +250,6 @@ function listBoardDevices(context, boardUid, supportedCompilerUids) {
     JOIN Devices d ON d.uid = btd.device_uid
     JOIN CompilerToDevice ctd ON ctd.device_uid = d.uid
     WHERE b.uid = ?
-      AND COALESCE(d.sdk_support, 0) = 1
       AND ctd.compiler_uid IN (${placeholders(supportedCompilerUids.length)})
     ORDER BY boardPriority, d.uid COLLATE NOCASE
   `).all(boardUid, ...supportedCompilerUids).map(normalizeRow).map((row) => ({
@@ -259,6 +258,32 @@ function listBoardDevices(context, boardUid, supportedCompilerUids) {
     // database joins, but expose the actual MCU identity from Devices.sdk_config.
     mcuName: String(sdkConfigObject(row.sdkConfig).MCU_NAME || row.uid || '').trim()
   })));
+}
+
+
+function preferredGenericBoardForDb(db, deviceUid) {
+  const rows = db.prepare(`
+    SELECT b.uid, b.name, b.vendor, b.category, b.default_device AS defaultDevice,
+           b.soldered_device AS solderedDevice, b.mikrobus_count AS mikrobusCount,
+           b.sdk_config AS sdkConfig, b.installer_package AS installerPackage
+    FROM Boards b
+    JOIN BoardToDevice btd ON btd.board_uid = b.uid
+    WHERE btd.device_uid = ?
+      AND (
+        UPPER(b.uid) LIKE 'GENERIC_%'
+        OR LOWER(COALESCE(b.name, '')) LIKE 'generic %'
+      )
+    ORDER BY CASE WHEN UPPER(b.uid) LIKE 'GENERIC_%' THEN 0 ELSE 1 END,
+             b.uid COLLATE NOCASE
+    LIMIT 2
+  `).all(deviceUid).map(normalizeRow);
+  if (rows.length !== 1) return undefined;
+  const row = rows[0];
+  return { ...row, sdkConfig: parseJson(row.sdkConfig) };
+}
+
+function getPreferredGenericBoard(context, deviceUid) {
+  return withDatabase(context, (db) => preferredGenericBoardForDb(db, deviceUid));
 }
 
 function getBoard(context, boardUid) {
@@ -287,6 +312,7 @@ function getDeviceCoreInfo(context, deviceUid, compilerUid) {
         d.def_file AS defFile,
         d.sdk_config AS deviceSdkConfig,
         d.installer_package AS installerPackage,
+        COALESCE(d.sdk_support, 0) AS sdkSupport,
         c.uid AS compilerUid,
         c.name AS compilerName,
         c.version AS compilerVersion,
@@ -315,6 +341,7 @@ function getDeviceCoreInfo(context, deviceUid, compilerUid) {
       compilerVersion: row.compilerVersion,
       corePath: row.corePath,
       installerPackage: row.installerPackage,
+      sdkSupport: Number(row.sdkSupport || 0),
       sdkConfig
     };
   });
@@ -391,22 +418,32 @@ function listDevicePackages(context, deviceUid) {
 
 
 function listProgrammers(context, deviceUid, compilerUid) {
-  return withDatabase(context, (db) => db.prepare(`
-    SELECT
-      p.uid,
-      p.name,
-      p.description,
-      p.installer_package AS installerPackage,
-      ptd.device_support_package AS deviceSupportPackage
-    FROM ProgrammerToDevice ptd
-    JOIN Programmers p ON p.uid = ptd.programer_uid
-    JOIN CompilerToProgrammer ctp ON ctp.programmer_uid = p.uid
-    WHERE ptd.device_uid = ?
-      AND ctp.compiler_uid = ?
-      AND COALESCE(p.hidden, 0) = 0
-    ORDER BY CASE p.uid WHEN 'codegrip' THEN 0 WHEN 'segger_jlink' THEN 1 ELSE 2 END,
-             p.name COLLATE NOCASE
-  `).all(deviceUid, compilerUid).map(normalizeRow));
+  return withDatabase(context, (db) => {
+    const result = db.prepare(`
+      SELECT
+        p.uid,
+        p.name,
+        p.description,
+        p.installer_package AS installerPackage,
+        ptd.device_support_package AS deviceSupportPackage
+      FROM ProgrammerToDevice ptd
+      JOIN Programmers p ON p.uid = ptd.programer_uid
+      JOIN CompilerToProgrammer ctp ON ctp.programmer_uid = p.uid
+      WHERE ptd.device_uid = ?
+        AND ctp.compiler_uid = ?
+        AND COALESCE(p.hidden, 0) = 0
+      ORDER BY CASE p.uid WHEN 'codegrip' THEN 0 WHEN 'segger_jlink' THEN 1 ELSE 2 END,
+               p.name COLLATE NOCASE
+    `).all(deviceUid, compilerUid).map(normalizeRow);
+    // RFP is intentionally not database-driven. Renesas Flash Programmer is a
+    // vendor tool and should be available for every Renesas MCU even when the
+    // NECTO ProgrammerToDevice/CompilerToProgrammer tables do not list it.
+    const device = normalizeRow(db.prepare('SELECT uid, vendor, family_uid AS familyUid FROM Devices WHERE uid = ? LIMIT 1').get(deviceUid));
+    if (device && rfp.isRenesasDevice(device) && !result.some((item) => item.uid === rfp.RFP_PROGRAMMER_UID)) {
+      result.push(rfp.syntheticProgrammer());
+    }
+    return result;
+  });
 }
 
 function corePackageName(installerPackage, compilerUid) {
@@ -442,16 +479,31 @@ function sdkFolderName(config, key, fallback) {
   return value.toLowerCase();
 }
 
-function coreDeviceFor(contextDb, device, compilerUid) {
-  const config = sdkConfigObject(device?.sdk_config);
-  const mcuName = String(config.MCU_NAME || device?.uid || '').trim();
-  const directPackage = corePackageName(device?.installer_package, compilerUid);
-  if (directPackage && !bspPackageName(device?.installer_package)) return { device, packageName: directPackage };
+function actualMcuDeviceFor(contextDb, device) {
+  if (!device) return undefined;
+  const config = sdkConfigObject(device.sdk_config);
+  const mcuName = String(config.MCU_NAME || device.uid || '').trim();
+  if (!mcuName) return device;
+
+  // BoardToDevice can point at an MCU-card/SIBRAIN relation row while the
+  // compiler-specific core package lives on the actual MCU row. MCU UIDs in
+  // older NECTO databases are not case-consistent (for example
+  // dsPIC33... in sdk_config versus DSPIC33... in Devices.uid), so resolve
+  // the underlying MCU case-insensitively on case-sensitive hosts.
   const candidate = normalizeRow(contextDb.prepare(`
     SELECT * FROM Devices
-    WHERE uid = ? AND uid NOT LIKE 'MCU_CARD_%' AND uid NOT LIKE 'SIBRAIN_%'
+    WHERE uid = ? COLLATE NOCASE
+      AND uid NOT LIKE 'MCU_CARD_%'
+      AND uid NOT LIKE 'SIBRAIN_%'
     LIMIT 1
   `).get(mcuName));
+  return candidate || device;
+}
+
+function coreDeviceFor(contextDb, device, compilerUid) {
+  const directPackage = corePackageName(device?.installer_package, compilerUid);
+  if (directPackage && !bspPackageName(device?.installer_package)) return { device, packageName: directPackage };
+  const candidate = actualMcuDeviceFor(contextDb, device);
   const packageName = corePackageName(candidate?.installer_package, compilerUid);
   return { device: candidate || device, packageName };
 }
@@ -494,7 +546,7 @@ function listCoreInstallerPackages(context, compilerUids = []) {
   return withDatabase(context, (db) => {
     const filter = Array.isArray(compilerUids) && compilerUids.length ? new Set(compilerUids) : undefined;
     const result = new Map();
-    const rows = db.prepare('SELECT uid, name, vendor, installer_package AS installerPackage FROM Devices WHERE COALESCE(sdk_support,0)=1').all().map(normalizeRow);
+    const rows = db.prepare('SELECT uid, name, vendor, installer_package AS installerPackage FROM Devices').all().map(normalizeRow);
     for (const row of rows) {
       if (bspPackageName(row.installerPackage)) continue;
       const parsed = installerPackageObject(row.installerPackage);
@@ -639,9 +691,10 @@ function getSetupMetadata(context, selection) {
     const compiler = normalizeRow(db.prepare(`
       SELECT * FROM Compilers WHERE uid = ? LIMIT 1
     `).get(selection.compilerUid));
-    const sdk = normalizeRow(db.prepare(`
+    const bareMetal = selection.mode === 'bare-metal';
+    const sdk = selection.sdkUid ? normalizeRow(db.prepare(`
       SELECT * FROM SDKs WHERE uid = ? LIMIT 1
-    `).get(selection.sdkUid));
+    `).get(selection.sdkUid)) : undefined;
     const compilerMapping = compiler && device
       ? db.prepare(`
           SELECT 1 AS ok
@@ -654,15 +707,17 @@ function getSetupMetadata(context, selection) {
     const devicePackage = selection.packageUid
       ? normalizeRow(db.prepare('SELECT * FROM Packages WHERE uid = ? LIMIT 1').get(selection.packageUid))
       : undefined;
-    const programmer = normalizeRow(db.prepare(`
-        SELECT p.*, ptd.device_support_package AS device_support_package
-        FROM Programmers p
-        JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
-        WHERE p.uid = ? AND ptd.device_uid = ?
-        LIMIT 1
-      `).get(selection.programmerUid, selection.deviceUid));
+    const programmer = selection.programmerUid === rfp.RFP_PROGRAMMER_UID
+      ? (rfp.isRenesasDevice(device || {}) ? rfp.syntheticProgrammer() : undefined)
+      : normalizeRow(db.prepare(`
+          SELECT p.*, ptd.device_support_package AS device_support_package
+          FROM Programmers p
+          JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
+          WHERE p.uid = ? AND ptd.device_uid = ?
+          LIMIT 1
+        `).get(selection.programmerUid, selection.deviceUid));
 
-    if (!device || !compiler || !sdk || !programmer || !compilerMapping) {
+    if (!device || !compiler || (!bareMetal && !sdk) || !programmer || !compilerMapping) {
       throw new Error('The selected C setup is no longer complete or compiler-compatible in the NECTO database. Recreate it.');
     }
 
@@ -672,9 +727,13 @@ function getSetupMetadata(context, selection) {
       ...sdkConfigObject(devicePackage?.sdk_config),
       ...sdkConfigObject(devicePackage?.stm_sdk_config)
     };
-    const board = selection.boardUid
+    const explicitBoard = selection.boardUid
       ? normalizeRow(db.prepare('SELECT * FROM Boards WHERE uid = ? LIMIT 1').get(selection.boardUid))
       : undefined;
+    const inferredBoard = (!explicitBoard && !bareMetal && Number(device?.sdk_support || 0) === 0)
+      ? preferredGenericBoardForDb(db, selection.deviceUid)
+      : undefined;
+    const board = explicitBoard || inferredBoard;
     const boardConfig = sdkConfigObject(board?.sdk_config);
     const mergedConfig = mergeSdkConfigSources({
       compiler: compilerConfig,
@@ -735,7 +794,8 @@ function getSetupMetadata(context, selection) {
         defFile: device.def_file,
         compilerFlags: device.compiler_flags || '',
         linkerFlags: device.linker_flags || '',
-        installerPackage: device.installer_package || ''
+        installerPackage: device.installer_package || '',
+        sdkSupport: Number(device.sdk_support || 0)
       },
       compiler: {
         uid: compiler.uid,
@@ -753,12 +813,12 @@ function getSetupMetadata(context, selection) {
         clangdConfig: compiler.clangd_config || '',
         corePath: compiler.core_path
       },
-      sdk: {
+      sdk: sdk ? {
         uid: sdk.uid,
         name: sdk.name,
         version: sdk.version,
         packageName: 'mikrosdk'
-      },
+      } : undefined,
       devicePackage: devicePackage ? {
         uid: devicePackage.uid,
         name: devicePackage.name,
@@ -776,8 +836,10 @@ function getSetupMetadata(context, selection) {
       programmer: {
         uid: programmer.uid,
         name: programmer.name,
-        packageName: String(programmer.installer_package || '').trim(),
-        supportPackages: supportPackageNames(programmer.device_support_package)
+        description: programmer.description || '',
+        packageName: programmer.uid === rfp.RFP_PROGRAMMER_UID ? 'renesas_rfp' : String(programmer.installer_package || programmer.installerPackage || '').trim(),
+        supportPackages: supportPackageNames(programmer.device_support_package || programmer.deviceSupportPackage),
+        flashOnly: programmer.uid === rfp.RFP_PROGRAMMER_UID
       },
       packageRequirements,
       corePackageName: coreRequirement.packageName,
@@ -799,6 +861,7 @@ module.exports = {
   listBoards,
   listBoardDevices,
   getBoard,
+  getPreferredGenericBoard,
   getDeviceCoreInfo,
   listCompilers,
   listSdks,
@@ -822,6 +885,8 @@ module.exports = {
     supportPackageNames,
     installerPackageObject,
     bspPackageName,
-    sdkFolderName
+    sdkFolderName,
+    preferredGenericBoardForDb,
+    actualMcuDeviceFor
   }
 };

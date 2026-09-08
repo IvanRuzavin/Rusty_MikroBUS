@@ -39,6 +39,9 @@ try {
   const codegripCatalog = require('../c_codegrip_catalog');
   const rustMcu = require('../mcu_configurator')._test;
   const cConfigurator = require('../c_configurator')._test;
+  const rfp = require('../c_rfp_backend')._test;
+  const cmakeVisibility = require('../c_cmake_visibility')._test;
+  const mikrocDebug = require('../c_mikroc_debug');
 
   // config_registers settings_array fields must be materialized into real
   // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
@@ -73,6 +76,209 @@ try {
   // Existing 0.7.4 setups contain an empty PLLN override because the UI had an
   // empty select. Empty overrides must now fall back to the MCU JSON init value.
   assert.strictEqual(setup.defaultRegisterValue(pllRegister, { 'RCC_PLLCFGR.PLLN': '' }), 0x09006C10);
+
+  assert.strictEqual(rfp.defaultDeviceType({ device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } }), 'RL78');
+  assert.strictEqual(rfp.defaultDeviceType({ device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } }), 'RX200');
+  assert.strictEqual(rfp.defaultDeviceType({ device: { familyUid: 'RA6M4', mcuName: 'R7FA6M4AF' } }), 'RA');
+  const rl78Rfp = rfp.defaultProfile({ metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } });
+  rl78Rfp.port = '/dev/ttyUSB0';
+  assert.deepStrictEqual(rfp.programArgs(rl78Rfp, '/tmp/app.hex'), [
+    '-d', 'RL78', '-port', '/dev/ttyUSB0', '-if', 'uart', '-dtr-inv', '-s', '115200', '-reset', '-a', '/tmp/app.hex'
+  ]);
+  const rl78E2Lite = {
+    ...rl78Rfp,
+    connection: 'tool',
+    tool: 'e2l',
+    interface: 'uart1',
+    speed: undefined,
+    dtrInv: false,
+    reset: false,
+    run: true
+  };
+  assert.deepStrictEqual(rfp.programArgs(rl78E2Lite, '/tmp/rl78.hex'), [
+    '-d', 'RL78', '-t', 'e2l', '-if', 'uart1', '-run', '-a', '/tmp/rl78.hex'
+  ]);
+  // Profiles created by older extension versions incorrectly saved FINE for
+  // RL78 + E2/E2 Lite. Runtime normalization must transparently correct them.
+  assert.deepStrictEqual(rfp.connectionArgs({ ...rl78E2Lite, interface: 'fine' }), [
+    '-d', 'RL78', '-t', 'e2l', '-if', 'uart1'
+  ]);
+  assert.strictEqual(rfp.effectiveToolInterface({ ...rl78E2Lite, interface: 'fine' }), 'uart1');
+  assert.strictEqual(rfp.isRl78Device({ device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } }), true);
+  assert.strictEqual(rfp.normalizeRl78DebugDevice('R7F101GLG'), 'R7F101GLG');
+  const rl78TargetE2Lite = rfp.renesasRl78DebugTarget(
+    { metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } },
+    rl78E2Lite
+  );
+  assert.strictEqual(rl78TargetE2Lite.deviceFamily, 'RL78');
+  assert.strictEqual(rl78TargetE2Lite.device, 'R7F101GLG');
+  assert.strictEqual(rl78TargetE2Lite.debuggerType, 'E2LITE');
+  assert.deepStrictEqual(rl78TargetE2Lite.disabledCores, ['FAA']);
+  assert.strictEqual(rl78TargetE2Lite.serverParameters.includes('-uCore='), false);
+  assert.deepStrictEqual(rl78TargetE2Lite.serverParameters.slice(-4), ['-uSyncMode=', 'async', '-uTraceCore=', 'CPU']);
+
+  const rl78TargetE2 = rfp.renesasDebugTarget(
+    { metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } },
+    { ...rl78E2Lite, tool: 'e2', interface: 'fine' }
+  );
+  assert.strictEqual(rl78TargetE2.deviceFamily, 'RL78');
+  assert.strictEqual(rl78TargetE2.device, 'R7F101GLG');
+  assert.strictEqual(rl78TargetE2.debuggerType, 'E2');
+  assert.deepStrictEqual(rl78TargetE2.disabledCores, ['FAA']);
+  assert.strictEqual(rl78TargetE2.serverParameters.includes('-uCore='), false);
+
+  const rxRfp = rfp.defaultProfile({ metadata: { device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } } });
+  assert.deepStrictEqual(rfp.programArgs(rxRfp, '/tmp/rx.hex'), [
+    '-d', 'RX200', '-t', 'e2l', '-if', 'fine', '-run', '-a', '/tmp/rx.hex'
+  ]);
+  assert.strictEqual(rfp.isRxDevice({ device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } }), true);
+  assert.strictEqual(rfp.normalizeRxDebugDevice('R5F526TFCDFP'), 'R5F526TF');
+  assert.strictEqual(rfp.renesasDebuggerType(rxRfp), 'E2LITE');
+  assert.deepStrictEqual(
+    rfp.renesasRxDebugTarget(
+      { metadata: { device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } } },
+      rxRfp
+    ),
+    {
+      deviceFamily: 'RX',
+      device: 'R5F526TF',
+      debuggerType: 'E2LITE',
+      serverParameters: ['-uUseFine=', '1']
+    }
+  );
+  assert.strictEqual(
+    rfp.renesasRxDebugTarget(
+      { metadata: { device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } } },
+      { ...rxRfp, connection: 'uart', interface: 'uart' }
+    ),
+    undefined
+  );
+  const rxDebugConfig = setup.renesasRfpDebugConfiguration(
+    { name: 'RX26T test', metadata: { device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } } },
+    '/tmp/project',
+    '/tmp/project/build/app.elf',
+    rxRfp,
+    'test-generation'
+  );
+  assert.strictEqual(rxDebugConfig.type, 'renesas-hardware');
+  assert.strictEqual(rxDebugConfig.request, 'launch');
+  assert.strictEqual(rxDebugConfig.program, '/tmp/project/build/app.elf');
+  assert.strictEqual(rxDebugConfig.target.deviceFamily, 'RX');
+  assert.strictEqual(rxDebugConfig.target.device, 'R5F526TF');
+  assert.strictEqual(rxDebugConfig.target.debuggerType, 'E2LITE');
+  assert.deepStrictEqual(rxDebugConfig.target.serverParameters, ['-uUseFine=', '1']);
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({
+      metadata: { programmer: { uid: 'renesas_rfp' }, device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } },
+      rfpProfile: rxRfp
+    }),
+    true
+  );
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({
+      metadata: { programmer: { uid: 'renesas_rfp' }, device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } },
+      rfpProfile: { ...rxRfp, connection: 'uart', interface: 'uart' }
+    }),
+    false
+  );
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({
+      metadata: { programmer: { uid: 'renesas_rfp' }, device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } }
+    }),
+    false
+  );
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({
+      name: 'RL78 G24 E2 Lite',
+      metadata: { programmer: { uid: 'renesas_rfp' }, device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } },
+      rfpProfile: rl78E2Lite
+    }),
+    true
+  );
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({
+      name: 'RL78 G24 legacy E2 profile',
+      metadata: { programmer: { uid: 'renesas_rfp' }, device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } },
+      rfpProfile: { ...rl78E2Lite, interface: 'fine' }
+    }),
+    true
+  );
+  const rl78DebugConfig = setup.renesasRfpDebugConfiguration(
+    { name: 'RL78/G24 test', metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } },
+    '/tmp/rl78-project',
+    '/tmp/rl78-project/build/app.elf',
+    rl78E2Lite,
+    'rl78-test-generation'
+  );
+  assert.strictEqual(rl78DebugConfig.type, 'renesas-hardware');
+  assert.strictEqual(rl78DebugConfig.request, 'launch');
+  assert.strictEqual(rl78DebugConfig.program, '/tmp/rl78-project/build/app.elf');
+  assert.strictEqual(rl78DebugConfig.target.deviceFamily, 'RL78');
+  assert.strictEqual(rl78DebugConfig.target.device, 'R7F101GLG');
+  assert.strictEqual(rl78DebugConfig.target.debuggerType, 'E2LITE');
+  assert.deepStrictEqual(rl78DebugConfig.target.disabledCores, ['FAA']);
+  assert.deepStrictEqual(rl78DebugConfig.target.serverParameters, [
+    '-w', '0',
+    '-uSelfCodeSet=', '0',
+    '-upermitFlash=', '1',
+    '-uuseWideVoltageMode=', '1',
+    '-ueraseRom=', '1',
+    '-ubankSwapEnable=', '0',
+    '-uresetOnReload=', '1',
+    '-ustopTimerEmu=', '0',
+    '-ustopSerialEmu=', '0',
+    '-umaskInternalResetSignal=', '0',
+    '-umaskTargetResetSignal=', '0',
+    '-n', '0',
+    '-uverifyOnWritingMemory=', '1',
+    '-uAllowRRMDMM=', '0',
+    '-uOSRestriction=', '0',
+    '-uRelayBreak=', '1',
+    '-uSyncMode=', 'async',
+    '-uTraceCore=', 'CPU'
+  ]);
+  assert.strictEqual(rl78DebugConfig.target.serverParameters.includes('-uCore='), false);
+  assert.strictEqual(setup.isRl78G24Setup({ metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } }), true);
+  assert.strictEqual(setup.isRl78G24Setup({ metadata: { device: { familyUid: 'RL78/G23', mcuName: 'R7F100ABC' } } }), false);
+  const directRl78Args = setup.rl78G24ServerArgs(rl78DebugConfig.target, 61234);
+  assert.deepStrictEqual(directRl78Args.slice(0, 8), ['-p', '61234', '-g', 'E2LITE', '-t', 'R7F101GLG', '-uConnectionTimeout=', '30']);
+  assert.strictEqual(directRl78Args.includes('CPU|enabled|256|main'), true);
+  assert.strictEqual(directRl78Args.includes('SINGLE_CORE|enabled|1|main'), false);
+  const directRl78Config = setup.renesasRl78DirectCppDebugConfiguration(
+    { name: 'RL78/G24 direct', metadata: { device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } } },
+    '/tmp/rl78-project',
+    '/tmp/rl78-project/build/app.elf',
+    rl78E2Lite,
+    'rl78-direct-generation',
+    { server: '/tmp/e2-server-gdb', gdb: '/tmp/rl78-elf-gdb' },
+    61234
+  );
+  assert.strictEqual(directRl78Config.type, 'cppdbg');
+  assert.strictEqual(directRl78Config.miDebuggerPath, '/tmp/rl78-elf-gdb');
+  assert.strictEqual(directRl78Config.debugServerPath, '/tmp/e2-server-gdb');
+  assert.strictEqual(directRl78Config.miDebuggerServerAddress, '127.0.0.1:61234');
+  assert.strictEqual(directRl78Config.debugServerArgs.includes('CPU|enabled|256|main'), true);
+  assert.strictEqual(directRl78Config.debugServerArgs.includes('SINGLE_CORE'), false);
+  assert.strictEqual(directRl78Config.__mikrobusRenesasRl78Direct, true);
+  assert.strictEqual(
+    setup.isSetupDebugAvailable({ metadata: { programmer: { uid: 'segger_jlink' } } }),
+    true
+  );
+
+  const managedRfpSpec = packageManagerModule.rfpProgrammerPackageSpec();
+  assert.strictEqual(managedRfpSpec.kind, 'programmer');
+  assert.strictEqual(managedRfpSpec.name, 'renesas_rfp');
+  assert.strictEqual(managedRfpSpec.manualInstall, 'rfp');
+  assert.strictEqual(managedRfpSpec.installRelativePath, 'programmer/renesas_rfp/current');
+  assert.strictEqual(Boolean(managedRfpSpec.external), false);
+  const fakeRfpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rfp-managed-'));
+  try {
+    const cli = path.join(fakeRfpRoot, process.platform === 'win32' ? 'rfp-cli.exe' : 'rfp-cli');
+    fs.writeFileSync(cli, 'rfp');
+    assert.strictEqual(packageManager.findRfpCliInRoot(fakeRfpRoot), cli);
+  } finally {
+    fs.rmSync(fakeRfpRoot, { recursive: true, force: true });
+  }
 
   assert.strictEqual(rustMcu.normalizeJlinkDeviceName('R7FA6M4AF3CFB'), 'R7FA6M4AF');
   assert.strictEqual(rustMcu.normalizeJlinkDeviceName('STM32F412ZG'), 'STM32F412ZG');
@@ -280,15 +486,20 @@ try {
       CREATE TABLE ProgrammerToDevice(programer_uid TEXT, device_uid TEXT, device_support_package TEXT);
       INSERT INTO Devices VALUES ('STM32F756ZG','STM32F756ZG','{"MCU_NAME":"STM32F756ZG"}','{"gcc_arm_none_eabi":"arm_gcc_clang_stm32f7x","clang-llvm":"arm_gcc_clang_stm32f7x"}',1);
       INSERT INTO Devices VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','MCU CARD','{"MCU_NAME":"STM32F756ZG","_MSDK_MCU_CARD_NAME_":"MCU_CARD_FOR_STM32"}','{"package":"mcu_card_for_stm32_stm32f756zg"}',1);
+      INSERT INTO Devices VALUES ('DSPIC33EP512MU814','dsPIC33EP512MU814','{"MCU_NAME":"dsPIC33EP512MU814"}','{"mikrocdspic":"dspic_mikroc_dspic33e"}',1);
+      INSERT INTO Devices VALUES ('SIBRAIN_FOR_DSPIC33EP512MU814','SIBRAIN for dsPIC','{"MCU_NAME":"dsPIC33EP512MU814","_MSDK_MCU_CARD_NAME_":"SIBRAIN_FOR_DSPIC33EP512MU814"}','{"package":"sibrain_for_dspic33ep512mu814"}',1);
       INSERT INTO Compilers VALUES ('gcc_arm_none_eabi','GCC for ARM','14.2','GNU','C','gcc/arm','{}','bin/arm-none-eabi-gcc','bin/arm-none-eabi-g++','bin/arm-none-eabi-gdb','bin/arm-none-eabi-as','','ARM/gcc_clang','gcc_arm_compiler','');
       INSERT INTO Compilers VALUES ('clang-llvm','Clang for ARM','18.0','LLVM','C, C++','clang','{}','bin/clang','bin/clang','bin/lldb-mi','bin/llvm-as','','ARM/gcc_clang','llvm_clang_compiler','');
       INSERT INTO Compilers VALUES ('mikrocarm','mikroC AI for ARM','3.0','MIKROE','mikroC','mikroc/arm','{}','mikroCARM','','','','','ARM/mikroC','mikroc_arm','');
+      INSERT INTO Compilers VALUES ('mikrocdspic','mikroC AI for dsPIC','7.0','MIKROE','mikroC','mikroc/dspic','{}','mikroCdsPIC','','','','','dsPIC/mikroC','mikroc_dspic','');
       INSERT INTO CompilerToBuildSystem VALUES ('gcc_arm_none_eabi','cmake');
       INSERT INTO CompilerToBuildSystem VALUES ('clang-llvm','cmake');
       INSERT INTO CompilerToBuildSystem VALUES ('mikrocarm','cmake');
+      INSERT INTO CompilerToBuildSystem VALUES ('mikrocdspic','cmake');
       INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','gcc_arm_none_eabi');
       INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','clang-llvm');
       INSERT INTO CompilerToDevice VALUES ('MCU_CARD_FOR_STM32_STM32F756ZG','mikrocarm');
+      INSERT INTO CompilerToDevice VALUES ('SIBRAIN_FOR_DSPIC33EP512MU814','mikrocdspic');
       INSERT INTO SDKs VALUES ('mikrosdk','mikroSDK','2.0');
       INSERT INTO Programmers VALUES ('codegrip','CODEGRIP','codegrip_gdb_server');
       INSERT INTO ProgrammerToDevice VALUES ('codegrip','MCU_CARD_FOR_STM32_STM32F756ZG','');
@@ -298,6 +509,10 @@ try {
     const mapped = databaseModule.listCompilers(context, 'MCU_CARD_FOR_STM32_STM32F756ZG', compilerSupport.supportedCompilerUids());
     assert.deepStrictEqual(mapped.map((item) => item.uid).sort(), ['clang-llvm', 'gcc_arm_none_eabi']);
     assert.ok(mapped.every((item) => item.corePackageName === 'arm_gcc_clang_stm32f7x'));
+
+    const dsPicMapped = databaseModule.listCompilers(context, 'SIBRAIN_FOR_DSPIC33EP512MU814', compilerSupport.supportedCompilerUids());
+    assert.deepStrictEqual(dsPicMapped.map((item) => item.uid), ['mikrocdspic']);
+    assert.strictEqual(dsPicMapped[0].corePackageName, 'dspic_mikroc_dspic33e');
 
     const setupMetadata = databaseModule.getSetupMetadata(context, {
       deviceUid: 'MCU_CARD_FOR_STM32_STM32F756ZG',
@@ -311,6 +526,220 @@ try {
     assert.strictEqual(setupMetadata.packageRequirements.card.mcuName, 'STM32F756ZG');
   } finally {
     fs.rmSync(compilerDbRoot, { recursive: true, force: true });
+  }
+
+  // sdk_support=0 remains bare-metal-first, but a valid SDK mapping can use
+  // an unambiguous GENERIC_* BoardToDevice relation for full-SDK builds.
+  const genericBoardDbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-generic-board-db-'));
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const dbPath = path.join(genericBoardDbRoot, 'generic.db');
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE Boards(uid TEXT PRIMARY KEY, name TEXT, vendor TEXT, category TEXT, default_device TEXT, soldered_device TEXT, mikrobus_count INTEGER, sdk_config TEXT, installer_package TEXT);
+      CREATE TABLE BoardToDevice(board_uid TEXT, device_uid TEXT);
+      INSERT INTO Boards VALUES ('GENERIC_RL78_BOARD','Generic RL78 Board','Renesas','Development Systems','','',0,'{"_MSDK_BOARD_NAME_":"GENERIC_RL78_BOARD"}',NULL);
+      INSERT INTO BoardToDevice VALUES ('GENERIC_RL78_BOARD','R7F101GLG');
+    `);
+    const inferred = databaseModule._test.preferredGenericBoardForDb(db, 'R7F101GLG');
+    assert.strictEqual(inferred.uid, 'GENERIC_RL78_BOARD');
+    assert.strictEqual(inferred.sdkConfig._MSDK_BOARD_NAME_, 'GENERIC_RL78_BOARD');
+    db.close();
+  } finally {
+    fs.rmSync(genericBoardDbRoot, { recursive: true, force: true });
+  }
+
+  // Cardless SDK boards are materialized through the normal board discovery
+  // hook so stock bsp/board/CMakeLists.txt never evaluates an undefined
+  // _MSDK_MCU_CARD_NAME_.
+  const syntheticBoardRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-cardless-board-'));
+  try {
+    const sdkSource = path.join(syntheticBoardRoot, 'sdk');
+    fs.mkdirSync(path.join(sdkSource, 'bsp', 'board', 'include', 'boards'), { recursive: true });
+    const synthetic = setup.materializeSyntheticCardlessBoard(sdkSource, {
+      mode: 'full-sdk',
+      metadata: {
+        board: { uid: 'GENERIC_RL78_BOARD', name: 'Generic RL78 Board' },
+        sdkConfig: { _MSDK_BOARD_NAME_: 'GENERIC_RL78_BOARD' },
+        packageRequirements: {}
+      }
+    });
+    assert.strictEqual(synthetic.folderName, 'board_generic_rl78_board');
+    const boardCmake = fs.readFileSync(path.join(synthetic.boardRoot, 'board.cmake'), 'utf8');
+    const boardHeader = fs.readFileSync(path.join(synthetic.boardRoot, 'board.h'), 'utf8');
+    assert.ok(boardCmake.includes('set(MCU_CARD FALSE)'));
+    assert.ok(boardCmake.includes('set(DIP_SOCKET FALSE)'));
+    assert.ok(boardCmake.includes('set(MSDK_FILTERED_DIP_SOCKET_TYPE "none")'));
+    assert.ok(boardCmake.includes('GENERIC_RL78_BOARD'));
+    assert.ok(boardHeader.includes('Generic RL78 Board'));
+  } finally {
+    fs.rmSync(syntheticBoardRoot, { recursive: true, force: true });
+  }
+
+  // Explorer dimming is based on CMake's configured codemodel rather than
+  // source-tree heuristics. Nested CMake inputs and selected target sources are
+  // active; sibling source/header files that are not in the configuration dim.
+  const visibilityRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-cmake-visibility-'));
+  try {
+    const build = path.join(visibilityRoot, '.mikrobus', 'c-build');
+    const reply = path.join(build, '.cmake', 'api', 'v1', 'reply');
+    fs.mkdirSync(path.join(visibilityRoot, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(visibilityRoot, 'cmake'), { recursive: true });
+    fs.mkdirSync(reply, { recursive: true });
+    fs.writeFileSync(path.join(visibilityRoot, 'CMakeLists.txt'), 'project(mikrobus_visibility LANGUAGES C)\ninclude(cmake/selected.cmake)\nadd_subdirectory(tests/i2c)\n');
+    fs.writeFileSync(path.join(visibilityRoot, 'cmake', 'selected.cmake'), '# selected\n');
+    fs.writeFileSync(path.join(visibilityRoot, 'cmake', 'unused.cmake'), '# unused\n');
+    fs.mkdirSync(path.join(visibilityRoot, 'tests', 'i2c'), { recursive: true });
+    fs.writeFileSync(path.join(visibilityRoot, 'tests', 'i2c', 'CMakeLists.txt'), 'add_executable(test_default_i2c main.c)\n');
+    fs.writeFileSync(path.join(visibilityRoot, 'tests', 'i2c', 'main.c'), 'int main(void){return 0;}\n');
+    // A stale binding created by pre-0.7.12 nearest-CMake detection must not
+    // turn this add_executable-only leaf into a standalone project root.
+    fs.mkdirSync(path.join(visibilityRoot, 'tests', 'i2c', '.vscode'), { recursive: true });
+    fs.writeFileSync(path.join(visibilityRoot, 'tests', 'i2c', '.vscode', 'mikrobus-c.json'), '{}\n');
+    fs.writeFileSync(path.join(visibilityRoot, 'src', 'unused.c'), 'void unused(void){}\n');
+    fs.writeFileSync(path.join(visibilityRoot, 'src', 'unused.h'), '#pragma once\n');
+    fs.writeFileSync(path.join(reply, 'cmakeFiles-v1.json'), JSON.stringify({ inputs: [
+      { path: 'CMakeLists.txt', isGenerated: false },
+      { path: 'cmake/selected.cmake', isGenerated: false },
+      { path: 'tests/i2c/CMakeLists.txt', isGenerated: false }
+    ] }));
+    fs.mkdirSync(path.join(build, 'tests', 'i2c'), { recursive: true });
+    fs.writeFileSync(path.join(build, 'tests', 'i2c', 'test_default_i2c'), 'elf');
+    fs.writeFileSync(path.join(reply, 'target-app.json'), JSON.stringify({
+      name: 'test_default_i2c', id: 'test_default_i2c::@test', type: 'EXECUTABLE',
+      sources: [{ path: 'tests/i2c/main.c' }],
+      artifacts: [{ path: 'tests/i2c/test_default_i2c' }]
+    }));
+    fs.writeFileSync(path.join(reply, 'codemodel-v2.json'), JSON.stringify({
+      paths: { source: visibilityRoot, build },
+      configurations: [{ targets: [{ name: 'test_default_i2c', id: 'test_default_i2c::@test', jsonFile: 'target-app.json' }] }]
+    }));
+    fs.writeFileSync(path.join(reply, 'index-test.json'), JSON.stringify({ objects: [
+      { kind: 'cmakeFiles', jsonFile: 'cmakeFiles-v1.json' },
+      { kind: 'codemodel', jsonFile: 'codemodel-v2.json' }
+    ] }));
+    fs.writeFileSync(path.join(build, 'compile_commands.json'), JSON.stringify([{ file: path.join(visibilityRoot, 'tests', 'i2c', 'main.c') }]));
+    const snapshot = cmakeVisibility.snapshotFromBuild(visibilityRoot, build, undefined);
+    const norm = cmakeVisibility.normalizePath;
+    assert.ok(snapshot.activeFiles.has(norm(path.join(visibilityRoot, 'CMakeLists.txt'))));
+    assert.ok(snapshot.activeFiles.has(norm(path.join(visibilityRoot, 'cmake', 'selected.cmake'))));
+    assert.ok(snapshot.activeFiles.has(norm(path.join(visibilityRoot, 'tests', 'i2c', 'main.c'))));
+    assert.ok(snapshot.inactiveFiles.has(norm(path.join(visibilityRoot, 'src', 'unused.c'))));
+    // Headers are left undecorated until the first compile populates Ninja's
+    // dependency database, avoiding false negatives for transitive #includes.
+    assert.strictEqual(snapshot.inactiveFiles.has(norm(path.join(visibilityRoot, 'src', 'unused.h'))), false);
+    assert.ok(snapshot.inactiveFiles.has(norm(path.join(visibilityRoot, 'cmake', 'unused.cmake'))));
+
+    const activeSource = path.join(visibilityRoot, 'tests', 'i2c', 'main.c');
+    assert.strictEqual(setup.findCmakeProjectRoot(activeSource, visibilityRoot), visibilityRoot);
+    const owners = cmakeVisibility.targetsForSource(visibilityRoot, build, activeSource);
+    assert.strictEqual(owners.length, 1);
+    assert.strictEqual(owners[0].name, 'test_default_i2c');
+    assert.strictEqual(owners[0].type, 'EXECUTABLE');
+    assert.strictEqual(
+      cmakeVisibility.executableArtifactForTarget(visibilityRoot, build, 'test_default_i2c'),
+      path.join(build, 'tests', 'i2c', 'test_default_i2c')
+    );
+
+    // A mikroSDK source checkout must not expose the already-installed SDK
+    // packages from the setup prefix, otherwise source targets can collide with
+    // imported MikroSDK.* targets. Only MikroC.Core is taken from the setup.
+    fs.mkdirSync(path.join(visibilityRoot, 'drv'), { recursive: true });
+    fs.mkdirSync(path.join(visibilityRoot, 'bsp'), { recursive: true });
+    fs.writeFileSync(path.join(visibilityRoot, 'CMakeLists.txt'), [
+      'project(MikroSDK LANGUAGES C)',
+      'find_package(MikroC.Core)',
+      'add_subdirectory(bsp)',
+      'add_subdirectory(drv)',
+      ''
+    ].join('\n'));
+    const installPrefix = path.join(visibilityRoot, 'setup-install');
+    const coreConfigDir = path.join(installPrefix, 'lib', 'cmake', 'MikroC.Core');
+    fs.mkdirSync(coreConfigDir, { recursive: true });
+    fs.writeFileSync(path.join(coreConfigDir, 'MikroC.CoreConfig.cmake'), '# core config\n');
+    assert.strictEqual(setup.isMikroSdkSourceProject(visibilityRoot), true);
+    assert.deepStrictEqual(setup.workspacePrefixArguments(visibilityRoot, { paths: { installPrefix } }), [
+      '-DMIKROBUS_WORKSPACE_PREFIX_PATH=',
+      `-DMikroC.Core_DIR=${coreConfigDir}`
+    ]);
+
+    const sourceTreeArgs = setup.workspaceSourceTreeDefinitionArguments({ mode: 'full-sdk', applicationOutput: 'debug-terminal' });
+    assert.deepStrictEqual(
+      setup.sdkPreProjectCmakeVariables({ adapter: compilerSupport.adapterFor('mikrocpic32') }),
+      { TOOLCHAIN_LANGUAGE: 'MikroC' }
+    );
+    assert.deepStrictEqual(
+      setup.sdkPreProjectCmakeVariables({ adapter: compilerSupport.adapterFor('gcc_arm_none_eabi') }),
+      { TOOLCHAIN_LANGUAGE: 'GNU' }
+    );
+    assert.deepStrictEqual(
+      setup.workspacePreProjectCmakeArguments({ metadata: { compiler: { uid: 'mikrocpic32' } } }),
+      ['-DTOOLCHAIN_LANGUAGE=MikroC']
+    );
+    assert.deepStrictEqual(
+      setup.workspacePreProjectCmakeArguments({ metadata: { compiler: { uid: 'gcc_arm_none_eabi' } } }),
+      ['-DTOOLCHAIN_LANGUAGE=GNU']
+    );
+    assert.ok(sourceTreeArgs.includes('-DLOG_INTERFACE=LOG_INTERFACE_STDOUT'));
+    assert.ok(sourceTreeArgs.includes('-DIS_BARE_METAL=FALSE'));
+    assert.ok(sourceTreeArgs.includes('-DMSDK_BUILD_TFT_MODULES=FALSE'));
+    assert.ok(sourceTreeArgs.includes('-DBUILD_LVGL_FROM_NECTO=FALSE'));
+
+    // Workspace/source-tree configuration must never fall back to /usr/local.
+    // mikroSDK install_headers() runs configure_file() during configure, so the
+    // private install prefix needs the expected destination directories before
+    // CMake evaluates the source graph.
+    fs.mkdirSync(path.join(installPrefix, 'include', 'drv'), { recursive: true });
+    fs.mkdirSync(path.join(visibilityRoot, 'platform', 'sample'), { recursive: true });
+    fs.writeFileSync(path.join(visibilityRoot, 'platform', 'sample', 'CMakeLists.txt'),
+      'install_headers(${CMAKE_INSTALL_PREFIX}/include/platform MikroSDK.Sample sample.h)\n');
+    const workspaceInstall = setup.prepareWorkspaceInstallPrefix(visibilityRoot, { paths: { installPrefix } });
+    assert.strictEqual(workspaceInstall, path.join(visibilityRoot, '.mikrobus', 'c-install'));
+    assert.ok(fs.existsSync(path.join(workspaceInstall, 'include', 'drv')));
+    assert.ok(fs.existsSync(path.join(workspaceInstall, 'include', 'platform')));
+
+    const configureSmoke = path.join(visibilityRoot, 'prefix-smoke');
+    fs.mkdirSync(configureSmoke, { recursive: true });
+    fs.writeFileSync(path.join(configureSmoke, 'template.in'), '@VALUE@\n');
+    fs.writeFileSync(path.join(configureSmoke, 'CMakeLists.txt'), [
+      'cmake_minimum_required(VERSION 3.20)',
+      'project(prefix_smoke LANGUAGES NONE)',
+      'set(VALUE ok)',
+      'configure_file(${CMAKE_CURRENT_SOURCE_DIR}/template.in ${CMAKE_INSTALL_PREFIX}/include/platform/generated.tmp)',
+      ''
+    ].join('\n'));
+    const smokeBuild = path.join(configureSmoke, 'build');
+    const smoke = childProcess.spawnSync('cmake', ['-S', configureSmoke, '-B', smokeBuild, `-DCMAKE_INSTALL_PREFIX=${workspaceInstall}`], { encoding: 'utf8' });
+    assert.strictEqual(smoke.status, 0, `${smoke.stdout}\n${smoke.stderr}`);
+    assert.ok(fs.existsSync(path.join(workspaceInstall, 'include', 'platform', 'generated.tmp')));
+  } finally {
+    fs.rmSync(visibilityRoot, { recursive: true, force: true });
+  }
+
+  // RFP is synthesized for Renesas devices even when ProgrammerToDevice and
+  // CompilerToProgrammer contain no RFP row at all.
+  const rfpDbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rfp-db-'));
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const dbPath = path.join(rfpDbRoot, 'c-runtime', 'packages', 'database', 'C_database', 'live', 'necto_db.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE Devices(uid TEXT PRIMARY KEY, vendor TEXT, family_uid TEXT);
+      CREATE TABLE Programmers(uid TEXT PRIMARY KEY, name TEXT, description TEXT, installer_package TEXT, hidden INTEGER);
+      CREATE TABLE ProgrammerToDevice(programer_uid TEXT, device_uid TEXT, device_support_package TEXT);
+      CREATE TABLE CompilerToProgrammer(programmer_uid TEXT, compiler_uid TEXT);
+      INSERT INTO Devices VALUES ('R5F526TFCDFP','Renesas Electronics','RX26T');
+      INSERT INTO Devices VALUES ('STM32F756ZG','STMicroelectronics','STM32');
+    `);
+    db.close();
+    const context = { globalStorageUri: { fsPath: rfpDbRoot } };
+    const renesasProgrammers = databaseModule.listProgrammers(context, 'R5F526TFCDFP', 'rx-elf-gcc');
+    assert.ok(renesasProgrammers.some((item) => item.uid === 'renesas_rfp'));
+    const stmProgrammers = databaseModule.listProgrammers(context, 'STM32F756ZG', 'gcc_arm_none_eabi');
+    assert.strictEqual(stmProgrammers.some((item) => item.uid === 'renesas_rfp'), false);
+  } finally {
+    fs.rmSync(rfpDbRoot, { recursive: true, force: true });
   }
 
   const codegripDebugConfig = setup.codegripCppDebugConfiguration({
@@ -554,6 +983,14 @@ try {
       assert.strictEqual(compilerSupport.compilerAsset('llvm_clang_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/clang/linux/clang.7z');
       assert.strictEqual(compilerSupport.compilerAsset('gcc_rx_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/gcc/rx/linux/rx-elf-gcc.7z');
       assert.strictEqual(compilerSupport.compilerAsset('llvm_rl78_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/llvm/rl78/linux/llvm-rl78-elf.7z');
+      const linuxMikroCAssets = {
+        mikroc_arm: 'arm', mikroc_pic: 'pic', mikroc_pic32: 'pic32', mikroc_dspic: 'dspic', mikroc_avr: 'avr'
+      };
+      for (const [name, family] of Object.entries(linuxMikroCAssets)) {
+        const asset = compilerSupport.compilerAsset(name);
+        assert.strictEqual(asset.url, `https://software-update.mikroe.com/NECTOStudio7/live/compilers/mikroc/${family}/linux/mikroc.7z`);
+        assert.strictEqual(asset.payloadSubdir, undefined);
+      }
     }
   assert.ok(packageManager.jsonAcceptHeader().includes('application/vnd.github+json'));
   assert.ok(packageManager.jsonAcceptHeader().includes('application/json'));
@@ -663,6 +1100,32 @@ try {
   assert.strictEqual(setup.applicationOutputCmakeValue('uart'), 'LOG_INTERFACE_UART');
   assert.strictEqual(setup.applicationOutputCmakeValue('debug-terminal'), 'LOG_INTERFACE_STDOUT');
   assert.strictEqual(setup.hexPathForExecutable('/tmp/example.elf'), path.join('/tmp', 'example.hex'));
+  assert.strictEqual(setup.hexPathForExecutable('/tmp/example.hex'), '/tmp/example.hex');
+
+  // XC8 PIC emits ELF and Intel HEX as peer outputs of the same link. The HEX
+  // can have an earlier mtime than the ELF and must not fall through to objcopy.
+  {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xc8-hex-'));
+    const elf = path.join(temp, 'blink.elf');
+    const hex = path.join(temp, 'blink.hex');
+    fs.writeFileSync(elf, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
+    fs.writeFileSync(hex, ':020000040000FA\n:00000001FF\n');
+    const now = Date.now() / 1000;
+    fs.utimesSync(hex, now - 1, now - 1);
+    fs.utimesSync(elf, now, now);
+    assert.strictEqual(setup.nativeXc8HexForElf(elf), hex);
+    assert.strictEqual(setup.looksLikeIntelHex(hex), true);
+  }
+
+  // Microchip bin2hex utilities do not accept GNU objcopy syntax.
+  {
+    const xc16 = setup.microchipHexConversion('/opt/xc16/bin/xc16-bin2hex', 'xc16', '/tmp/app.elf', '/tmp/app.hex');
+    assert.deepStrictEqual(xc16.args, ['/tmp/app.elf']);
+    const xc32 = setup.microchipHexConversion('/opt/xc32/bin/xc32-bin2hex', 'xc32', '/tmp/app.elf', '/tmp/app.hex');
+    assert.deepStrictEqual(xc32.args, ['/tmp/app.elf']);
+    const xc32Objcopy = setup.microchipHexConversion('/opt/xc32/bin/xc32-objcopy', 'xc32', '/tmp/app.elf', '/tmp/app.hex');
+    assert.deepStrictEqual(xc32Objcopy.args, ['-O', 'ihex', '/tmp/app.elf', '/tmp/app.hex']);
+  }
   assert.strictEqual(setup.hexPathForExecutable('/tmp/example_ipsdisplay2'), '/tmp/example_ipsdisplay2.hex');
   assert.strictEqual(setup.normalizeJlinkDeviceName('R7FA6M4AF3CFB'), 'R7FA6M4AF');
   assert.strictEqual(setup.normalizeJlinkDeviceName('STM32F446RE'), 'STM32F446RE');
@@ -812,6 +1275,53 @@ try {
     fs.rmSync(headerRoot, { recursive: true, force: true });
   }
 
+  // Core definition lookup must survive dsPIC/DSPIC filename casing differences
+  // on Linux. Prefer exact/uppercase names, then fall back to case-insensitive
+  // lookup so both historical package spellings are accepted.
+  const caseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-dspic-case-'));
+  try {
+    const coreRoot = path.join(caseRoot, 'core');
+    fs.mkdirSync(path.join(coreRoot, 'include'), { recursive: true });
+    fs.mkdirSync(path.join(coreRoot, 'def'), { recursive: true });
+    fs.writeFileSync(path.join(coreRoot, 'include', 'core_header.h.in'), '%DEFINE_STRINGS%');
+    fs.writeFileSync(path.join(coreRoot, 'def', 'DSPIC33CK256MP508.json'), JSON.stringify({ config_registers: [] }));
+    assert.strictEqual(
+      setup.resolveCoreDefinitionFile(coreRoot, 'dsPIC33CK256MP508', 'dsPIC33CK256MP508.json'),
+      path.join(coreRoot, 'def', 'DSPIC33CK256MP508.json')
+    );
+    assert.strictEqual(
+      cConfigurator.findDefinitionFile(coreRoot, '', 'dsPIC33CK256MP508.json'),
+      path.join(coreRoot, 'def', 'DSPIC33CK256MP508.json')
+    );
+    const generated = setup.generateCoreHeader(coreRoot, {
+      device: { uid: 'dsPIC33CK256MP508', mcuName: 'dsPIC33CK256MP508', defFile: 'dsPIC33CK256MP508.json' }
+    }, '100', path.join(caseRoot, 'build'));
+    assert.ok(fs.readFileSync(generated, 'utf8').includes('#define dsPIC33CK256MP508'));
+  } finally {
+    fs.rmSync(caseRoot, { recursive: true, force: true });
+  }
+
+  const mikroCCoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mikroc-core-'));
+  try {
+    fs.mkdirSync(path.join(mikroCCoreRoot, 'def'), { recursive: true });
+    fs.mkdirSync(path.join(mikroCCoreRoot, 'cmake'), { recursive: true });
+    fs.writeFileSync(path.join(mikroCCoreRoot, 'CMakeLists.txt'), [
+      'cmake_minimum_required(VERSION 3.20)',
+      'project(Core VERSION 1 LANGUAGES MikroC)',
+      ''
+    ].join('\n'));
+    fs.writeFileSync(path.join(mikroCCoreRoot, 'cmake', 'coreUtils.cmake'), '# mikroC core marker\n');
+    fs.writeFileSync(path.join(mikroCCoreRoot, 'def', 'PIC18F97J94.json'), '{}\n');
+    assert.strictEqual(
+      setup.locateCoreSource(mikroCCoreRoot, 'PIC/mikroC', 'PIC18F97J94', 'mikroc-pic'),
+      mikroCCoreRoot
+    );
+    assert.strictEqual(setup.isMikroCFamily('mikroc-pic'), true);
+    assert.strictEqual(setup.isMikroCFamily('xc8'), false);
+  } finally {
+    fs.rmSync(mikroCCoreRoot, { recursive: true, force: true });
+  }
+
   const toolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-c-toolchain-'));
   try {
     const toolchainFile = path.join(toolchainRoot, 'toolchain.cmake');
@@ -841,7 +1351,373 @@ try {
     fs.rmSync(toolchainRoot, { recursive: true, force: true });
   }
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 22);
+  const mikroCToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mikroc-toolchain-'));
+  try {
+    const toolchainFile = path.join(mikroCToolchainRoot, 'toolchain.cmake');
+    const compatibilityRoot = path.join(mikroCToolchainRoot, 'cmake');
+    const mikroCBin = path.join(mikroCToolchainRoot, 'compiler', 'mikroCPIC1618');
+    const coreSource = path.join(mikroCToolchainRoot, 'core', 'PIC', 'mikroC', 'pic_mikroc_pic18');
+    fs.mkdirSync(path.dirname(mikroCBin), { recursive: true });
+    fs.mkdirSync(path.join(coreSource, 'def'), { recursive: true });
+    fs.writeFileSync(mikroCBin, '');
+    setup.writeToolchain(toolchainFile, {
+      mode: 'full-sdk', clockMHz: '64', applicationOutput: 'debug-terminal',
+      metadata: {
+        device: { uid: 'PIC18F97J94', mcuName: 'PIC18F97J94', flash: 131072, ram: 3862, compilerFlags: '', linkerFlags: '' },
+        compiler: { uid: 'mikrocpic', name: 'mikroC AI for PIC', path: 'mikroc/pic/mikroc', defaultOptions: '{"ANSI_pack":false,"case_sensitive":true,"dynamic_link_literals":false,"generate_additional_files":true,"long_hex_format":false,"ssa_optimization_level":"4"}' },
+        sdkConfig: { MCU_NAME: 'PIC18F97J94', CORE_NAME: 'P18' }
+      }
+    }, {
+      c: mikroCBin,
+      root: path.dirname(mikroCBin),
+      adapter: compilerSupport.adapterFor('mikrocpic')
+    }, {
+      coreSource,
+      compatibilityModuleRoot: compatibilityRoot,
+      infrastructureRoot: mikroCToolchainRoot,
+      mikroCModuleRoot: path.join(mikroCToolchainRoot, 'mikroc-cmake'),
+      installPrefix: mikroCToolchainRoot,
+      jcfgFile: path.join(mikroCToolchainRoot, 'PIC18F97J94.jcfg'),
+      coreLib: path.join(mikroCToolchainRoot, 'lib', 'lib_core.a')
+    });
+    const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
+    assert.ok(toolchainText.includes(`set(CMAKE_MikroC_COMPILER "${mikroCBin.replace(/\\/g, '/')}`));
+    assert.ok(!toolchainText.includes('mikroc-compiler-wrapper'));
+    assert.ok(!fs.existsSync(path.join(mikroCToolchainRoot, 'mikroc-compiler-wrapper.sh')));
+    assert.ok(!fs.existsSync(path.join(mikroCToolchainRoot, 'mikroc-compiler-wrapper.cmd')));
+    assert.ok(toolchainText.includes('set(TOOLCHAIN_LANGUAGE "MikroC"'));
+    assert.ok(toolchainText.includes('set(MIKROSDK_TYPE "mikrosdk"'));
+    assert.ok(toolchainText.includes('MikroBUS mikroC device: PIC18F97J94'));
+    assert.ok(toolchainText.includes(`MikroBUS mikroC core def: ${path.join(coreSource, 'def').replace(/\\/g, '/')}`));
+    assert.ok(toolchainText.includes('set(COMPILER_FLAGS "-C;-MF;-O11111114;-DBG;-UICD" CACHE STRING "" FORCE)'));
+    assert.ok(toolchainText.includes('set(LINKER_FLAGS "-C;-MF;-O11111114;-DBG;-UICD" CACHE STRING "" FORCE)'));
+    assert.ok(toolchainText.includes('set(CMAKE_MikroC_FLAGS "-C -MF -O11111114 -DBG -UICD" CACHE STRING "" FORCE)'));
+    assert.ok(toolchainText.includes('set(CMAKE_EXE_LINKER_FLAGS "-C -MF -O11111114 -DBG -UICD" CACHE STRING "" FORCE)'));
+    const expectedSearchPaths = `\${CMAKE_BINARY_DIR};${path.join(coreSource, 'def').replace(/\\/g, '/')};\${CMAKE_SOURCE_DIR}`;
+    assert.ok(toolchainText.includes(`set(SEARCH_PATHS "${expectedSearchPaths}" CACHE STRING "" FORCE)`));
+    assert.ok(toolchainText.includes('set(JCFG_FILE "'));
+    assert.ok(toolchainText.includes('PIC18F97J94.jcfg'));
+    assert.ok(toolchainText.includes('set(CORE_LIB "'));
+    assert.ok(toolchainText.includes('lib_core.a'));
+    assert.ok(toolchainText.includes('mikroc-cmake'));
+    assert.ok(toolchainText.includes('set(CMAKE_MikroC_OUTPUT_EXTENSION ".mcl" CACHE STRING "" FORCE)'));
+    assert.ok(toolchainText.includes('set(CMAKE_MikroC_OUTPUT_EXTENSION_REPLACE "1" CACHE STRING "" FORCE)'));
+    assert.ok(!toolchainText.includes('add_compile_options('));
+
+    const searchInfo = setup.mikroCSearchPathInfo(mikroCBin, {}, { coreSource });
+    assert.deepStrictEqual(searchInfo.paths, [
+      '${CMAKE_BINARY_DIR}', path.join(coreSource, 'def'), '${CMAKE_SOURCE_DIR}'
+    ]);
+    assert.strictEqual(searchInfo.coreDefinitionDirectory, path.join(coreSource, 'def'));
+
+    const platformBundleRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mikroc-platform-bin-'));
+    try {
+      const expectedPlatform = process.platform === 'win32' ? 'win64' : (process.platform === 'darwin' ? 'macos' : 'linux');
+      const expectedBin = path.join(platformBundleRoot, 'bin', expectedPlatform);
+      fs.mkdirSync(expectedBin, { recursive: true });
+      assert.strictEqual(setup.mikroCPlatformBinDirectory(platformBundleRoot), expectedBin);
+    } finally {
+      fs.rmSync(platformBundleRoot, { recursive: true, force: true });
+    }
+
+    assert.strictEqual(setup.mikroCOutputExtension('mikroc-pic'), '.mcl');
+    assert.strictEqual(setup.mikroCOutputExtension('mikroc-dspic'), '.mcl');
+    assert.strictEqual(setup.mikroCOutputExtension('mikroc-avr'), '.mcl');
+    assert.strictEqual(setup.mikroCOutputExtension('mikroc-pic32'), '.emcl');
+    assert.strictEqual(setup.mikroCOutputExtension('mikroc-arm'), '.emcl');
+    setup.generateMikroCLanguageSupport(compatibilityRoot);
+    const compilerModuleText = fs.readFileSync(path.join(compatibilityRoot, 'CMakeMikroCCompiler.cmake.in'), 'utf8');
+    assert.ok(compilerModuleText.includes('set(CMAKE_MikroC_OUTPUT_EXTENSION_REPLACE 1)'));
+    assert.deepStrictEqual(setup.mikroCCompilerFlags('mikroc-pic', '{"case_sensitive":true,"generate_additional_files":true,"ssa_optimization_level":"4"}', 'Debug'), ['-C', '-MF', '-O11111114', '-DBG', '-UICD']);
+    assert.deepStrictEqual(setup.mikroCCompilerFlags('mikroc-pic32', '{"case_sensitive":true,"generate_additional_files":true,"ssa_optimization_level":"4"}', 'Debug'), ['-C', '-SSA', '-MF', '-O11111114', '-DBG', '-UICD']);
+
+    const managedCmakeRoot = path.join(mikroCToolchainRoot, 'managed-cmake');
+    const managedCmake = path.join(managedCmakeRoot, 'bin', process.platform === 'win32' ? 'cmake.exe' : 'cmake');
+    fs.mkdirSync(path.dirname(managedCmake), { recursive: true });
+    fs.writeFileSync(managedCmake, '');
+    const moduleRoot = path.join(mikroCToolchainRoot, 'managed-mikroc-cmake');
+    fs.mkdirSync(moduleRoot, { recursive: true });
+    for (const name of ['CMakeDetermineMikroCCompiler.cmake', 'CMakeMikroCCompiler.cmake.in', 'CMakeMikroCInformation.cmake', 'CMakeTestMikroCCompiler.cmake']) {
+      fs.writeFileSync(path.join(moduleRoot, name), '# module\n');
+    }
+    const installed = new Map([
+      ['shared:cmake@necto-live', { kind: 'shared', name: 'cmake', root: managedCmakeRoot }],
+      ['shared:mikroc_cmake@0.0.1', { kind: 'shared', name: 'mikroc_cmake', root: moduleRoot }]
+    ]);
+    assert.strictEqual(setup.resolveManagedNectoCmake(installed), managedCmake);
+    assert.strictEqual(setup.resolveManagedMikroCCmakeModules(installed), moduleRoot);
+  } finally {
+    fs.rmSync(mikroCToolchainRoot, { recursive: true, force: true });
+  }
+
+  const mikroCJcfgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mikroc-jcfg-'));
+  try {
+    const coreRoot = path.join(mikroCJcfgRoot, 'core');
+    const defRoot = path.join(coreRoot, 'def');
+    fs.mkdirSync(defRoot, { recursive: true });
+    fs.writeFileSync(path.join(defRoot, 'PIC32MZ2048EFH144.json'), JSON.stringify({
+      config_registers: [
+        {
+          key: 'DEVCFG0', address: '$1FC0FFCC', default: 'FFFF0000',
+          fields: [
+            { key: 'VISIBLE', mask: '0000000F', init: '00000001' },
+            { key: 'HIDDEN', mask: '000000F0', init: '000000A0', hidden: true }
+          ]
+        },
+        { key: 'DEVCP0', address: '0x1FC0FFDC', default: 'FFFFFFFF', fields: [] },
+        { key: 'SMALL', address: '1234', default: '0000000F', unused: '00000008', fields: [] }
+      ],
+      back_door_key: 'SHOULD_NOT_BE_USED',
+      data_type_size: 'SHOULD_NOT_BE_USED',
+      stack_allocation: 'SHOULD_NOT_BE_USED'
+    }, null, 2));
+    const jcfg = setup.generateMikroCJcfg(coreRoot, {
+      device: { uid: 'PIC32MZ2048EFH144', mcuName: 'PIC32MZ2048EFH144', defFile: 'PIC32MZ2048EFH144.json' },
+      sdkConfig: { MCU_NAME: 'PIC32MZ2048EFH144' }
+    }, { 'DEVCFG0.VISIBLE': '00000003' }, mikroCJcfgRoot);
+    const parsed = JSON.parse(fs.readFileSync(jcfg, 'utf8'));
+    assert.strictEqual(parsed.mcu_name, 'PIC32MZ2048EFH144');
+    assert.deepStrictEqual(parsed.config_registers, [
+      { address: '$1FC0FFCC', value: '$ffff00a3' },
+      { address: '$1FC0FFDC', value: '$ffffffff' },
+      { address: '$1234', value: '$7' }
+    ]);
+    assert.strictEqual(parsed.back_door_key, '0');
+    assert.strictEqual(parsed.data_type_size, '0');
+    assert.strictEqual(parsed.stack_allocation, '0');
+  } finally {
+    fs.rmSync(mikroCJcfgRoot, { recursive: true, force: true });
+  }
+
+  const rl78ToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rl78-toolchain-'));
+  try {
+    const toolchainFile = path.join(rl78ToolchainRoot, 'toolchain.cmake');
+    const linkerScript = path.join(rl78ToolchainRoot, 'r7f101glg.ld');
+    setup.writeToolchain(toolchainFile, {
+      clockMHz: '48', applicationOutput: 'debug-terminal',
+      metadata: {
+        device: { uid: 'R7F101GLG', familyUid: 'G24', flash: 131072, ram: 12288, compilerFlags: '', linkerFlags: '' },
+        compiler: { uid: 'llvm-rl78-elf' },
+        sdkConfig: { MCU_NAME: 'R7F101GLG', CORE_NAME: 'RL78' }
+      }
+    }, {
+      c: '/toolchain/bin/clang',
+      cxx: '/toolchain/bin/clang++',
+      asm: '/toolchain/bin/llvm-as',
+      cmakeAsm: '/toolchain/bin/clang',
+      adapter: compilerSupport.adapterFor('llvm-rl78-elf')
+    }, {
+      compatibilityModuleRoot: rl78ToolchainRoot,
+      infrastructureRoot: rl78ToolchainRoot,
+      installPrefix: rl78ToolchainRoot,
+      linkerScript
+    });
+    const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
+    assert.ok(toolchainText.includes('"-nostartfiles"'));
+    assert.ok(toolchainText.includes('"-mcpu=s2"'));
+    assert.ok(toolchainText.includes('"-mmirror-source-common"'));
+    assert.ok(toolchainText.includes(`add_link_options("-T${linkerScript}")`));
+    const flags = compilerSupport.compilerSpecificFlags(compilerSupport.adapterFor('llvm-rl78-elf'), {
+      device: { uid: 'R7F101GLG', familyUid: 'G24' }, sdkConfig: { MCU_NAME: 'R7F101GLG', CORE_NAME: 'RL78' }
+    });
+    assert.ok(flags.link.includes('-nostartfiles'));
+    assert.ok(flags.link.includes('-mcpu=s2'));
+    assert.ok(flags.link.includes('-mdisable-mda'));
+    assert.ok(flags.link.includes('-mnear-code'));
+    assert.ok(flags.link.includes('-mnear-data'));
+    assert.ok(flags.link.includes('-mmirror-source-common'));
+    assert.ok(flags.link.includes('-mcommon-rom'));
+    assert.ok(flags.compile.includes('-mcpu=s2'));
+    assert.ok(toolchainText.includes('\"-mdisable-mda\"'));
+    assert.ok(toolchainText.includes('\"-mnear-code\"'));
+    assert.ok(toolchainText.includes('\"-mnear-data\"'));
+  } finally {
+    fs.rmSync(rl78ToolchainRoot, { recursive: true, force: true });
+  }
+
+  const rxToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-rx-toolchain-'));
+  try {
+    const rxCoreSource = path.join(rxToolchainRoot, 'core');
+    fs.mkdirSync(path.join(rxCoreSource, 'cmake'), { recursive: true });
+    fs.writeFileSync(path.join(rxCoreSource, 'cmake', 'coreUtils.cmake'), `
+function(set_flags flags)
+    if (\${CORE_NAME} STREQUAL "RXv3")
+        set(\${flags} -Wno-incompatible-pointer-types -fno-builtin -ffunction-sections -fdata-sections -fomit-frame-pointer -Og -fdiagnostics-parseable-fixits -nostartfiles -fno-strict-aliasing -fno-common -misa=v3 -fpu -mlittle-endian-data PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR "MCU Core not supported.")
+    endif()
+endfunction()
+`);
+    assert.deepStrictEqual(setup.rxCoreDeclaredFlags(rxCoreSource, 'RXv3'), [
+      '-Wno-incompatible-pointer-types', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
+      '-fomit-frame-pointer', '-Og', '-fdiagnostics-parseable-fixits', '-nostartfiles',
+      '-fno-strict-aliasing', '-fno-common', '-misa=v3', '-fpu', '-mlittle-endian-data'
+    ]);
+    const toolchainFile = path.join(rxToolchainRoot, 'toolchain.cmake');
+    setup.writeToolchain(toolchainFile, {
+      clockMHz: '120', applicationOutput: 'debug-terminal',
+      metadata: {
+        device: { uid: 'R5F526T8ADFL', familyUid: 'RX26T', flash: 131072, ram: 49152, compilerFlags: '', linkerFlags: '' },
+        compiler: { uid: 'rx-elf-gcc' },
+        sdkConfig: { MCU_NAME: 'R5F526T8ADFL', CORE_NAME: 'RXv3' }
+      }
+    }, {
+      c: '/toolchain/bin/rx-elf-gcc',
+      cxx: '/toolchain/bin/rx-elf++',
+      asm: '/toolchain/bin/rx-elf-as',
+      cmakeAsm: '/toolchain/bin/rx-elf-gcc',
+      adapter: compilerSupport.adapterFor('rx-elf-gcc')
+    }, {
+      coreSource: rxCoreSource,
+      compatibilityModuleRoot: rxToolchainRoot,
+      infrastructureRoot: rxToolchainRoot,
+      installPrefix: rxToolchainRoot
+    });
+    const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
+    assert.ok(toolchainText.includes('"-misa=v3"'));
+    assert.ok(toolchainText.includes('"-fpu"'));
+    assert.ok(toolchainText.includes('"-mlittle-endian-data"'));
+    assert.ok(toolchainText.includes('"-nostartfiles"'));
+    assert.ok(toolchainText.includes('"-Wl,-u,_PowerON_Reset_PC"'));
+    // The selected core's set_flags() list is authoritative for the application.
+    // In particular -nostartfiles now appears in the project compile options too,
+    // proving the list came from coreUtils.cmake rather than the fallback table.
+    assert.match(toolchainText, /add_compile_options\([^\n]*"-nostartfiles"/);
+    assert.ok(!toolchainText.includes('-mcpu=rx66t'));
+    assert.ok(!toolchainText.includes('-mcpu=rxv3'));
+    assert.deepStrictEqual(compilerSupport.rxArchitectureFlags({
+      device: { familyUid: 'RX26T' }, sdkConfig: { CORE_NAME: 'RXv3' }
+    }), ['-misa=v3', '-fpu', '-mlittle-endian-data']);
+    const rxFlags = compilerSupport.rxCompilerFlags({
+      device: { familyUid: 'RX26T' }, sdkConfig: { CORE_NAME: 'RXv3' }
+    });
+    assert.ok(rxFlags.compile.includes('-fno-builtin'));
+    assert.ok(rxFlags.compile.includes('-fomit-frame-pointer'));
+    assert.ok(rxFlags.compile.includes('-fno-common'));
+    assert.ok(rxFlags.link.includes('-nostartfiles'));
+    assert.ok(rxFlags.link.includes('-Wl,-u,_PowerON_Reset_PC'));
+  } finally {
+    fs.rmSync(rxToolchainRoot, { recursive: true, force: true });
+  }
+
+  const xc8ToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xc8-toolchain-'));
+  try {
+    const toolchainFile = path.join(xc8ToolchainRoot, 'toolchain.cmake');
+    setup.writeToolchain(toolchainFile, {
+      clockMHz: '64', applicationOutput: 'debug-terminal',
+      metadata: {
+        device: { uid: 'PIC18F97J94', mcuName: 'PIC18F97J94', flash: 131072, ram: 3862, compilerFlags: '', linkerFlags: '' },
+        compiler: { uid: 'mchp_xc8' },
+        sdkConfig: { MCU_NAME: 'PIC18F97J94', CORE_NAME: 'P18', _MSDK_COMPILER_ID_: 'XC8' }
+      }
+    }, {
+      c: '/toolchain/bin/xc8-cc',
+      asm: '/toolchain/bin/xc8-cc',
+      cmakeAsm: '/toolchain/bin/xc8-cc',
+      ar: '/toolchain/bin/xc8-ar',
+      adapter: compilerSupport.adapterFor('mchp_xc8')
+    }, {
+      compatibilityModuleRoot: xc8ToolchainRoot,
+      infrastructureRoot: xc8ToolchainRoot,
+      installPrefix: xc8ToolchainRoot
+    });
+    const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
+    const rulesText = fs.readFileSync(path.join(xc8ToolchainRoot, 'xc8-cmake-rules.cmake'), 'utf8');
+    assert.ok(toolchainText.includes('set(CMAKE_AR "/toolchain/bin/xc8-ar"'));
+    assert.ok(toolchainText.includes('"-mcpu=18F97J94"'));
+    assert.ok(!toolchainText.includes('-mcpu=PIC18F97J94'));
+    assert.ok(toolchainText.includes('add_compile_definitions("$<$<CONFIG:Debug>:__DEBUG>")'));
+    assert.ok(toolchainText.includes('CMAKE_USER_MAKE_RULES_OVERRIDE_C'));
+    assert.ok(rulesText.includes('set(CMAKE_C_OUTPUT_EXTENSION ".p1")'));
+    assert.ok(rulesText.includes('set(CMAKE_EXECUTABLE_SUFFIX ".elf")'));
+    assert.ok(rulesText.includes('<CMAKE_AR> -r <TARGET> <OBJECTS>'));
+    assert.deepStrictEqual(compilerSupport.adapterFor('mchp_xc8').executableNames.ar, ['xc8-ar']);
+    assert.deepStrictEqual(compilerSupport.adapterFor('mchp_xc8').executableNames.objcopy, ['avr-objcopy']);
+  } finally {
+    fs.rmSync(xc8ToolchainRoot, { recursive: true, force: true });
+  }
+
+  assert.strictEqual(compilerSupport.microchipProcessorName('xc8', 'PIC18F97J94'), '18F97J94');
+  assert.strictEqual(compilerSupport.microchipProcessorName('xc16', 'dsPIC33CK256MP508'), '33CK256MP508');
+  assert.strictEqual(compilerSupport.microchipProcessorName('xc16', 'PIC24FJ256GA705'), '24FJ256GA705');
+  assert.strictEqual(compilerSupport.microchipProcessorName('xc32', 'PIC32MZ2048EFH144'), '32MZ2048EFH144');
+  assert.strictEqual(compilerSupport.microchipProcessorName('xc32', 'ATSAME54P20A'), 'ATSAME54P20A');
+
+  for (const [uid, family, arName, ranlibName, processorFlag] of [
+    ['mchp_xc16', 'xc16', 'xc16-ar', 'xc16-ranlib', '-mcpu=33CK256MP508'],
+    ['mchp_xc32', 'xc32', 'xc32-ar', 'xc32-ranlib', '-mprocessor=32MZ2048EFH144']
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `mikrobus-${family}-toolchain-`));
+    try {
+      const toolchainFile = path.join(root, 'toolchain.cmake');
+      const mcu = family === 'xc16' ? 'dsPIC33CK256MP508' : 'PIC32MZ2048EFH144';
+      setup.writeToolchain(toolchainFile, {
+        clockMHz: '120', applicationOutput: 'debug-terminal',
+        metadata: {
+          device: { uid: mcu, mcuName: mcu, flash: 1, ram: 1, compilerFlags: '', linkerFlags: '' },
+          compiler: { uid },
+          sdkConfig: { MCU_NAME: mcu, CORE_NAME: family === 'xc16' ? 'dsPIC33' : 'MIPS32', _MSDK_COMPILER_ID_: family.toUpperCase() }
+        }
+      }, {
+        c: `/toolchain/bin/${family}-gcc`,
+        asm: `/toolchain/bin/${family}-gcc`,
+        cmakeAsm: `/toolchain/bin/${family}-gcc`,
+        ar: `/toolchain/bin/${arName}`,
+        ranlib: `/toolchain/bin/${ranlibName}`,
+        adapter: compilerSupport.adapterFor(uid)
+      }, {
+        compatibilityModuleRoot: root,
+        infrastructureRoot: root,
+        installPrefix: root
+      });
+      const text = fs.readFileSync(toolchainFile, 'utf8');
+      assert.ok(text.includes(`set(CMAKE_AR "/toolchain/bin/${arName}"`));
+      assert.ok(text.includes(`set(CMAKE_RANLIB "/toolchain/bin/${ranlibName}"`));
+      assert.ok(text.includes(`"${processorFlag}"`));
+      assert.ok(text.includes('if(DEFINED MIKROBUS_WORKSPACE_PREFIX_PATH)'));
+      assert.deepStrictEqual(compilerSupport.adapterFor(uid).executableNames.ar, [arName]);
+      assert.deepStrictEqual(compilerSupport.adapterFor(uid).executableNames.ranlib, [ranlibName]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 56);
+  assert.strictEqual(mikrocDebug.adapterIdForCompiler('mikrocpic32'), 'mikroe:pic32:gdb_rsp');
+  assert.strictEqual(mikrocDebug.adapterIdForCompiler('mikrocarm'), 'mikroe:arm:gdb_rsp');
+  const qtSpec = mikrocDebug.qtRuntimePackageSpec();
+  assert.strictEqual(qtSpec.name, 'mikrodap_qt_runtime');
+  assert.strictEqual(qtSpec.version, '6.9.1');
+  assert.match(qtSpec.downloadUrl, /download\.qt\.io\/online\/qtsdkrepository\/linux_x64\/desktop\/qt6_691/);
+  assert.strictEqual(qtSpec.installRelativePath, 'tools/mikrodap-qt/6.9.1');
+
+  assert.strictEqual(mikrocDebug.isMikroCCompiler('mikrocpic'), true);
+  assert.strictEqual(mikrocDebug.isMikroCCompiler('gcc_arm_none_eabi'), false);
+  assert.strictEqual(mikrocDebug.dbgPathForArtifact('/tmp/build/example.hex'), '/tmp/build/example.dbg');
+  const mikroInit = mikrocDebug.makeInitializationOptions({
+    adapterID: 'mikroe:pic32:gdb_rsp', mcu: 'PIC32MZ2048EFH144',
+    compilerPath: '/tmp/compiler', corePath: '/tmp/core', port: 34433, tool: 'codegrip',
+    resetType: 'Hardware reset', connectionType: 'Normal', speed: '4 MHz',
+    protocol: '2-wire EJTAG', programmingType: 'debugging'
+  });
+  assert.strictEqual(mikroInit.adapterID, 'mikroe:pic32:gdb_rsp');
+  assert.strictEqual(mikroInit.projectParameters.mcu, 'PIC32MZ2048EFH144');
+  assert.strictEqual(mikroInit.debuggerSettings.hardware_debuger.settings.port, '34433');
+  assert.strictEqual(mikroInit.debuggerSettings.hardware_debuger.name, 'codegrip');
+  assert.strictEqual(mikroInit.debuggerSettings.resetType, 'Hardware reset');
+  assert.strictEqual(mikroInit.debuggerSettings.connectionType, 'Normal');
+  assert.strictEqual(mikroInit.debuggerSettings.speed, '4 MHz');
+  assert.strictEqual(mikroInit.debuggerSettings.protocol, '2-wire EJTAG');
+  assert.strictEqual(mikroInit.debuggerSettings['Programming Type'], 'debugging');
+  const mikroCfg = mikrocDebug.debugConfiguration({
+    name: 'PIC32 mikroC', cwd: '/tmp/project', generation: 'g1',
+    adapterID: 'mikroe:pic32:gdb_rsp', mcu: 'PIC32MZ2048EFH144',
+    compilerPath: '/tmp/compiler', corePath: '/tmp/core', port: 34433,
+    dbgFile: '/tmp/project/build/example.dbg'
+  });
+  assert.strictEqual(mikroCfg.type, 'mikrobus-mikroc-debug');
+  assert.strictEqual(mikroCfg.program, '/tmp/project/build/example.dbg');
+  assert.strictEqual(mikroCfg.__mikrobusMikroCOptions.adapterID, 'mikroe:pic32:gdb_rsp');
   const setupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
   assert.ok(setupSource.includes('const assembler = resolveTool'));
   assert.ok(setupSource.includes('const cmakeAsm = adapter.cmakeAsmViaCCompiler ? c'));
@@ -857,19 +1733,104 @@ try {
   assert.ok(configuratorStyleSource.includes('background: var(--vscode-dropdown-background)'));
   assert.ok(configuratorClientSource.includes('filteredBoardDevices'));
   assert.ok(configuratorClientSource.includes("type: 'selectCompiler'"));
+  assert.ok(setupSource.includes('Workspace CMake install prefix:'));
+  assert.ok(setupSource.includes('`-DCMAKE_INSTALL_PREFIX=${workspaceInstallPrefix}`'));
+  assert.ok(setupSource.includes('...preProjectDefinitions'));
+  assert.ok(setupSource.includes('workspacePreProjectCmakeArguments'));
+  assert.ok(setupSource.includes("'-DMSDK_BUILD_TFT_MODULES=FALSE'"));
   assert.ok(setupSource.includes('metadata.packageRequirements.card.mcuName ||'));
   assert.ok(setupSource.includes('metadata.device?.mcuName ||'));
   assert.ok(setupSource.includes('metadata.sdkConfig?.MCU_NAME ||'));
+  assert.ok(!setupSource.includes('function mikroCNectoPackageRoots'));
+  assert.ok(!setupSource.includes('mikroc-compiler-wrapper'));
+  assert.ok(!setupSource.includes('requireManagedMikroCDefinition'));
+  assert.ok(setupSource.includes("paths: ['${CMAKE_BINARY_DIR}', coreDefinitionDirectory, '${CMAKE_SOURCE_DIR}']"));
+  const compilerSupportSource = fs.readFileSync(path.join(__dirname, '..', 'c_compiler_support.js'), 'utf8');
+  for (const family of ['arm', 'pic', 'dspic', 'pic32', 'avr']) {
+    assert.ok(compilerSupportSource.includes(`installRelativePath: 'compilers/mikroc/${family}/mikroc'`));
+  }
+  const payloadSelectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mikroc-bundle-select-'));
+  try {
+    const expectedPayload = path.join(payloadSelectRoot, 'PIC32', 'mikroC');
+    fs.mkdirSync(expectedPayload, { recursive: true });
+    fs.writeFileSync(path.join(expectedPayload, 'marker.txt'), 'ok');
+    assert.strictEqual(packageManager.normalizedPayloadRoot(payloadSelectRoot, {
+      name: 'mikroc_pic32', payloadSubdir: 'PIC32/mikroC'
+    }), expectedPayload);
+    assert.throws(() => packageManager.normalizedPayloadRoot(payloadSelectRoot, {
+      name: 'mikroc_pic32', payloadSubdir: '../escape'
+    }), /Invalid package payload subdirectory|escapes the extraction root/);
+  } finally {
+    fs.rmSync(payloadSelectRoot, { recursive: true, force: true });
+  }
+
   const packageManagerSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
+  assert.ok(packageManagerSource.includes('const layoutMatches ='));
   assert.ok(packageManagerSource.includes('Compiler packages'));
   assert.ok(packageManagerSource.includes("kind === 'compiler'"));
   assert.ok(packageManagerSource.includes('CODEGRIP packages'));
   assert.ok(packageManagerSource.includes("kind === 'codegrip'"));
   assert.ok(packageManagerSource.includes('installedOnly'));
+  assert.ok(packageManagerSource.includes('metadata_demos_c.json'));
+  assert.ok(packageManagerSource.includes("kind: 'demo-example'"));
+  assert.ok(packageManagerSource.includes('Demo Examples'));
+  const demoSpec = packageManager.demoExampleSpec({
+    name: 'Analog Input Demo',
+    download_link: 'https://example.invalid/mikroe-demo-sdk-analogin.zip'
+  });
+  assert.strictEqual(demoSpec.kind, 'demo-example');
+  assert.strictEqual(demoSpec.name, 'mikroe-demo-sdk-analogin');
+  assert.strictEqual(demoSpec.installRelativePath, 'demo-examples/mikroe-demo-sdk-analogin');
+  const demoProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-demo-project-'));
+  try {
+    const nestedProject = path.join(demoProjectRoot, 'payload', 'demo-app');
+    fs.mkdirSync(nestedProject, { recursive: true });
+    fs.writeFileSync(path.join(nestedProject, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.20)\n');
+    assert.strictEqual(packageManager.resolveExampleProjectRoot({ root: demoProjectRoot }), nestedProject);
+  } finally {
+    fs.rmSync(demoProjectRoot, { recursive: true, force: true });
+  }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.strictEqual(packageJson.version, '0.7.49');
+  assert.strictEqual(packageJson.icon, 'media/mikrobus-module-3d-transparent.png');
+  assert.strictEqual(
+    packageJson.contributes.viewsContainers.activitybar.find((item) => item.id === 'mikrobusRust')?.icon,
+    'media/mikrobus-module-3d-transparent.png'
+  );
+  assert.strictEqual(
+    packageJson.contributes.commands.find((item) => item.command === 'mikrobusC.debug')?.icon,
+    '$(debug-alt)'
+  );
+  const rustConfiguratorHtmlSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
+  assert.ok(rustConfiguratorHtmlSource.includes('id="mcuVendorFilter"'));
+  assert.ok(rustConfiguratorHtmlSource.includes('id="boardVendorFilter"'));
+  assert.ok(rustConfiguratorHtmlSource.includes('id="boardMcuVendorFilter"'));
+  assert.ok(rustConfiguratorHtmlSource.includes('System clock and programmer'));
+  const rustConfiguratorClientSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.js'), 'utf8');
+  assert.ok(rustConfiguratorClientSource.includes('populateVendorFilter(mcuVendorFilter, state.mcus)'));
+  assert.ok(rustConfiguratorClientSource.includes('populateVendorFilter(boardVendorFilter, state.boards)'));
+  assert.ok(rustConfiguratorClientSource.includes('populateVendorFilter(boardMcuVendorFilter, state.boardMcuOptions)'));
+  const cConfiguratorHtmlSource = fs.readFileSync(path.join(__dirname, '..', 'c_configurator.js'), 'utf8');
+  assert.ok(cConfiguratorHtmlSource.includes('id="cMcuVendorFilter"'));
+  assert.ok(cConfiguratorHtmlSource.includes('id="cBoardVendorFilter"'));
+  assert.ok(cConfiguratorHtmlSource.includes('id="cBoardDeviceVendorFilter"'));
+  const cConfiguratorClientSourceForFilters = fs.readFileSync(path.join(__dirname, '..', 'media', 'c_mcu.js'), 'utf8');
+  assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(mcuVendorFilter, state.mcus)'));
+  assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(boardVendorFilter, state.boards)'));
+  assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(boardDeviceVendorFilter, state.boardDevices)'));
+  assert.ok(packageJson.extensionDependencies.includes('RenesasElectronicsCorporation.renesas-debug'));
+  assert.strictEqual(Boolean(packageJson.contributes?.configuration?.properties?.['mikrobusRust.rfpCliPath']), false);
+  assert.ok(configuratorSource.includes('bareMetalOnly'));
+  assert.ok(configuratorSource.includes('bareMetalRecommended'));
+  assert.ok(configuratorClientSource.includes("'Bare metal' : 'mikroSDK'"));
+  const databaseSource = fs.readFileSync(path.join(__dirname, '..', 'c_database.js'), 'utf8');
+  assert.ok(databaseSource.includes('COALESCE(d.sdk_support, 0) AS sdkSupport'));
+  assert.ok(!/function listDevices[\s\S]{0,900}WHERE COALESCE\(d\.sdk_support, 0\) = 1/.test(databaseSource));
   assert.ok(packageJson.activationEvents.includes('onCommand:mikrobusC.openCompilerPackages'));
   assert.ok(packageJson.contributes.commands.some((item) => item.command === 'mikrobusC.openCompilerPackages'));
+  assert.ok(packageJson.activationEvents.includes('onCommand:mikrobusC.openDemoExamples'));
+  assert.ok(packageJson.contributes.commands.some((item) => item.command === 'mikrobusC.openDemoExamples'));
 
   const infraRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-c-infra-'));
   try {
@@ -919,12 +1880,14 @@ try {
     const compatibilityFile = path.join(compatibilityRoot, 'mikroeUtils.cmake');
     const compatibilityText = fs.readFileSync(compatibilityFile, 'utf8');
     assert.ok(compatibilityText.includes('mikroeUtilsCommon.cmake'));
+    assert.ok(compatibilityText.includes('include(GNUInstallDirs)'));
+    assert.ok(compatibilityText.includes('include(CMakePackageConfigHelpers)'));
     assert.ok(compatibilityText.includes('PREINIT_ROUTINE_PATH'));
     assert.ok(compatibilityText.includes('add_subdirectory'));
     assert.ok(compatibilityText.includes('function(core_install targetAlias)'));
     assert.ok(compatibilityText.includes('mikroeExportConfig.cmake.in'));
     assert.ok(compatibilityText.includes('macro(add_fosc_macro target)'));
-    assert.ok(compatibilityText.includes('OSC_KHZ=${OSC_KHZ}'));
+    assert.ok(compatibilityText.includes('target_compile_definitions(${target} PUBLIC OSC_KHZ=${OSC_KHZ})'));
     assert.ok(fs.existsSync(path.join(compatibilityRoot, 'mikroeExportConfig.cmake.in')));
 
     const smokeRoot = path.join(infraRoot, 'smoke');
@@ -933,8 +1896,6 @@ try {
     fs.writeFileSync(path.join(smokeRoot, 'CMakeLists.txt'), [
       'cmake_minimum_required(VERSION 3.20)',
       'project(mikrobus_compat_smoke VERSION 1 LANGUAGES C)',
-      'include(GNUInstallDirs)',
-      'include(CMakePackageConfigHelpers)',
       'include(mikroeUtils)',
       'common_marker()',
       'if(NOT MIKROBUS_COMMON_INCLUDED)',
@@ -945,8 +1906,16 @@ try {
       '  message(FATAL_ERROR "preinit target was not added")',
       'endif()',
       'file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/dummy.c" "void dummy(void) {}\n")',
+      'file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/consumer.c" "#ifndef OSC_KHZ\n#error OSC_KHZ_not_propagated\n#endif\nvoid consumer(void) {}\n")',
       'add_library(core_dummy STATIC "${CMAKE_CURRENT_BINARY_DIR}/dummy.c")',
       'add_library(MikroC.Core ALIAS core_dummy)',
+      'add_fosc_macro(core_dummy)',
+      'get_target_property(_core_interface_defs core_dummy INTERFACE_COMPILE_DEFINITIONS)',
+      'if(NOT "OSC_KHZ=64000" IN_LIST _core_interface_defs)',
+      '  message(FATAL_ERROR "OSC_KHZ was not exported by MikroC.Core: ${_core_interface_defs}")',
+      'endif()',
+      'add_library(sdk_consumer STATIC "${CMAKE_CURRENT_BINARY_DIR}/consumer.c")',
+      'target_link_libraries(sdk_consumer PRIVATE core_dummy)',
       'core_install(MikroC.Core)',
       'if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/MikroC.CoreConfig.cmake")',
       '  message(FATAL_ERROR "core package config was not generated")',
@@ -957,12 +1926,15 @@ try {
       '-S', smokeRoot,
       '-B', smokeBuild,
       `-DCMAKE_MODULE_PATH=${compatibilityRoot};${commonRoot}`,
-      `-DPREINIT_ROUTINE_PATH=${preinitRoot}`
+      `-DPREINIT_ROUTINE_PATH=${preinitRoot}`,
+      '-DOSC_KHZ=64000'
     ], { encoding: 'utf8' });
     if (cmake.error && cmake.error.code === 'ENOENT') {
       process.stdout.write('CMake compatibility smoke test skipped: cmake not found.\n');
     } else {
       assert.strictEqual(cmake.status, 0, `${cmake.stdout}\n${cmake.stderr}`);
+      const cmakeBuild = childProcess.spawnSync('cmake', ['--build', smokeBuild, '--target', 'sdk_consumer'], { encoding: 'utf8' });
+      assert.strictEqual(cmakeBuild.status, 0, `${cmakeBuild.stdout}\n${cmakeBuild.stderr}`);
     }
   } finally {
     fs.rmSync(infraRoot, { recursive: true, force: true });
@@ -975,6 +1947,8 @@ try {
     'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/mikroe_utils_common.7z');
   assert.strictEqual(catalog.resolveDirect({ kind: 'database', name: 'C_database', version: 'live' }).downloadUrl,
     'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/database_live.7z');
+  assert.strictEqual(catalog.resolveDirect({ kind: 'shared', name: 'cmake', version: 'necto-live' }).downloadUrl,
+    'https://software-update.mikroe.com/NECTOStudio7/live/cmake/linux/cmake.7z');
   assert.throws(() => catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest' }), /latest release must be resolved/);
   assert.strictEqual(catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest', downloadUrl: 'https://example/mikrosdk.7z' }).downloadUrl,
     'https://example/mikrosdk.7z');
@@ -1003,12 +1977,15 @@ try {
   const cPackageManagerSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
   assert.ok(cSetupSource.includes('codegripCatalog.resolveDevice(setupMcuName(setup), token)'));
   assert.ok(cSetupSource.includes('mcu: setupMcuName(setup)'));
+  assert.ok(cSetupSource.includes('if (looksLikeIntelHex(elf)) return path.resolve(elf);'));
   assert.ok(cSetupSource.includes('defines.push(`#define ${mcuName}`)'));
   assert.ok(!cSetupSource.includes('codegripCatalog.resolveDevice(setup.metadata.device.uid, token)'));
   assert.ok(cDatabaseSource.includes('sdkConfig.MCU_NAME = mcuName'));
   assert.ok(cDatabaseSource.includes("sdkConfig._MSDK_MCU_CARD_NAME_ = deviceConfig._MSDK_MCU_CARD_NAME_"));
+  assert.ok(cDatabaseSource.includes('preferredGenericBoardForDb'));
   assert.ok(cMcuUiSource.includes("appendCell(row, mcu.mcuName || mcu.uid, 'mcuNameCell')"));
   assert.ok(cMcuUiSource.includes("device.mcuName || device.uid"));
+  assert.ok(cMcuUiSource.includes('Bare metal is the default, but a mapped mikroSDK is available'));
   assert.ok(cPackageManagerSource.includes("return openEnvironmentPackages(context, kind)"));
   assert.ok(cPackageManagerSource.includes("environmentViewKind"));
   assert.ok(cPackageManagerSource.includes("Package files are still present after uninstall"));

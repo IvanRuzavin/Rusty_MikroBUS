@@ -15,9 +15,46 @@ const installLocks = new Map();
 let packagePanel;
 let environmentPanel;
 let environmentViewKind = 'environment';
+let clickExamplesPanel;
+let clickExampleSpecsCache = [];
+let clickMetadataCache;
+let clickMetadataLoadedAt = 0;
+let demoExamplesPanel;
+let demoExampleSpecsCache = [];
+let demoMetadataCache;
+let demoMetadataLoadedAt = 0;
 
 const CORE_METADATA_URL = 'https://github.com/MikroElektronika/core_packages/releases/download/v2.0.0/metadata.json';
 const MIKROSDK_LATEST_API = 'https://api.github.com/repos/MikroElektronika/mikrosdk_v2/releases/latest';
+const RFP_DOWNLOAD_URL = 'https://www.renesas.com/en/software-tool/renesas-flash-programmer-programming-gui';
+const CLICK_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_clicks_c.json';
+const DEMO_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_demos_c.json';
+
+function rfpProgrammerPackageSpec() {
+  return {
+    kind: 'programmer',
+    name: 'renesas_rfp',
+    version: 'current',
+    displayName: 'Renesas Flash Programmer (rfp-cli)',
+    environment: false,
+    manualInstall: 'rfp',
+    installRelativePath: 'programmer/renesas_rfp/current',
+    externalUrl: RFP_DOWNLOAD_URL,
+    detail: 'Managed RFP installation. Renesas requires an authenticated download; Install imports the official downloaded archive/folder into c-runtime/packages/programmer/renesas_rfp/current.'
+  };
+}
+
+function findRfpCliInRoot(root) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const names = process.platform === 'win32' ? new Set(['rfp-cli.exe', 'rfp-cli']) : new Set(['rfp-cli']);
+  return findRecursive(root, (_candidate, name) => names.has(String(name).toLowerCase()), 10);
+}
+
+function managedRfpCli(context) {
+  const entry = getInstalledPackage(context, rfpProgrammerPackageSpec());
+  if (!entry?.root) return undefined;
+  return findRfpCliInRoot(entry.root);
+}
 
 function expandHome(value) {
   const text = String(value || '').trim();
@@ -29,6 +66,128 @@ function expandHome(value) {
 function getManagedRoot(context) {
   const configured = String(vscode.workspace.getConfiguration('mikrobusRust').get('storageRoot', '') || '').trim();
   return configured ? path.resolve(expandHome(configured)) : context.globalStorageUri.fsPath;
+}
+
+function samePath(left, right) {
+  const a = path.resolve(String(left || ''));
+  const b = path.resolve(String(right || ''));
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function pathInside(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function remapManagedRootValue(value, oldRoot, newRoot) {
+  if (Array.isArray(value)) return value.map((item) => remapManagedRootValue(item, oldRoot, newRoot));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, remapManagedRootValue(item, oldRoot, newRoot)]));
+  }
+  if (typeof value !== 'string') return value;
+  const source = path.resolve(oldRoot);
+  const candidate = value;
+  const sourceCmp = process.platform === 'win32' ? source.toLowerCase() : source;
+  const candidateCmp = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+  if (candidateCmp === sourceCmp) return newRoot;
+  const prefixA = `${sourceCmp}${path.sep}`;
+  const prefixB = `${sourceCmp}/`;
+  if (candidateCmp.startsWith(prefixA) || candidateCmp.startsWith(prefixB)) {
+    return path.join(newRoot, candidate.slice(source.length).replace(/^[\\/]+/, ''));
+  }
+  return value;
+}
+
+function rewriteJsonRoot(filePath, oldRoot, newRoot) {
+  if (!filePath || !fs.existsSync(filePath)) return;
+  const original = fs.readFileSync(filePath, 'utf8');
+  try {
+    const parsed = JSON.parse(original);
+    const remapped = remapManagedRootValue(parsed, oldRoot, newRoot);
+    fs.writeFileSync(filePath, `${JSON.stringify(remapped, null, 2)}\n`, 'utf8');
+    return;
+  } catch {
+    // VS Code settings may be JSONC. Preserve its formatting/comments and only
+    // replace the old managed-root literal (including JSON-escaped Windows form).
+    const escapedOld = JSON.stringify(String(oldRoot)).slice(1, -1);
+    const escapedNew = JSON.stringify(String(newRoot)).slice(1, -1);
+    let updated = original.split(String(oldRoot)).join(String(newRoot));
+    updated = updated.split(escapedOld).join(escapedNew);
+    if (updated !== original) fs.writeFileSync(filePath, updated, 'utf8');
+  }
+}
+
+function rewriteManagedRootReferences(newRoot, oldRoot) {
+  rewriteJsonRoot(path.join(newRoot, 'c-runtime', 'installed-packages.json'), oldRoot, newRoot);
+  rewriteJsonRoot(path.join(newRoot, 'configured-setups', 'setups.json'), oldRoot, newRoot);
+  const setupsRoot = path.join(newRoot, 'c-runtime', 'setups');
+  if (fs.existsSync(setupsRoot)) {
+    for (const entry of fs.readdirSync(setupsRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) rewriteJsonRoot(path.join(setupsRoot, entry.name, 'setup.json'), oldRoot, newRoot);
+    }
+  }
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    const vscodeDir = path.join(folder.uri.fsPath, '.vscode');
+    for (const name of ['mikrobus-rust.json', 'mikrobus-c.json', 'settings.json']) {
+      rewriteJsonRoot(path.join(vscodeDir, name), oldRoot, newRoot);
+    }
+  }
+}
+
+async function setManagedRootConfiguration(newRoot) {
+  const config = vscode.workspace.getConfiguration('mikrobusRust');
+  const inspected = config.inspect('storageRoot');
+  let target = vscode.ConfigurationTarget.Global;
+  if (inspected?.workspaceFolderValue !== undefined) target = vscode.ConfigurationTarget.WorkspaceFolder;
+  else if (inspected?.workspaceValue !== undefined) target = vscode.ConfigurationTarget.Workspace;
+  await config.update('storageRoot', newRoot, target);
+}
+
+async function changeManagedRoot(context) {
+  const oldRoot = path.resolve(getManagedRoot(context));
+  const picked = await vscode.window.showOpenDialog({
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Use as managed installation path',
+    title: 'Choose MikroBUS managed installation path'
+  });
+  if (!picked?.length) return false;
+  const newRoot = path.resolve(picked[0].fsPath);
+  if (samePath(oldRoot, newRoot)) {
+    vscode.window.showInformationMessage(`MikroBUS managed packages already use ${newRoot}.`);
+    return false;
+  }
+  if (pathInside(oldRoot, newRoot) || pathInside(newRoot, oldRoot)) {
+    throw new Error('The new installation path cannot be inside the current path, or contain the current path. Choose a separate folder.');
+  }
+
+  const targetHadContent = directoryHasContent(newRoot);
+  if (targetHadContent) {
+    const choice = await vscode.window.showWarningMessage(
+      `The selected folder is not empty. Existing files in ${newRoot} may be merged or replaced by managed MikroBUS content.`,
+      { modal: true },
+      'Merge and move'
+    );
+    if (choice !== 'Merge and move') return false;
+  }
+
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: 'Moving MikroBUS managed installation',
+    cancellable: false
+  }, async (progress) => {
+    progress.report({ message: 'Copying installed packages and setups…' });
+    fs.mkdirSync(newRoot, { recursive: true });
+    if (fs.existsSync(oldRoot)) fs.cpSync(oldRoot, newRoot, { recursive: true, force: true });
+    rewriteManagedRootReferences(newRoot, oldRoot);
+    progress.report({ message: 'Switching extension to the new path…' });
+    await setManagedRootConfiguration(newRoot);
+    progress.report({ message: 'Removing the previous installation path…' });
+    if (fs.existsSync(oldRoot)) fs.rmSync(oldRoot, { recursive: true, force: true });
+  });
+  vscode.window.showInformationMessage(`MikroBUS managed installation moved to ${newRoot}.`);
+  return true;
 }
 
 function getPackagePaths(context) {
@@ -217,6 +376,84 @@ async function fetchJson(url, token) {
   catch (error) { throw new Error(`Invalid JSON downloaded from ${url}: ${error.message}`); }
 }
 
+async function loadClickMetadata(token, force = false) {
+  if (!force && clickMetadataCache && Date.now() - clickMetadataLoadedAt < 10 * 60 * 1000) return clickMetadataCache;
+  const parsed = await fetchJson(CLICK_METADATA_URL, token);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Click Board metadata must be a JSON object keyed by category.');
+  const normalized = {};
+  for (const [category, entries] of Object.entries(parsed)) {
+    if (!Array.isArray(entries)) continue;
+    normalized[category] = entries.filter((item) => item && typeof item === 'object' && item.name && item.download_link);
+  }
+  clickMetadataCache = normalized;
+  clickMetadataLoadedAt = Date.now();
+  return normalized;
+}
+
+function clickExampleSpec(category, item) {
+  const displayName = String(item?.name || '').trim();
+  const downloadUrl = String(item?.download_link || '').trim();
+  let archiveStem = '';
+  try { archiveStem = path.basename(new URL(downloadUrl).pathname).replace(/\.(zip|7z)$/i, ''); } catch {}
+  const name = safeName(archiveStem || displayName).toLowerCase();
+  return {
+    kind: 'click-example',
+    name,
+    version: 'current',
+    displayName,
+    environment: false,
+    catalogGroup: String(category || 'other'),
+    category: String(category || 'other'),
+    downloadUrl,
+    installRelativePath: `click-examples/${name}`,
+    detail: `C Click Board example · ${String(category || 'other')}`
+  };
+}
+
+async function availableClickExampleSpecs(token, force = false) {
+  const metadata = await loadClickMetadata(token, force);
+  const specs = [];
+  for (const [category, entries] of Object.entries(metadata)) {
+    for (const item of entries) specs.push(clickExampleSpec(category, item));
+  }
+  specs.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return specs;
+}
+
+async function loadDemoMetadata(token, force = false) {
+  if (!force && demoMetadataCache && Date.now() - demoMetadataLoadedAt < 10 * 60 * 1000) return demoMetadataCache;
+  const parsed = await fetchJson(DEMO_METADATA_URL, token);
+  if (!Array.isArray(parsed)) throw new Error('Demo metadata must be a JSON array.');
+  demoMetadataCache = parsed.filter((item) => item && typeof item === 'object' && item.name && item.download_link);
+  demoMetadataLoadedAt = Date.now();
+  return demoMetadataCache;
+}
+
+function demoExampleSpec(item) {
+  const displayName = String(item?.name || '').trim();
+  const downloadUrl = String(item?.download_link || '').trim();
+  let archiveStem = '';
+  try { archiveStem = path.basename(new URL(downloadUrl).pathname).replace(/\.(zip|7z)$/i, ''); } catch {}
+  const name = safeName(archiveStem || displayName).toLowerCase();
+  return {
+    kind: 'demo-example',
+    name,
+    version: 'current',
+    displayName,
+    environment: false,
+    downloadUrl,
+    installRelativePath: `demo-examples/${name}`,
+    detail: 'C Demo example'
+  };
+}
+
+async function availableDemoExampleSpecs(token, force = false) {
+  const metadata = await loadDemoMetadata(token, force);
+  const specs = metadata.map(demoExampleSpec);
+  specs.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return specs;
+}
+
 let coreMetadataCache;
 let coreMetadataLoadedAt = 0;
 async function loadCoreMetadata(_context, token, force = false) {
@@ -291,9 +528,15 @@ async function compilerPackageSpec(context, compilerOrGroup, token) {
     : [compilerOrGroup?.uid].filter(Boolean);
   const displayName = compilerOrGroup?.displayName || compilerOrGroup?.name || installerPackage;
   const toolchainBinaries = Array.isArray(compilerOrGroup?.binaryPaths)
-    ? compilerOrGroup.binaryPaths
+    ? [...compilerOrGroup.binaryPaths]
     : [compilerOrGroup?.cCompiler, compilerOrGroup?.cxxCompiler, compilerOrGroup?.asmCompiler, compilerOrGroup?.gdbPath]
         .map((value) => String(value || '').trim()).filter(Boolean);
+  for (const uid of compilerUids) {
+    const adapter = compilerSupport.adapterFor(uid);
+    for (const executable of adapter?.executableNames?.ar || []) {
+      if (!toolchainBinaries.includes(executable)) toolchainBinaries.push(executable);
+    }
+  }
   return {
     kind: 'toolchain',
     name: installerPackage,
@@ -304,6 +547,7 @@ async function compilerPackageSpec(context, compilerOrGroup, token) {
     compilerUids,
     toolchainBinaries,
     installRelativePath: asset.installRelativePath || `compilers/${safeName(installerPackage)}`,
+    payloadSubdir: asset.payloadSubdir,
     downloadUrl: asset.url,
     detail: compilerOrGroup?.supportedDeviceCount !== undefined
       ? `${compilerOrGroup.supportedDeviceCount} SDK-supported device mapping(s); ${compilerOrGroup.mappedDeviceCount || compilerOrGroup.supportedDeviceCount || 0} total mapping(s).`
@@ -598,8 +842,7 @@ function findExistingCodegripPayloadRoot(context) {
     }
   }
   const roots = [
-    path.join(managedRoot, 'runner', 'codegrip'),
-    path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip')
+    path.join(managedRoot, 'runner', 'codegrip')
   ];
   for (const root of roots) {
     executableCandidates.push(...codegripServerCandidates(root));
@@ -627,6 +870,21 @@ function directoryHasContent(directory) {
 }
 
 function normalizedPayloadRoot(extractRoot, spec) {
+  if (spec?.payloadSubdir) {
+    const segments = String(spec.payloadSubdir).replace(/\\/g, '/').split('/').filter(Boolean);
+    if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) {
+      throw new Error(`Invalid package payload subdirectory for ${spec.name}: ${spec.payloadSubdir}`);
+    }
+    const selected = path.resolve(extractRoot, ...segments);
+    const relative = path.relative(path.resolve(extractRoot), selected);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`Package payload subdirectory escapes the extraction root: ${spec.payloadSubdir}`);
+    }
+    if (!directoryHasContent(selected)) {
+      throw new Error(`Package '${spec.name}' does not contain expected payload subtree '${spec.payloadSubdir}'.`);
+    }
+    return selected;
+  }
   const entries = fs.readdirSync(extractRoot, { withFileTypes: true })
     .filter((entry) => entry.name !== '__MACOSX');
   if (entries.length === 1 && entries[0].isDirectory()) {
@@ -701,6 +959,87 @@ function makeManagedToolchainExecutables(root, spec) {
   }
 }
 
+async function installRfpPackageUnlocked(context, spec, progress, token) {
+  const action = await vscode.window.showInformationMessage(
+    'Renesas Flash Programmer is distributed through the Renesas authenticated download page. Select the official Linux/Windows RFP package you downloaded; it will be copied into the MikroBUS managed programmer directory.',
+    { modal: false },
+    'Select RFP package',
+    'Open Renesas download page'
+  );
+  if (action === 'Open Renesas download page') {
+    await vscode.env.openExternal(vscode.Uri.parse(RFP_DOWNLOAD_URL));
+    throw new Error('Download Renesas Flash Programmer, then click Install again and select the downloaded package.');
+  }
+  if (action !== 'Select RFP package') throw new Error('RFP installation was cancelled.');
+
+  const selected = await vscode.window.showOpenDialog({
+    title: 'Select Renesas Flash Programmer package, extracted folder, or rfp-cli executable',
+    canSelectFiles: true,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Install RFP'
+  });
+  const sourceUri = selected?.[0];
+  if (!sourceUri) throw new Error('RFP installation was cancelled.');
+
+  const sourcePath = sourceUri.fsPath;
+  const paths = getPackagePaths(context);
+  const operationRoot = path.join(paths.staging, `renesas-rfp-${process.pid}-${Date.now()}`);
+  const extractRoot = path.join(operationRoot, 'payload');
+  fs.mkdirSync(extractRoot, { recursive: true });
+  try {
+    progress?.report({ message: 'Importing Renesas Flash Programmer...' });
+    const stat = fs.statSync(sourcePath);
+    let searchRoot;
+    if (stat.isDirectory()) {
+      const copied = path.join(operationRoot, 'selected');
+      fs.cpSync(sourcePath, copied, { recursive: true, force: true });
+      searchRoot = copied;
+    } else if (/rfp-cli(?:\.exe)?$/i.test(path.basename(sourcePath))) {
+      const copied = path.join(operationRoot, 'selected');
+      fs.cpSync(path.dirname(sourcePath), copied, { recursive: true, force: true });
+      searchRoot = copied;
+    } else {
+      await extractArchive(sourcePath, extractRoot, token);
+      searchRoot = extractRoot;
+    }
+
+    const cli = findRfpCliInRoot(searchRoot);
+    if (!cli) throw new Error('The selected Renesas package does not contain rfp-cli. Select the official RFP Linux/Windows package or its extracted directory.');
+    const payloadRoot = path.dirname(cli);
+    const target = packageTarget(context, spec);
+    await replaceDirectory(payloadRoot, target);
+    const installedCli = findRfpCliInRoot(target);
+    if (!installedCli) throw new Error(`Managed RFP installation is incomplete: ${target}.`);
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(installedCli, 0o755); } catch {}
+    }
+
+    const registry = readRegistry(context);
+    const key = packageKey(spec);
+    const entry = {
+      key,
+      name: spec.name,
+      displayName: spec.displayName || spec.name,
+      kind: spec.kind,
+      catalogGroup: spec.catalogGroup || spec.kind,
+      version: spec.version || 'current',
+      environment: Boolean(spec.environment),
+      root: target,
+      sourceUrl: `local:${sourcePath}`,
+      installedAt: new Date().toISOString()
+    };
+    registry.packages = registry.packages.filter((item) => item.key === key || path.resolve(item.root || '') !== path.resolve(target));
+    const index = registry.packages.findIndex((item) => item.key === key);
+    if (index >= 0) registry.packages[index] = entry;
+    else registry.packages.push(entry);
+    writeRegistry(context, registry);
+    return entry;
+  } finally {
+    fs.rmSync(operationRoot, { recursive: true, force: true });
+  }
+}
+
 async function installPackageUnlocked(context, spec, progress, token) {
   const resolved = await resolvePackage(context, spec);
   const paths = getPackagePaths(context);
@@ -767,6 +1106,12 @@ async function installPackageUnlocked(context, spec, progress, token) {
     }
     await replaceDirectory(source, target);
     makeManagedToolchainExecutables(target, spec);
+    if (process.platform !== 'win32' && String(spec.name || '').toLowerCase() === 'cmake') {
+      for (const toolName of ['cmake', 'ctest', 'cpack']) {
+        const tool = findRecursive(target, (_candidate, name) => name === toolName, 8);
+        if (tool) { try { fs.chmodSync(tool, 0o755); } catch {} }
+      }
+    }
     if (isCodegripServerSpec(spec) && !codegripServerInstalled(target)) {
       throw new Error(`Installed CODEGRIP package is incomplete: ${target}.`);
     }
@@ -811,8 +1156,19 @@ async function installPackageUnlocked(context, spec, progress, token) {
 
 async function ensurePackage(context, spec, progress, token) {
   const installed = getInstalledPackage(context, spec);
+  if (spec.manualInstall === 'rfp') {
+    const cli = installed?.root ? findRfpCliInRoot(installed.root) : undefined;
+    if (cli) return installed;
+    const key = packageKey(spec);
+    if (installLocks.has(key)) return installLocks.get(key);
+    const operation = installRfpPackageUnlocked(context, spec, progress, token).finally(() => installLocks.delete(key));
+    installLocks.set(key, operation);
+    return operation;
+  }
   const versionMatches = installed && (!spec.version || spec.version === 'latest' || !installed.version || installed.version === spec.version);
-  if (versionMatches && !spec.alwaysRefresh) {
+  const expectedTarget = spec.installRelativePath ? packageTarget(context, spec) : undefined;
+  const layoutMatches = !installed || !expectedTarget || path.resolve(installed.root || '') === path.resolve(expectedTarget);
+  if (versionMatches && layoutMatches && !spec.alwaysRefresh) {
     // A previously installed CODEGRIP server package may have been extracted
     // by an older generic archive path and therefore miss CodegripGdbServer.
     // Device packs are intentionally not required here; they are managed per
@@ -1141,9 +1497,9 @@ function cManagerHtml(kind) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>${descriptor.title}</title><style>
-body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}
-</style></head><body><header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section><input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const installedChip=document.getElementById('installedCount');let all=[];let installedOnly=false;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function isInstalled(p){return p.status==='installed'||p.status==='update';}function render(){const q=document.getElementById('search').value.toLowerCase();const installed=all.filter(isInstalled).length;const items=all.filter(x=>(!installedOnly||isInstalled(x))&&JSON.stringify(x).toLowerCase().includes(q));installedChip.textContent=installedOnly?installed+' installed · showing only':installed+' installed';installedChip.classList.toggle('active',installedOnly);installedChip.setAttribute('aria-pressed',String(installedOnly));document.getElementById('missingCount').textContent=(all.length-installed)+' not installed';if(!items.length){root.innerHTML='<div class="empty">'+(installedOnly?'No installed packages match this filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const refs=p.references||[];const action=p.unavailable?'<button disabled>Unavailable</button>':(p.external?'<button data-open="'+esc(p.externalUrl||'')+'">Open download page</button>':(p.status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'));return '<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'')+'</span><span>'+esc(p.status||'missing')+'</span>'+(p.compilerUid?'<span>'+esc(p.compilerUid)+'</span>':'')+'</div><p><code>'+esc(p.root||p.installRelativePath||'')+'</code></p>'+(p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'')+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+action+'</div></article>';}).join('');}root.onclick=e=>{const u=e.target?.dataset?.uninstall;if(u){vscode.postMessage({type:'uninstall',key:u});return;}const i=e.target?.dataset?.install;if(i){vscode.postMessage({type:'install',key:i});return;}const o=e.target?.dataset?.open;if(o)vscode.postMessage({type:'openExternal',url:o});const m=e.target?.dataset?.manager;if(m)vscode.postMessage({type:'manager',manager:m});};document.getElementById('search').oninput=render;installedChip.onclick=()=>{installedOnly=!installedOnly;render();};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${env ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.querySelectorAll('[data-manager]').forEach(x=>x.onclick=()=>vscode.postMessage({type:'manager',manager:x.dataset.manager}));" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.storageBar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border);border-radius:7px}.storageBar>div{display:grid;gap:5px;min-width:0;flex:1}.storageBar code{padding:6px 8px;background:var(--vscode-textCodeBlock-background);border-radius:3px}
+</style></head><body><header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section>${env ? '<section class="storageBar"><div><span class="muted">Managed installation path</span><code id="managedRoot">Loading…</code></div><button id="changeRoot" class="secondary">Change</button></section>' : ''}<input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const installedChip=document.getElementById('installedCount');let all=[];let installedOnly=false;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function isInstalled(p){return p.status==='installed'||p.status==='update';}function render(){const q=document.getElementById('search').value.toLowerCase();const installed=all.filter(isInstalled).length;const items=all.filter(x=>(!installedOnly||isInstalled(x))&&JSON.stringify(x).toLowerCase().includes(q));installedChip.textContent=installedOnly?installed+' installed · showing only':installed+' installed';installedChip.classList.toggle('active',installedOnly);installedChip.setAttribute('aria-pressed',String(installedOnly));document.getElementById('missingCount').textContent=(all.length-installed)+' not installed';if(!items.length){root.innerHTML='<div class="empty">'+(installedOnly?'No installed packages match this filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const refs=p.references||[];const primary=p.unavailable?'<button disabled>Unavailable</button>':(p.external?'<button data-open="'+esc(p.externalUrl||'')+'">Open download page</button>':(p.status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'));const action=(p.externalUrl&&!p.external?'<button class="secondary" data-open="'+esc(p.externalUrl)+'">Download</button>':'')+primary;return '<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'')+'</span><span>'+esc(p.status||'missing')+'</span>'+(p.compilerUid?'<span>'+esc(p.compilerUid)+'</span>':'')+'</div><p><code>'+esc(p.root||p.installRelativePath||'')+'</code></p>'+(p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'')+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+action+'</div></article>';}).join('');}root.onclick=e=>{const u=e.target?.dataset?.uninstall;if(u){vscode.postMessage({type:'uninstall',key:u});return;}const i=e.target?.dataset?.install;if(i){vscode.postMessage({type:'install',key:i});return;}const o=e.target?.dataset?.open;if(o)vscode.postMessage({type:'openExternal',url:o});const m=e.target?.dataset?.manager;if(m)vscode.postMessage({type:'manager',manager:m});};document.getElementById('search').oninput=render;installedChip.onclick=()=>{installedOnly=!installedOnly;render();};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${env ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.getElementById('changeRoot').onclick=()=>vscode.postMessage({type:'changeRoot'});document.querySelectorAll('[data-manager]').forEach(x=>x.onclick=()=>vscode.postMessage({type:'manager',manager:x.dataset.manager}));" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];const managed=document.getElementById('managedRoot');if(managed)managed.textContent=e.data.managedRoot||'';render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
 function packageStateFromSpecs(context, specs) {
@@ -1161,8 +1517,9 @@ function packageStateFromSpecs(context, specs) {
     });
     const resolvedChanged = Boolean(exact && spec.resolvedVersion && exact.version && String(exact.version) !== String(spec.resolvedVersion));
     const sourceChanged = Boolean(exact && spec.downloadUrl && exact.sourceUrl && String(exact.sourceUrl) !== String(spec.downloadUrl));
-    const status = exact ? ((spec.alwaysRefresh || resolvedChanged || sourceChanged) ? 'update' : 'installed') : (same ? 'update' : 'missing');
-    return { ...spec, key: packageKey(spec), status, root: exact?.root || same?.root || packageTarget(context, spec), sourceUrl: exact?.sourceUrl || same?.sourceUrl || spec.downloadUrl || '', references: same ? setupReferences(context, same) : [] };
+    const externalInstalled = Boolean(spec.external && spec.detectedPath);
+    const status = externalInstalled ? 'installed' : (exact ? ((spec.alwaysRefresh || resolvedChanged || sourceChanged) ? 'update' : 'installed') : (same ? 'update' : 'missing'));
+    return { ...spec, key: packageKey(spec), status, root: spec.detectedPath || exact?.root || same?.root || packageTarget(context, spec), sourceUrl: exact?.sourceUrl || same?.sourceUrl || spec.downloadUrl || '', references: same ? setupReferences(context, same) : [] };
   });
 }
 
@@ -1223,13 +1580,15 @@ async function availableManagerSpecs(context, kind, token) {
         detail: entry.kind === 'programmer-pack' ? 'MCU-specific CODEGRIP device pack installed on demand.' : 'CODEGRIP GDB server.'
       }));
   }
-  return db.listProgrammerInstallerPackages(context).map((item) => {
+  const result = db.listProgrammerInstallerPackages(context).map((item) => {
     const packageName = String(item.installerPackage || '').trim();
     if (item.uid === 'segger_jlink' && !packageName) return { kind:'programmer', name:'segger_jlink', version:'external', displayName:item.name, external:true, externalUrl:'https://www.segger.com/downloads/jlink/', detail:item.description };
     if (!packageName) return { kind:'programmer', name:item.uid, version:'external', displayName:item.name, external:true, detail:item.description || 'No installer package is defined in the database.' };
     if (item.uid === 'codegrip') return { kind:'programmer', name:'codegrip_gdb_server', version:'1.7.0', displayName:item.name, environment:false };
     return { kind:'programmer', name:packageName, version:'general_packages_assets', displayName:item.name, environment:false, downloadUrl:`https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/${encodeURIComponent(packageName)}.7z`, detail:item.description };
   });
+  result.push(rfpProgrammerPackageSpec());
+  return result;
 }
 
 async function postManagerState(context, kind, panel) {
@@ -1238,7 +1597,7 @@ async function postManagerState(context, kind, panel) {
   const items = packageStateFromSpecs(context, specs).map((item) => {
     return item;
   });
-  void panel.webview.postMessage({ type:'state', items });
+  void panel.webview.postMessage({ type:'state', items, managedRoot: getManagedRoot(context) });
 }
 
 async function installManagerPackage(context, kind, key) {
@@ -1304,13 +1663,174 @@ async function openEnvironmentPackages(context, initialKind = 'environment') {
     if(message?.type==='openExternal'&&message.url)await vscode.env.openExternal(vscode.Uri.parse(message.url));
     if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager);
     if(message?.type==='back')await showEnvironmentPackageView(context,'environment');
+    if(message?.type==='changeRoot'){ if(await changeManagedRoot(context)) await postManagerState(context,activeKind,environmentPanel); }
   }catch(error){vscode.window.showErrorMessage(`MikroBUS C ${environmentViewKind} packages: ${error.message||error}`);}},null,context.subscriptions);
   environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';},null,context.subscriptions);
   await showEnvironmentPackageView(context, initialKind);
 }
 
+
+function clickExamplesHtml() {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<title>Click Board Examples</title><style>
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}h1,h3{margin:0}.muted{color:var(--vscode-descriptionForeground)}button{border:0;border-radius:3px;padding:8px 14px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}.toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,280px);gap:10px;margin-top:20px}.toolbar input,.toolbar select{width:100%;box-sizing:border-box;padding:9px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.summary span{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.grid{display:grid;gap:10px;margin-top:18px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-testing-iconFailed);border-radius:7px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed,.card.update{border-left-color:var(--vscode-testing-iconPassed)}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:6px}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.loading{margin-top:28px;color:var(--vscode-descriptionForeground)}code{font-family:var(--vscode-editor-font-family);font-size:11px;word-break:break-all}@media(max-width:650px){.toolbar{grid-template-columns:1fr}.card{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}}
+</style></head><body><header><div><h1>Click Board Examples</h1><p class="muted">Browse, install and open C Click Board example projects.</p></div><button id="refresh" class="secondary">Refresh metadata</button></header>
+<div class="toolbar"><input id="search" type="search" placeholder="Search Click Boards…" autocomplete="off"><select id="category"><option value="">All categories</option></select></div>
+<section class="summary"><span id="shown">0 shown</span><span id="installed">0 installed</span><span id="total">0 total</span></section><main id="packages" class="grid"><div class="loading">Downloading Click Board metadata…</div></main>
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');const category=document.getElementById('category');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const cat=category.value;const items=all.filter(p=>(!cat||p.category===cat)&&(!q||[p.displayName,p.category,p.name].some(v=>String(v||'').toLowerCase().includes(q))));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Click Board examples match this filter.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.category)+'</span><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}function setCategories(categories){const current=category.value;category.innerHTML='<option value="">All categories</option>'+categories.map(c=>'<option value="'+esc(c)+'">'+esc(c)+'</option>').join('');category.value=categories.includes(current)?current:'';}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;category.onchange=render;document.getElementById('refresh').onclick=()=>{root.innerHTML='<div class="loading">Refreshing Click Board metadata…</div>';vscode.postMessage({type:'refresh'});};window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];setCategories(e.data.categories||[]);render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+}
+
+function resolveExampleProjectRoot(entry) {
+  if (!entry?.root || !fs.existsSync(entry.root)) return undefined;
+  const root = path.resolve(entry.root);
+  const manifestPath = path.join(root, 'manifest.json');
+  if (fs.existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      for (const example of Array.isArray(manifest?.contents?.examples) ? manifest.contents.examples : []) {
+        const raw = String(example?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!raw) continue;
+        const candidates = [path.resolve(root, ...raw.split('/').filter(Boolean))];
+        const parts = raw.split('/').filter(Boolean);
+        if (parts.length > 1 && String(parts[0]).toLowerCase() === String(manifest.display_name || entry.displayName || '').toLowerCase()) {
+          candidates.push(path.resolve(root, ...parts.slice(1)));
+        }
+        for (const candidate of candidates) {
+          const relative = path.relative(root, candidate);
+          if ((!relative.startsWith('..') && !path.isAbsolute(relative)) && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return candidate;
+        }
+      }
+    } catch {}
+  }
+  const conventional = path.join(root, 'examples', 'example');
+  if (fs.existsSync(conventional) && fs.statSync(conventional).isDirectory()) return conventional;
+  if (fs.existsSync(path.join(root, 'manifest.exm')) || fs.existsSync(path.join(root, 'CMakeLists.txt'))) return root;
+  const manifestExm = findRecursive(root, (_candidate, name) => String(name).toLowerCase() === 'manifest.exm', 8);
+  if (manifestExm) return path.dirname(manifestExm);
+  const cmake = findRecursive(root, (_candidate, name) => String(name).toLowerCase() === 'cmakelists.txt', 8);
+  return cmake ? path.dirname(cmake) : undefined;
+}
+
+const resolveClickExampleProjectRoot = resolveExampleProjectRoot;
+
+async function postClickExamplesState(context, force = false) {
+  if (!clickExamplesPanel) return;
+  clickExampleSpecsCache = await availableClickExampleSpecs(undefined, force);
+  const items = packageStateFromSpecs(context, clickExampleSpecsCache).map((item) => ({ ...item, category: item.category || item.catalogGroup || 'other' }));
+  const categories = [...new Set(items.map((item) => item.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  void clickExamplesPanel.webview.postMessage({ type: 'state', items, categories });
+}
+
+async function installClickExample(context, key) {
+  let spec = clickExampleSpecsCache.find((item) => packageKey(item) === key);
+  if (!spec) {
+    clickExampleSpecsCache = await availableClickExampleSpecs(undefined, false);
+    spec = clickExampleSpecsCache.find((item) => packageKey(item) === key);
+  }
+  if (!spec) throw new Error(`Click Board example '${key}' is no longer present in metadata.`);
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing ${spec.displayName}`, cancellable: true }, async (progress, token) => {
+    await ensurePackage(context, spec, progress, token);
+  });
+}
+
+async function openClickExampleProject(context, key) {
+  const entry = getInstalledPackage(context, key);
+  if (!entry || entry.kind !== 'click-example') throw new Error('The Click Board example is not installed.');
+  const projectRoot = resolveExampleProjectRoot(entry);
+  if (!projectRoot) throw new Error(`${entry.displayName || entry.name} does not contain an example project that can be opened.`);
+  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(projectRoot), false);
+}
+
+async function openClickExamples(context) {
+  if (clickExamplesPanel) {
+    clickExamplesPanel.reveal(vscode.ViewColumn.Active);
+    await postClickExamplesState(context, false);
+    return;
+  }
+  clickExamplesPanel = vscode.window.createWebviewPanel('mikrobusC.clickExamples', 'MikroBUS C: Click Board Examples', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+  clickExamplesPanel.webview.html = clickExamplesHtml();
+  clickExamplesPanel.webview.onDidReceiveMessage(async (message) => {
+    try {
+      if (message?.type === 'ready') await postClickExamplesState(context, true);
+      if (message?.type === 'refresh') await postClickExamplesState(context, true);
+      if (message?.type === 'install' && typeof message.key === 'string') { await installClickExample(context, message.key); await postClickExamplesState(context, false); }
+      if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) await postClickExamplesState(context, false); }
+      if (message?.type === 'openProject' && typeof message.key === 'string') await openClickExampleProject(context, message.key);
+    } catch (error) {
+      vscode.window.showErrorMessage(`MikroBUS C Click Board Examples: ${error.message || error}`);
+    }
+  }, null, context.subscriptions);
+  clickExamplesPanel.onDidDispose(() => { clickExamplesPanel = undefined; }, null, context.subscriptions);
+  await postClickExamplesState(context, true);
+}
+
+
+function demoExamplesHtml() {
+  const nonce = crypto.randomBytes(16).toString('base64');
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<title>Demo Examples</title><style>
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}button{border:0;border-radius:3px;padding:8px 13px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}.toolbar{margin-top:18px}.toolbar input{width:100%;box-sizing:border-box;padding:9px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.summary span{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.grid{display:grid;gap:10px;margin-top:18px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-testing-iconFailed);border-radius:7px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed,.card.update{border-left-color:var(--vscode-testing-iconPassed)}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:6px}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.loading{margin-top:28px;color:var(--vscode-descriptionForeground)}code{font-family:var(--vscode-editor-font-family);font-size:11px;word-break:break-all}@media(max-width:650px){.card{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}}
+</style></head><body><header><div><h1>Demo Examples</h1><p class="muted">Browse, install and open C demo projects.</p></div><button id="refresh" class="secondary">Refresh metadata</button></header>
+<div class="toolbar"><input id="search" type="search" placeholder="Search demos…" autocomplete="off"></div>
+<section class="summary"><span id="shown">0 shown</span><span id="installed">0 installed</span><span id="total">0 total</span></section><main id="packages" class="grid"><div class="loading">Downloading Demo metadata…</div></main>
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const items=all.filter(p=>!q||[p.displayName,p.name].some(v=>String(v||'').toLowerCase().includes(q)));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Demo examples match this search.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;document.getElementById('refresh').onclick=()=>{root.innerHTML='<div class="loading">Refreshing Demo metadata…</div>';vscode.postMessage({type:'refresh'});};window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+}
+
+async function postDemoExamplesState(context, force = false) {
+  if (!demoExamplesPanel) return;
+  demoExampleSpecsCache = await availableDemoExampleSpecs(undefined, force);
+  const items = packageStateFromSpecs(context, demoExampleSpecsCache);
+  void demoExamplesPanel.webview.postMessage({ type: 'state', items });
+}
+
+async function installDemoExample(context, key) {
+  let spec = demoExampleSpecsCache.find((item) => packageKey(item) === key);
+  if (!spec) {
+    demoExampleSpecsCache = await availableDemoExampleSpecs(undefined, false);
+    spec = demoExampleSpecsCache.find((item) => packageKey(item) === key);
+  }
+  if (!spec) throw new Error(`Demo example '${key}' is no longer present in metadata.`);
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing ${spec.displayName}`, cancellable: true }, async (progress, token) => {
+    await ensurePackage(context, spec, progress, token);
+  });
+}
+
+async function openDemoExampleProject(context, key) {
+  const entry = getInstalledPackage(context, key);
+  if (!entry || entry.kind !== 'demo-example') throw new Error('The Demo example is not installed.');
+  const projectRoot = resolveExampleProjectRoot(entry) || entry.root;
+  if (!projectRoot || !fs.existsSync(projectRoot)) throw new Error(`${entry.displayName || entry.name} does not contain a project that can be opened.`);
+  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(projectRoot), false);
+}
+
+async function openDemoExamples(context) {
+  if (demoExamplesPanel) {
+    demoExamplesPanel.reveal(vscode.ViewColumn.Active);
+    await postDemoExamplesState(context, false);
+    return;
+  }
+  demoExamplesPanel = vscode.window.createWebviewPanel('mikrobusC.demoExamples', 'MikroBUS C: Demo Examples', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+  demoExamplesPanel.webview.html = demoExamplesHtml();
+  demoExamplesPanel.webview.onDidReceiveMessage(async (message) => {
+    try {
+      if (message?.type === 'ready') await postDemoExamplesState(context, true);
+      if (message?.type === 'refresh') await postDemoExamplesState(context, true);
+      if (message?.type === 'install' && typeof message.key === 'string') { await installDemoExample(context, message.key); await postDemoExamplesState(context, false); }
+      if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) await postDemoExamplesState(context, false); }
+      if (message?.type === 'openProject' && typeof message.key === 'string') await openDemoExampleProject(context, message.key);
+    } catch (error) {
+      vscode.window.showErrorMessage(`MikroBUS C Demo Examples: ${error.message || error}`);
+    }
+  }, null, context.subscriptions);
+  demoExamplesPanel.onDidDispose(() => { demoExamplesPanel = undefined; }, null, context.subscriptions);
+  await postDemoExamplesState(context, true);
+}
+
 module.exports = {
   getManagedRoot,
+  changeManagedRoot,
   getPackagePaths,
   packageKey,
   packageTarget,
@@ -1320,6 +1840,8 @@ module.exports = {
   ensurePackages,
   openInstalledPackages,
   openEnvironmentPackages,
+  openClickExamples,
+  openDemoExamples,
   openCompilerPackages,
   openProgrammerPackages,
   openCodegripPackages,
@@ -1339,6 +1861,8 @@ module.exports = {
   compilerPackageSpec,
   sdkPackageSpec,
   bspPackageSpec,
+  rfpProgrammerPackageSpec,
+  managedRfpCli,
   _test: {
     safeName,
     archiveNameFromUrl,
@@ -1358,6 +1882,15 @@ module.exports = {
     resolvedBspMetadata,
     managedSdkBspRoots,
     removeMaterializedPackageArtifacts,
-    invalidateReferencingSetupArtifacts
+    invalidateReferencingSetupArtifacts,
+    findRfpCliInRoot,
+    remapManagedRootValue,
+    clickExampleSpec,
+    demoExampleSpec,
+    resolveExampleProjectRoot,
+    resolveClickExampleProjectRoot,
+    clickExamplesHtml,
+    demoExamplesHtml,
+    cManagerHtml
   }
 };

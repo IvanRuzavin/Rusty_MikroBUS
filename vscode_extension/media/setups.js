@@ -16,6 +16,8 @@
   document.getElementById('configure').addEventListener('click', configure);
   document.getElementById('configureFirst').addEventListener('click', configure);
   document.getElementById('environment').addEventListener('click', () => vscode.postMessage({ type: 'environment' }));
+  document.getElementById('clickExamples').addEventListener('click', () => vscode.postMessage({ type: 'clickExamples' }));
+  document.getElementById('demoExamples').addEventListener('click', () => vscode.postMessage({ type: 'demoExamples' }));
   document.getElementById('selectRust').addEventListener('click', () => selectEnvironment('rust'));
   document.getElementById('selectC').addEventListener('click', () => selectEnvironment('c'));
   document.getElementById('cConfigureFirst').addEventListener('click', configure);
@@ -34,9 +36,11 @@
     document.getElementById('selectRust').classList.toggle('active', !isC);
     document.getElementById('selectC').classList.toggle('active', isC);
     document.getElementById('selectC').classList.toggle('hidden', !message.cSupportEnabled);
-    environmentTitle.textContent = isC ? 'C environment' : 'Rust setups';
+    environmentTitle.textContent = isC ? 'C Environment' : 'Rust Environment';
     document.getElementById('configure').textContent = 'Configure MCU or Board';
-    document.getElementById('environment').textContent = 'Development environment';
+    document.getElementById('environment').textContent = 'Development Environment';
+    document.getElementById('clickExamples').classList.toggle('hidden', !isC);
+    document.getElementById('demoExamples').classList.toggle('hidden', !isC);
   }
 
   window.addEventListener('message', (event) => {

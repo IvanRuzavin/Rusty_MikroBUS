@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Embedded Tools",
   "description": "Cross-platform Rust and C MikroBUS tools with reusable NECTO-style MCU setups, managed packages and programmer integration.",
-  "version": "0.7.5",
+  "version": "0.7.49",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -12,7 +12,8 @@
   ],
   "extensionDependencies": [
     "marus25.cortex-debug",
-    "ms-vscode.cpptools"
+    "ms-vscode.cpptools",
+    "RenesasElectronicsCorporation.renesas-debug"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -42,8 +43,11 @@
     "onCommand:mikrobusC.openInstalledPackages",
     "onCommand:mikrobusC.openCompilerPackages",
     "onDebug:mikrobus-rust-debug",
+    "onCommand:mikrobusC.openClickExamples",
+    "onCommand:mikrobusC.openDemoExamples",
     "onCommand:mikrobusC.installEnvironment",
-    "onWebviewPanel:mikrobusC.hardwareConfigurator"
+    "onWebviewPanel:mikrobusC.hardwareConfigurator",
+    "onDebug:mikrobus-mikroc-debug"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -152,10 +156,7 @@
       {
         "command": "mikrobusC.debug",
         "title": "MikroBUS C: Build and Debug Project",
-        "icon": {
-          "light": "media/debug-light.svg",
-          "dark": "media/debug-dark.svg"
-        }
+        "icon": "$(debug-alt)"
       },
       {
         "command": "mikrobusC.erase",
@@ -164,6 +165,10 @@
           "light": "media/eraser-light.svg",
           "dark": "media/eraser-dark.svg"
         }
+      },
+      {
+        "command": "mikrobusC.configureRfpConnection",
+        "title": "MikroBUS C: Configure RFP Connection"
       },
       {
         "command": "mikrobusC.openInstalledPackages",
@@ -177,6 +182,16 @@
         "command": "mikrobusC.installEnvironment",
         "title": "MikroBUS C: Development Environment",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "mikrobusC.openClickExamples",
+        "title": "MikroBUS C: Click Board Examples",
+        "icon": "$(library)"
+      },
+      {
+        "command": "mikrobusC.openDemoExamples",
+        "title": "MikroBUS C: Demo Examples",
+        "icon": "$(beaker)"
       }
     ],
     "configuration": {
@@ -185,7 +200,7 @@
         "mikrobusRust.storageRoot": {
           "type": "string",
           "default": "",
-          "description": "Optional root directory for extension-managed SDK, core, database and runner packages. Leave empty to use VS Code global extension storage."
+          "description": "Root directory shared by Rust and C extension-managed SDKs, databases, tools, packages and setups. Use Change in either Development Environment to migrate all managed content to a new folder."
         },
         "mikrobusRust.cargoPath": {
           "type": "string",
@@ -293,7 +308,7 @@
         {
           "id": "mikrobusRust",
           "title": "MikroBUS Embedded",
-          "icon": "media/mikrobus-rust.svg"
+          "icon": "media/mikrobus-module-3d-transparent.png"
         }
       ]
     },
@@ -352,7 +367,7 @@
         },
         {
           "command": "mikrobusC.debug",
-          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp)",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugAvailable",
           "group": "navigation@22"
         },
         {
@@ -388,7 +403,7 @@
         },
         {
           "command": "mikrobusC.debug",
-          "when": "mikrobusRust.cSupportEnabled"
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cDebugAvailable"
         },
         {
           "command": "mikrobusC.erase",
@@ -401,6 +416,10 @@
         {
           "command": "mikrobusC.installEnvironment",
           "when": "mikrobusRust.cSupportEnabled"
+        },
+        {
+          "command": "mikrobusC.configureRfpConnection",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cRfpSelected"
         }
       ],
       "debug/toolBar": [
@@ -444,7 +463,7 @@
       {
         "command": "mikrobusC.debug",
         "key": "f5",
-        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp)"
+        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugAvailable"
       }
     ],
     "debuggers": [
@@ -491,11 +510,36 @@
             }
           }
         }
+      },
+      {
+        "type": "mikrobus-mikroc-debug",
+        "label": "MikroBUS mikroC (mikroDap)",
+        "languages": [
+          "c",
+          "cpp"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "mikroC .dbg database path."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Project working directory."
+              }
+            }
+          }
+        }
       }
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js",
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js && node --check c_rfp_backend.js && node --check c_cmake_visibility.js && node --check c_mikroc_debug.js",
     "test": "node test/c_support.test.js",
     "build": "npx @vscode/vsce package"
   },
@@ -503,7 +547,7 @@
     "7zip-bin": "^5.2.0"
   },
   "license": "UNLICENSED",
-  "icon": "media/mikrobus-rust.png",
+  "icon": "media/mikrobus-module-3d-transparent.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/IvanRuzavin/Rusty_MikroBUS.git"

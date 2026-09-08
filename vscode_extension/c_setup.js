@@ -3,16 +3,22 @@
 const childProcess = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const net = require('net');
 const vscode = require('vscode');
 const database = require('./c_database');
 const packages = require('./c_package_manager');
 const codegripCatalog = require('./c_codegrip_catalog');
 const compilerSupport = require('./c_compiler_support');
+const rfp = require('./c_rfp_backend');
+const cmakeVisibility = require('./c_cmake_visibility');
+const mikrocDebug = require('./c_mikroc_debug');
 const { openCConfigurator } = require('./c_configurator');
 const {
   discoverUsbCodegrips,
   normalizeConnectionProfile,
+  nectoDefaultOptionValues,
   programCodegrip,
   eraseCodegrip,
   prepareCodegripDebug,
@@ -23,7 +29,7 @@ const {
 // are centralized separately so package/UI/setup code use one compiler model.
 const COMPILER_ADAPTERS = compilerSupport.COMPILER_ADAPTERS;
 
-const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink']);
+const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID]);
 
 function metadataMcuName(metadata = {}) {
   return String(metadata?.device?.mcuName || metadata?.sdkConfig?.MCU_NAME || metadata?.device?.uid || '').trim();
@@ -32,10 +38,13 @@ function metadataMcuName(metadata = {}) {
 function setupMcuName(setup = {}) {
   return metadataMcuName(setup.metadata || {});
 }
-const C_BUILD_SUPPORT_VERSION = 22;
+const C_BUILD_SUPPORT_VERSION = 56;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
+let cmakeVisibilityRefreshTimer;
+let cmakeVisibilityRefreshRunning = false;
+let globalCContext;
 
 function supportedCompilerUids() {
   return compilerSupport.supportedCompilerUids();
@@ -60,7 +69,19 @@ function pathIsInside(candidate, parent) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function findCmakeProjectRoot(startPath, workspace = workspaceRoot()) {
+function cmakeDeclaresProject(directory) {
+  const cmakeFile = path.join(directory, 'CMakeLists.txt');
+  if (!fs.existsSync(cmakeFile)) return false;
+  try {
+    const text = fs.readFileSync(cmakeFile, 'utf8')
+      .replace(/#[^\r\n]*/g, ' ');
+    return /(^|[\r\n])\s*project\s*\(/im.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function findAppliedCProjectRoot(startPath, workspace) {
   let current = startPath || workspace;
   try {
     if (fs.existsSync(current) && fs.statSync(current).isFile()) current = path.dirname(current);
@@ -70,13 +91,48 @@ function findCmakeProjectRoot(startPath, workspace = workspaceRoot()) {
   current = path.resolve(current);
   const boundary = path.resolve(workspace);
   while (pathIsInside(current, boundary)) {
-    if (fs.existsSync(path.join(current, 'CMakeLists.txt'))) return current;
+    if (fs.existsSync(path.join(current, 'CMakeLists.txt')) &&
+        fs.existsSync(path.join(current, '.vscode', 'mikrobus-c.json')) &&
+        (current === boundary || cmakeDeclaresProject(current))) {
+      return current;
+    }
     if (current === boundary) break;
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return fs.existsSync(path.join(boundary, 'CMakeLists.txt')) ? boundary : boundary;
+  return undefined;
+}
+
+function findCmakeProjectRoot(startPath, workspace = workspaceRoot()) {
+  let current = startPath || workspace;
+  try {
+    if (fs.existsSync(current) && fs.statSync(current).isFile()) current = path.dirname(current);
+  } catch {
+    current = workspace;
+  }
+  current = path.resolve(current);
+  const boundary = path.resolve(workspace);
+  const applied = findAppliedCProjectRoot(current, boundary);
+  if (applied) return applied;
+  const cmakeAncestors = [];
+  while (pathIsInside(current, boundary)) {
+    if (fs.existsSync(path.join(current, 'CMakeLists.txt'))) {
+      cmakeAncestors.push(current);
+      // A nested CMakeLists that only contains add_executable()/add_subdirectory()
+      // is not a standalone project.  The first ancestor that actually calls
+      // project() is the owning top-level CMake project for the active file.
+      if (cmakeDeclaresProject(current)) return current;
+    }
+    if (current === boundary) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (fs.existsSync(path.join(boundary, 'CMakeLists.txt'))) return boundary;
+  // Some older/minimal projects omit project(). In that case use the highest
+  // CMake ancestor rather than the nearest leaf CMakeLists.
+  return cmakeAncestors.length ? cmakeAncestors[cmakeAncestors.length - 1] : boundary;
 }
 
 function cProjectRoot() {
@@ -180,19 +236,25 @@ async function chooseSetupSelection(context) {
   })), { placeHolder: 'Select a C compiler', emptyMessage: `No supported C compiler is mapped to ${devicePick.value.uid}.` });
   if (!compilerPick) return;
 
-  const modes = await quickPick([
-    { label: 'Bare metal (core files)', description: 'Build and install the MCU core only.', value: 'bare-metal' },
-    { label: 'Full mikroSDK (SDK + core)', description: 'Build the MCU core, then the selected mikroSDK.', value: 'full-sdk' }
-  ], { placeHolder: 'Select the setup type' });
+  const bareMetalOnly = Number(devicePick.value.sdkSupport || 0) === 0;
+  const modes = bareMetalOnly
+    ? { value: 'bare-metal' }
+    : await quickPick([
+      { label: 'Bare metal (core files)', description: 'Build and install the MCU core only.', value: 'bare-metal' },
+      { label: 'Full mikroSDK (SDK + core)', description: 'Build the MCU core, then the selected mikroSDK.', value: 'full-sdk' }
+    ], { placeHolder: 'Select the setup type' });
   if (!modes) return;
 
-  const sdks = database.listSdks(context, devicePick.value.uid, compilerPick.value.uid);
-  const sdkPick = await quickPick(sdks.map((sdk) => ({
-    label: `${sdk.name} ${sdk.version}`,
-    description: sdk.uid,
-    value: sdk
-  })), { placeHolder: modes.value === 'full-sdk' ? 'Select the supported mikroSDK version' : 'Select metadata version used for compatibility', emptyMessage: `No non-legacy mikroSDK is mapped to ${devicePick.value.uid} for ${compilerPick.value.uid}.` });
-  if (!sdkPick) return;
+  let sdkPick;
+  if (modes.value === 'full-sdk') {
+    const sdks = database.listSdks(context, devicePick.value.uid, compilerPick.value.uid);
+    sdkPick = await quickPick(sdks.map((sdk) => ({
+      label: `${sdk.name} ${sdk.version}`,
+      description: sdk.uid,
+      value: sdk
+    })), { placeHolder: 'Select the supported mikroSDK version', emptyMessage: `No non-legacy mikroSDK is mapped to ${devicePick.value.uid} for ${compilerPick.value.uid}.` });
+    if (!sdkPick) return;
+  }
 
   const devicePackages = database.listDevicePackages(context, devicePick.value.uid);
   const packagePick = devicePackages.length
@@ -230,7 +292,7 @@ async function chooseSetupSelection(context) {
   });
   if (!clock) return;
 
-  const suggestedName = `${devicePick.value.uid} ${modes.value === 'full-sdk' ? `mikroSDK ${sdkPick.value.version}` : 'Bare Metal'}`;
+  const suggestedName = `${devicePick.value.uid} ${modes.value === 'full-sdk' ? `mikroSDK ${sdkPick?.value.version || ''}`.trim() : 'Bare Metal'}`;
   const name = await vscode.window.showInputBox({
     title: 'Reusable C setup name',
     value: suggestedName,
@@ -246,7 +308,7 @@ async function chooseSetupSelection(context) {
     clockMHz: String(clock).trim(),
     deviceUid: devicePick.value.uid,
     compilerUid: compilerPick.value.uid,
-    sdkUid: sdkPick.value.uid,
+    sdkUid: sdkPick?.value.uid,
     packageUid: packagePick?.value.uid,
     programmerUid: programmerPick.value.uid
   };
@@ -273,6 +335,28 @@ async function packageSpecs(context, metadata, mode, setup, token) {
     { kind: 'infrastructure', name: 'mikroe_utils_common', version: 'general_packages_assets', displayName: 'MIKROE Common CMake Utilities', environment: true },
     await packages.compilerPackageSpec(context, metadata.compiler, token)
   ];
+  const adapter = compilerSupport.adapterFor(metadata.compiler.uid);
+  if (isMikroCFamily(adapter?.family)) {
+    result.push({
+      kind: 'shared',
+      name: 'mikroc_cmake',
+      version: '0.0.1',
+      displayName: 'mikroC CMake Language Modules',
+      environment: true,
+      installRelativePath: 'tools/mikroc-cmake'
+    });
+  }
+  if (process.platform === 'linux' && isMikroCFamily(adapter?.family)) {
+    result.push(mikrocDebug.qtRuntimePackageSpec());
+    result.push({
+      kind: 'shared',
+      name: 'cmake',
+      version: 'necto-live',
+      displayName: 'NECTO CMake',
+      environment: true,
+      installRelativePath: 'tools/necto-cmake'
+    });
+  }
   if (mode === 'full-sdk') {
     result.push(await packages.sdkPackageSpec(token));
     if (metadata.packageRequirements?.card) {
@@ -289,6 +373,9 @@ async function packageSpecs(context, metadata, mode, setup, token) {
       result.push(await packages.bspPackageSpec('bsp-card', cardRequirement, token));
     }
     if (metadata.packageRequirements?.board) result.push(await packages.bspPackageSpec('bsp-board', metadata.packageRequirements.board, token));
+  }
+  if (metadata.programmer.uid === rfp.RFP_PROGRAMMER_UID) {
+    result.push(packages.rfpProgrammerPackageSpec());
   }
   if (metadata.programmer.uid === 'codegrip') {
     result.push({ kind: 'programmer', name: 'codegrip_gdb_server', version: '1.7.0', displayName: 'CODEGRIP Suite', environment: true });
@@ -348,6 +435,13 @@ function resolveTool(toolchainEntry, names, relativeName, additionalRoots = []) 
   return packages.findOnPath(names || []);
 }
 
+function mikroCPlatformBinDirectory(root) {
+  if (!root) return undefined;
+  const platformDirectory = process.platform === 'win32' ? 'win64' : (process.platform === 'darwin' ? 'macos' : 'linux');
+  const candidate = path.join(root, 'bin', platformDirectory);
+  return fs.existsSync(candidate) ? candidate : undefined;
+}
+
 function resolveToolchain(setup, installed) {
   const adapter = COMPILER_ADAPTERS[setup.metadata.compiler.uid];
   if (!adapter) throw new Error(`No C compiler adapter is registered for ${setup.metadata.compiler.uid}.`);
@@ -355,6 +449,10 @@ function resolveToolchain(setup, installed) {
   const allInstalled = [...installed.values(), ...packages.listInstalledPackages(setup.context, true)];
   const entry = allInstalled.find((item) => item.kind === 'toolchain' && item.name === packageName);
   const configuredRoots = setup.metadata.compiler.uid === 'gcc_arm_none_eabi' ? [configuredArmGccRoot()].filter(Boolean) : [];
+  if (isMikroCFamily(adapter.family)) {
+    const platformBin = mikroCPlatformBinDirectory(entry?.root);
+    if (platformBin) configuredRoots.unshift(platformBin);
+  }
   // Compilers.path is NECTO's package-relative toolchain location; the
   // executable fields (c_compiler/cxx_compiler/asm_compiler/gdb_path) are the
   // authoritative binary paths. Always resolve the C compiler from c_compiler.
@@ -368,8 +466,13 @@ function resolveToolchain(setup, installed) {
   const cmakeAsm = adapter.cmakeAsmViaCCompiler ? c : (assembler || c);
   const gdb = resolveTool(entry, adapter.executableNames.gdb, setup.metadata.compiler.gdbPath, configuredRoots);
   const objcopy = resolveTool(entry, adapter.executableNames.objcopy, '', configuredRoots);
+  const ar = resolveTool(entry, adapter.executableNames.ar || [], '', configuredRoots);
+  const ranlib = resolveTool(entry, adapter.executableNames.ranlib || [], '', configuredRoots);
   if (!c) throw new Error(`The ${setup.metadata.compiler.name} package is installed but its C compiler was not found.`);
-  return { c, cxx, asm: cmakeAsm, cmakeAsm, assembler, gdb, objcopy, adapter, root: entry?.root || path.dirname(c), packageEntry: entry };
+  if (/^xc(8|16|32)$/.test(String(adapter.family || '')) && !ar) {
+    throw new Error(`The ${adapter.language} package is installed but ${adapter.family}-ar was not found. Reinstall the managed ${adapter.language} compiler package.`);
+  }
+  return { c, cxx, asm: cmakeAsm, cmakeAsm, assembler, gdb, objcopy, ar, ranlib, adapter, root: entry?.root || path.dirname(c), packageEntry: entry };
 }
 
 function resolveBuildTool(name, alternatives = []) {
@@ -390,10 +493,150 @@ function locateSdkSource(root) {
     || findDirectoryContaining(root, 'CMakeLists.txt', 3);
 }
 
-function locateCoreSource(root, compilerCorePath, mcuName) {
+function isMikroCFamily(family) {
+  return String(family || '').startsWith('mikroc-');
+}
+
+function mikroCOutputExtension(family) {
+  const normalized = String(family || '').toLowerCase();
+  return normalized === 'mikroc-arm' || normalized === 'mikroc-pic32' ? '.emcl' : '.mcl';
+}
+
+function parseMikroCDefaultOptions(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(String(value)); } catch { return {}; }
+}
+
+function mikroCCompilerFlags(family, defaultOptions, buildType = 'Debug') {
+  const normalized = String(family || '').toLowerCase();
+  const options = parseMikroCDefaultOptions(defaultOptions);
+  const flags = [];
+  if (options.long_hex_format === true) flags.push('-LHF');
+  if (normalized === 'mikroc-arm' && options.generate_bin === true) flags.push('-BIN');
+  if (options.ANSI_pack === true) flags.push('-APB');
+  if (options.case_sensitive !== false) flags.push('-C');
+  if (options.dynamic_link_literals === true) flags.push('-Y');
+  if (normalized === 'mikroc-arm' && String(options.ansi_data_type || '') === '4') flags.push('-ATYPE');
+  // NECTO's PIC toolchain is the exception: PIC does not append -SSA here.
+  if (normalized !== 'mikroc-pic') flags.push('-SSA');
+  flags.push('-MF');
+  const generateAdditional = options.generate_additional_files !== false ? '1' : '0';
+  const optimization = /^[0-9]$/.test(String(options.ssa_optimization_level ?? '4'))
+    ? String(options.ssa_optimization_level ?? '4')
+    : '4';
+  flags.push(`-O${generateAdditional.repeat(7)}${optimization}`);
+  // NECTO keeps -DBG in both Debug and Release; -UICD is Debug-only.
+  flags.push('-DBG');
+  if (String(buildType || '').toLowerCase() === 'debug') flags.push('-UICD');
+  return flags;
+}
+
+function mikroCSearchPathInfo(_realCompiler, _metadata = {}, options = {}) {
+  // Match NECTO CMakeUtils::writeToolchainFile(): search the current build
+  // directory, the selected core's def/ directory, and the current source
+  // directory. .mcl/.emcl are compiler outputs and no .mlk discovery is
+  // required here. CMake expressions are intentionally preserved so one
+  // generated toolchain can be reused by core, SDK and workspace builds.
+  const coreSource = String(options.coreSource || '').trim();
+  const coreDefinitionDirectory = coreSource ? path.join(coreSource, 'def') : '';
+  return {
+    paths: ['${CMAKE_BINARY_DIR}', coreDefinitionDirectory, '${CMAKE_SOURCE_DIR}'].filter(Boolean),
+    coreDefinitionDirectory,
+    source: 'core-def'
+  };
+}
+
+function resolveManagedNectoCmake(installed) {
+  const entries = installed instanceof Map ? [...installed.values()] : Array.isArray(installed) ? installed : [];
+  const entry = entries.find((item) => String(item?.kind || '').toLowerCase() === 'shared' && String(item?.name || '').toLowerCase() === 'cmake');
+  if (!entry?.root || !fs.existsSync(entry.root)) return undefined;
+  const names = process.platform === 'win32' ? new Set(['cmake.exe', 'cmake']) : new Set(['cmake']);
+  return findRecursive(entry.root, (_candidate, name) => names.has(String(name).toLowerCase()), 8);
+}
+
+function resolveManagedMikroCCmakeModules(installed) {
+  const entries = installed instanceof Map ? [...installed.values()] : Array.isArray(installed) ? installed : [];
+  const entry = entries.find((item) => String(item?.kind || '').toLowerCase() === 'shared' && String(item?.name || '').toLowerCase() === 'mikroc_cmake');
+  if (!entry?.root || !fs.existsSync(entry.root)) return undefined;
+  const required = [
+    'CMakeDetermineMikroCCompiler.cmake',
+    'CMakeMikroCCompiler.cmake.in',
+    'CMakeMikroCInformation.cmake',
+    'CMakeTestMikroCCompiler.cmake'
+  ];
+  if (required.every((name) => fs.existsSync(path.join(entry.root, name)))) return entry.root;
+  const determine = findRecursive(entry.root, (_candidate, name) => name === 'CMakeDetermineMikroCCompiler.cmake', 6);
+  if (!determine) return undefined;
+  const root = path.dirname(determine);
+  return required.every((name) => fs.existsSync(path.join(root, name))) ? root : undefined;
+}
+
+function mikroCSearchPaths(realCompiler, metadata = {}, options = {}) {
+  return mikroCSearchPathInfo(realCompiler, metadata, options).paths;
+}
+
+function definitionFileNames(mcuName, defFile) {
+  const mcu = String(mcuName || '').trim();
+  const configured = String(defFile || '').trim();
+  const values = [configured, mcu ? `${mcu}.json` : '', configured.toUpperCase(), mcu ? `${mcu.toUpperCase()}.json` : ''];
+  return [...new Set(values.filter(Boolean))];
+}
+
+function resolveCoreDefinitionFile(coreSource, mcuName, defFile) {
+  if (!coreSource) return undefined;
+  const defRoot = path.join(coreSource, 'def');
+  const names = definitionFileNames(mcuName, defFile);
+  for (const name of names) {
+    const direct = path.join(defRoot, name);
+    if (fs.existsSync(direct)) return direct;
+  }
+  const expected = new Set(names.map((name) => name.toLowerCase()));
+  return expected.size
+    ? findRecursive(defRoot, (_candidate, name) => expected.has(name.toLowerCase()), 4)
+    : undefined;
+}
+
+function cmakeDeclaresMikroCLanguage(directory) {
+  const cmakeFile = path.join(directory, 'CMakeLists.txt');
+  if (!fs.existsSync(cmakeFile)) return false;
+  try {
+    return /project\s*\([^)]*LANGUAGES\s+MikroC\b/is.test(fs.readFileSync(cmakeFile, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+function locateCoreSource(root, compilerCorePath, mcuName, family = '') {
+  if (!root) return undefined;
   const relative = String(compilerCorePath || '').replace(/[\\/]+/g, path.sep);
   const compilerRoot = relative && fs.existsSync(path.join(root, relative)) ? path.join(root, relative) : root;
   const expectedDef = `${String(mcuName || '').trim()}.json`.toLowerCase();
+
+  if (isMikroCFamily(family)) {
+    // mikroC core packages have a different contract from GCC/XC cores: their
+    // root project is LANGUAGES MikroC, def/<MCU>.json is present, and there is
+    // intentionally no include/core_header.h.in.
+    const directCandidates = [compilerRoot, root].filter((item, index, all) => item && all.indexOf(item) === index);
+    for (const candidate of directCandidates) {
+      if (cmakeDeclaresMikroCLanguage(candidate) && resolveCoreDefinitionFile(candidate, mcuName)) return candidate;
+    }
+    if (expectedDef !== '.json') {
+      const definition = findRecursive(compilerRoot, (_candidate, name) => name.toLowerCase() === expectedDef, 8);
+      if (definition) {
+        let current = path.dirname(definition);
+        for (let depth = 0; depth < 8; depth += 1) {
+          if (cmakeDeclaresMikroCLanguage(current)) return current;
+          const parent = path.dirname(current);
+          if (parent === current) break;
+          current = parent;
+        }
+      }
+    }
+    const cmake = findRecursive(compilerRoot, (candidate, name) => name === 'CMakeLists.txt' && cmakeDeclaresMikroCLanguage(path.dirname(candidate)), 8);
+    return cmake ? path.dirname(cmake) : undefined;
+  }
+
   if (expectedDef !== '.json') {
     const definition = findRecursive(compilerRoot, (_candidate, name) => name.toLowerCase() === expectedDef, 8);
     if (definition) {
@@ -415,28 +658,36 @@ function registerFieldId(register, field) {
 }
 
 function defaultRegisterValue(register, selectedValues = {}) {
-  let value = Number.parseInt(String(register.default || register.unused || '0').replace(/^0x|\$/i, ''), 16) || 0;
-  for (const field of Array.isArray(register.fields) ? register.fields : []) {
-    const mask = Number.parseInt(String(field.mask || '0').replace(/^0x|\$/i, ''), 16) || 0;
+  // Match me.mcu/McuSettings::calculateRegisterValues(): combine the selected
+  // field values, preserve default bits outside all field masks, then clear the
+  // register's unused bits. Keep every operation in uint32 space.
+  const parseHex = (value) => (Number.parseInt(String(value ?? '0').replace(/^0x|\$/i, ''), 16) || 0) >>> 0;
+  const defaultValue = parseHex(register?.default);
+  const unused = parseHex(register?.unused);
+  let allMasks = 0;
+  let allValues = 0;
+  for (const field of Array.isArray(register?.fields) ? register.fields : []) {
+    const mask = parseHex(field?.mask);
     const fieldId = registerFieldId(register, field);
     const hasSelectedValue = Object.prototype.hasOwnProperty.call(selectedValues || {}, fieldId)
       && String(selectedValues[fieldId] ?? '').trim() !== '';
-    // Range-backed fields (for example STM32 PLLN) used to be rendered as an
-    // empty <select>, which saved an empty string into registerValues. Treat an
-    // empty UI value as "no override" so the MCU JSON init value is preserved.
-    const selected = hasSelectedValue ? selectedValues[fieldId] : field.init;
-    const initial = Number.parseInt(String(selected || '0').replace(/^0x|\$/i, ''), 16) || 0;
-    value = (value & ~mask) | (initial & mask);
+    // Empty UI values mean "keep the definition init value", matching NECTO.
+    const selected = hasSelectedValue ? selectedValues[fieldId] : field?.init;
+    allMasks = (allMasks | mask) >>> 0;
+    allValues = (allValues | (parseHex(selected) & mask)) >>> 0;
   }
-  return value >>> 0;
+  return ((allValues | (defaultValue & (~allMasks >>> 0))) & (~unused >>> 0)) >>> 0;
 }
 
 function generateCoreHeader(coreSource, metadata, clockMHz, outputDirectory, registerValues = {}) {
   const templatePath = path.join(coreSource, 'include', 'core_header.h.in');
-  const definitionPath = path.join(coreSource, 'def', metadata.device.defFile);
-  if (!fs.existsSync(templatePath)) throw new Error(`Core header template was not found: ${templatePath}`);
-  if (!fs.existsSync(definitionPath)) throw new Error(`MCU definition was not found: ${definitionPath}`);
   const mcuName = metadataMcuName(metadata);
+  const definitionPath = resolveCoreDefinitionFile(coreSource, mcuName, metadata?.device?.defFile);
+  if (!fs.existsSync(templatePath)) throw new Error(`Core header template was not found: ${templatePath}`);
+  if (!definitionPath || !fs.existsSync(definitionPath)) {
+    const requested = metadata?.device?.defFile || `${mcuName}.json`;
+    throw new Error(`MCU definition was not found for ${requested} (also tried uppercase/case-insensitive variants below ${path.join(coreSource, 'def')}).`);
+  }
   const definition = readJson(definitionPath, `${mcuName} definition`);
   const defines = [];
   for (const register of Array.isArray(definition.config_registers) ? definition.config_registers : []) {
@@ -457,8 +708,76 @@ function generateCoreHeader(coreSource, metadata, clockMHz, outputDirectory, reg
   return outputPath;
 }
 
+function normalizeJcfgAddress(value) {
+  const raw = String(value ?? '0').trim();
+  if (!raw) return '$0';
+  if (raw.startsWith('$')) return `$${raw.slice(1).toUpperCase()}`;
+  if (/^0x/i.test(raw)) return `$${raw.slice(2).toUpperCase()}`;
+  return `$${raw.toUpperCase()}`;
+}
+
+function generateMikroCJcfg(coreSource, metadata, registerValues, outputDirectory, mcuNameOverride) {
+  const mcuName = String(mcuNameOverride || metadataMcuName(metadata) || '').trim();
+  if (!mcuName) throw new Error('Cannot generate mikroC JCFG without an MCU name.');
+  const definitionPath = resolveCoreDefinitionFile(coreSource, mcuName, metadata?.device?.defFile);
+  if (!definitionPath || !fs.existsSync(definitionPath)) {
+    throw new Error(`Cannot generate ${mcuName}.jcfg because the MCU definition JSON was not found.`);
+  }
+  const definition = readJson(definitionPath, `${mcuName} definition`);
+  const configRegisters = [];
+  for (const register of Array.isArray(definition.config_registers) ? definition.config_registers : []) {
+    if (register?.address === undefined || register?.address === null || String(register.address).trim() === '') continue;
+    configRegisters.push({
+      address: normalizeJcfgAddress(register.address),
+      value: `$${defaultRegisterValue(register, registerValues || {}).toString(16)}`
+    });
+  }
+  if (!configRegisters.length) {
+    throw new Error(`Cannot generate ${mcuName}.jcfg because ${path.basename(definitionPath)} contains no configuration registers.`);
+  }
+  const payload = {
+    back_door_key: '0',
+    config_registers: configRegisters,
+    data_type_size: '0',
+    mcu_name: mcuName,
+    stack_allocation: '0'
+  };
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  const outputPath = path.join(outputDirectory, `${mcuName}.jcfg`);
+  fs.writeFileSync(outputPath, `${JSON.stringify(payload, null, 4)}\n`, 'utf8');
+  return outputPath;
+}
+
 function splitFlags(value) {
   return String(value || '').match(/(?:[^\s"]+|"[^"]*")+/g)?.map((item) => item.replace(/^"|"$/g, '')) || [];
+}
+
+function rxCoreDeclaredFlags(coreSource, coreName) {
+  // RX core packages define their authoritative application/compiler options in
+  // cmake/coreUtils.cmake::set_flags(flags), keyed by CORE_NAME. Read that
+  // branch directly so the generated workspace toolchain follows the installed
+  // core package instead of duplicating RX flags in the extension.
+  const core = String(coreName || '').trim();
+  if (!coreSource || !core) return [];
+  const utilityFile = path.join(coreSource, 'cmake', 'coreUtils.cmake');
+  if (!fs.existsSync(utilityFile)) return [];
+  let text;
+  try { text = fs.readFileSync(utilityFile, 'utf8'); } catch { return []; }
+
+  const functionMatch = text.match(/function\s*\(\s*set_flags\b[^)]*\)([\s\S]*?)endfunction(?:\s*\([^)]*\))?/i);
+  if (!functionMatch) return [];
+  const body = functionMatch[1];
+  const escapedCore = core.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const branchPattern = new RegExp(
+    `(?:if|elseif)\\s*\\(\\s*\\$\\{CORE_NAME\\}\\s+STREQUAL\\s+["']?${escapedCore}["']?\\s*\\)([\\s\\S]*?)(?=\\belseif\\s*\\(|\\belse\\s*\\(|\\bendif\\s*\\()`,
+    'i'
+  );
+  const branchMatch = body.match(branchPattern);
+  if (!branchMatch) return [];
+  const setMatch = branchMatch[1].match(/set\s*\(\s*\$\{flags\}\s+([\s\S]*?)\s+PARENT_SCOPE\s*\)/i);
+  if (!setMatch) return [];
+  const withoutComments = setMatch[1].replace(/(^|\s)#.*$/gm, '$1');
+  return splitFlags(withoutComments.replace(/;/g, ' '));
 }
 
 function armArchitectureFlags(coreName, mcuName) {
@@ -517,6 +836,14 @@ function normalizeApplicationOutput(value) {
 
 function applicationOutputCmakeValue(value) {
   return normalizeApplicationOutput(value) === 'uart' ? 'LOG_INTERFACE_UART' : 'LOG_INTERFACE_STDOUT';
+}
+
+function sdkPreProjectCmakeVariables(resolved = {}) {
+  // mikroSDK_v2 checks TOOLCHAIN_LANGUAGE before project(). CMake loads the
+  // toolchain file from project(), so this selector must also be provided on
+  // the configure command line, exactly as NECTO does.
+  const language = String(resolved?.adapter?.language || '').trim();
+  return language ? { TOOLCHAIN_LANGUAGE: language } : {};
 }
 
 function completeSdkCmakeVariables(metadata = {}) {
@@ -626,43 +953,97 @@ function validateSdkDriverPackages(installPrefix, metadata = {}) {
 function writeToolchain(filePath, setup, resolved, options) {
   const metadata = setup.metadata;
   const modulePaths = [
+    options.mikroCModuleRoot,
     options.compatibilityModuleRoot,
     options.infrastructureRoot,
     options.coreSource && path.join(options.coreSource, 'cmake'),
     path.join(options.installPrefix, 'lib', 'cmake')
   ].filter(Boolean).map(quoteCmake).join(';');
+  const family = String(resolved.adapter?.family || '');
+  const mikroC = isMikroCFamily(family);
+  const mikroCFlags = mikroC ? mikroCCompilerFlags(family, metadata.compiler.defaultOptions, options.buildType || 'Debug') : [];
+  const deviceCompilerFlags = splitFlags(metadata.device.compilerFlags);
+  const deviceLinkerFlags = splitFlags(metadata.device.linkerFlags);
+  // Match NECTO CMakeUtils::writeToolchainFile(): mikroC's generic CMake
+  // language rules consume <FLAGS>, so the complete compiler flag string must
+  // be available through CMAKE_MikroC_FLAGS in addition to the historical
+  // COMPILER_FLAGS cache variable used by coreUtils.cmake custom commands.
+  // NECTO appends both MCU compiler and linker flags to this same string.
+  const mikroCAllFlags = mikroC
+    ? [...mikroCFlags, ...deviceCompilerFlags, ...deviceLinkerFlags].filter(Boolean)
+    : [];
+  const mikroCPathInfo = mikroC ? mikroCSearchPathInfo(resolved.c, metadata, {
+    coreSource: options.coreSource
+  }) : { paths: [], coreDefinitionDirectory: '' };
+  const mikroCPaths = mikroCPathInfo.paths;
+  const mikroCDeviceName = mikroC
+    ? String(options.mcuNameOverride || metadataMcuName(metadata) || '')
+    : '';
   const settings = {
     ...completeSdkCmakeVariables(metadata),
     TOOLCHAIN_ID: metadata.compiler.uid,
     OSC: setup.clockMHz,
     OSC_KHZ: Number.isFinite(Number(setup.clockMHz)) ? Math.round(Number(setup.clockMHz) * 1000) : '',
-    LOG_INTERFACE: applicationOutputCmakeValue(setup.applicationOutput)
+    LOG_INTERFACE: applicationOutputCmakeValue(setup.applicationOutput),
+    MIKROSDK_TYPE: setup.mode === 'full-sdk' ? 'mikrosdk' : 'baremetal',
+    COMPILER_FLAGS: mikroCAllFlags.join(';'),
+    LINKER_FLAGS: mikroCAllFlags.join(';'),
+    SEARCH_PATHS: mikroCPaths.join(';'),
+    JCFG_FILE: mikroC ? String(options.jcfgFile || '') : '',
+    CORE_LIB: mikroC ? String(options.coreLib || '') : '',
+    CMAKE_MikroC_OUTPUT_EXTENSION: mikroC ? mikroCOutputExtension(family) : '',
+    CMAKE_MikroC_OUTPUT_EXTENSION_REPLACE: mikroC ? '1' : '',
+    MIKROBUS_MIKROC_OUTPUT_EXTENSION: mikroC ? mikroCOutputExtension(family) : '',
+    MIKROBUS_MIKROC_DEVICE_NAME: mikroCDeviceName
   };
+  if (options.mcuNameOverride) settings.MCU_NAME = String(options.mcuNameOverride);
   const cacheSettings = Object.entries(settings).map(([key, value]) => `set(${key} "${quoteCmake(cmakeValue(value))}" CACHE STRING "" FORCE)`).join('\n');
-  const deviceCompilerFlags = splitFlags(metadata.device.compilerFlags);
-  const deviceLinkerFlags = splitFlags(metadata.device.linkerFlags);
   const armFlags = /^(gnu-arm|clang-arm)$/.test(String(resolved.adapter?.family || ''))
     ? armArchitectureFlags(metadata.sdkConfig.CORE_NAME, metadataMcuName(metadata))
     : [];
   const compatibilityFlags = resolved.adapter?.family === 'gnu-arm'
     ? coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c))
     : [];
-  const adapterFlags = compilerSupport.compilerSpecificFlags(resolved.adapter, metadata, armFlags, compatibilityFlags);
-  const compileFlags = [...adapterFlags.compile, ...deviceCompilerFlags].filter(Boolean);
-  const linkFlags = [...adapterFlags.link, ...deviceLinkerFlags].filter(Boolean);
+  const rxDeclaredFlags = family === 'gnu-rx'
+    ? rxCoreDeclaredFlags(options.coreSource, metadata.sdkConfig.CORE_NAME)
+    : [];
+  const adapterFlags = compilerSupport.compilerSpecificFlags(resolved.adapter, metadata, armFlags, compatibilityFlags, rxDeclaredFlags);
+  const compileFlags = mikroC ? [] : [...adapterFlags.compile, ...deviceCompilerFlags].filter(Boolean);
+  const linkFlags = mikroC ? [] : [...adapterFlags.link, ...deviceLinkerFlags].filter(Boolean);
   const compileLine = compileFlags.length ? `add_compile_options(${compileFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
   const linkLine = linkFlags.length ? `add_link_options(${linkFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
-  const family = String(resolved.adapter?.family || '');
-  const acceptsGnuLinkerScript = /^(gnu-|clang-|xc32)/.test(family);
+  const acceptsGnuLinkerScript = /^(gnu-|clang-|xc32|llvm-rl78)/.test(family);
   const linker = options.linkerScript && acceptsGnuLinkerScript ? `add_link_options("-T${quoteCmake(options.linkerScript)}")` : '';
   const startup = options.startupFile ? `set(MIKROBUS_STARTUP_FILE "${quoteCmake(options.startupFile)}" CACHE FILEPATH "" FORCE)` : '';
   const cmakeAsmCompiler = resolved.adapter?.cmakeAsmViaCCompiler ? resolved.c : (resolved.cmakeAsm || resolved.asm || resolved.c);
-  const compilerLines = [
+  let xc8Rules = '';
+  if (family === 'xc8') {
+    const ruleFile = path.join(path.dirname(filePath), 'xc8-cmake-rules.cmake');
+    const ruleText = `# XC8 PIC CMake rule overrides generated by MikroBUS Embedded Tools.\n` +
+      `set(CMAKE_C_OUTPUT_EXTENSION ".p1")\n` +
+      `set(CMAKE_ASM_OUTPUT_EXTENSION ".o")\n` +
+      `set(CMAKE_EXECUTABLE_SUFFIX ".elf")\n` +
+      `set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")\n` +
+      `set(CMAKE_C_CREATE_STATIC_LIBRARY "<CMAKE_AR> -r <TARGET> <OBJECTS>")\n` +
+      `set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_AR> -r <TARGET> <OBJECTS>")\n` +
+      `set(CMAKE_C_ARCHIVE_APPEND "<CMAKE_AR> -r <TARGET> <OBJECTS>")\n` +
+      `set(CMAKE_C_ARCHIVE_FINISH "")\n`;
+    fs.writeFileSync(ruleFile, ruleText, 'utf8');
+    xc8Rules = `set(CMAKE_USER_MAKE_RULES_OVERRIDE_C "${quoteCmake(ruleFile)}" CACHE FILEPATH "" FORCE)\n`;
+  }
+  const compilerLines = (mikroC ? [
+    // Match NECTO: CMake invokes the real mikroC compiler directly.
+    `set(CMAKE_MikroC_COMPILER "${quoteCmake(resolved.c)}" CACHE FILEPATH "" FORCE)`
+  ] : [
     `set(CMAKE_C_COMPILER "${quoteCmake(resolved.c)}" CACHE FILEPATH "" FORCE)`,
     resolved.cxx ? `set(CMAKE_CXX_COMPILER "${quoteCmake(resolved.cxx)}" CACHE FILEPATH "" FORCE)` : '',
-    cmakeAsmCompiler ? `set(CMAKE_ASM_COMPILER "${quoteCmake(cmakeAsmCompiler)}" CACHE FILEPATH "" FORCE)` : ''
-  ].filter(Boolean).join('\n');
-  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n${compilerLines}\nmessage(STATUS "MikroBUS compiler: ${quoteCmake(metadata.compiler.uid)} -> ${quoteCmake(resolved.c)}")\nmessage(STATUS "MikroBUS CMake ASM driver: ${quoteCmake(cmakeAsmCompiler)}")\n${cacheSettings}\nset(TOOLCHAIN_LANGUAGE "${quoteCmake(resolved.adapter.language)}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nset(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\n${compileLine}\n${linkLine}\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
+    cmakeAsmCompiler ? `set(CMAKE_ASM_COMPILER "${quoteCmake(cmakeAsmCompiler)}" CACHE FILEPATH "" FORCE)` : '',
+    resolved.ar ? `set(CMAKE_AR "${quoteCmake(resolved.ar)}" CACHE FILEPATH "" FORCE)` : '',
+    family === 'xc8' ? `set(CMAKE_RANLIB "" CACHE FILEPATH "" FORCE)` : (resolved.ranlib ? `set(CMAKE_RANLIB "${quoteCmake(resolved.ranlib)}" CACHE FILEPATH "" FORCE)` : '')
+  ]).filter(Boolean).join('\n');
+  const mikroCCompileOptions = ''; // Official NECTO CMake consumes COMPILER_FLAGS/SEARCH_PATHS.
+
+  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n${compilerLines}\n${xc8Rules}message(STATUS "MikroBUS compiler: ${quoteCmake(metadata.compiler.uid)} -> ${quoteCmake(resolved.c)}")\n${mikroC ? `message(STATUS "MikroBUS CMake language: MikroC")\nmessage(STATUS "MikroBUS mikroC core def: ${quoteCmake(mikroCPathInfo.coreDefinitionDirectory || '')}")\nmessage(STATUS "MikroBUS mikroC device: ${quoteCmake(mikroCDeviceName)}")\nmessage(STATUS "MikroBUS mikroC search paths: ${quoteCmake(mikroCPaths.join(';'))}")\nmessage(STATUS "MikroBUS mikroC JCFG: ${quoteCmake(options.jcfgFile || '')}")\nmessage(STATUS "MikroBUS mikroC core library: ${quoteCmake(options.coreLib || '')}")\n` : `message(STATUS "MikroBUS CMake ASM driver: ${quoteCmake(cmakeAsmCompiler)}")\n`}${cacheSettings}\n${mikroC ? `set(CMAKE_MikroC_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\nset(CMAKE_EXE_LINKER_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\n` : ''}set(TOOLCHAIN_LANGUAGE "${quoteCmake(resolved.adapter.language)}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nif(DEFINED MIKROBUS_WORKSPACE_PREFIX_PATH)\n  set(CMAKE_PREFIX_PATH "\${MIKROBUS_WORKSPACE_PREFIX_PATH}" CACHE STRING "" FORCE)\nelse()\n  set(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\nendif()\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\n${/^(xc8|xc16|xc32)$/.test(family) ? 'add_compile_definitions("$<$<CONFIG:Debug>:__DEBUG>")' : ''}\n${mikroCCompileOptions ? `add_compile_options(${mikroCCompileOptions})` : ''}\n${compileLine}\n${linkLine}\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
   fs.writeFileSync(filePath, text, 'utf8');
 }
 
@@ -785,7 +1166,9 @@ function findBuiltExecutable(root, projectRoot) {
 
 function hexPathForExecutable(executable) {
   const parsed = path.parse(executable);
-  if (parsed.ext.toLowerCase() === '.elf') return path.join(parsed.dir, `${parsed.name}.hex`);
+  const extension = parsed.ext.toLowerCase();
+  if (extension === '.hex') return executable;
+  if (extension === '.elf') return path.join(parsed.dir, `${parsed.name}.hex`);
   return `${executable}.hex`;
 }
 
@@ -801,9 +1184,70 @@ function infrastructureLocations(installed) {
   return { cmakeModuleFile, cmakeUtils, testLib, preinit };
 }
 
-function generateMikroeUtilsCompatibility(infrastructure, generatedRoot) {
+function generateMikroCLanguageSupport(compatibilityRoot) {
+  fs.mkdirSync(compatibilityRoot, { recursive: true });
+  const files = {
+    'CMakeDetermineMikroCCompiler.cmake': [
+      'if(NOT CMAKE_MikroC_COMPILER)',
+      '  if(DEFINED ENV{MIKROC} AND NOT "$ENV{MIKROC}" STREQUAL "")',
+      '    set(CMAKE_MikroC_COMPILER "$ENV{MIKROC}" CACHE FILEPATH "MikroC compiler" FORCE)',
+      '  endif()',
+      'endif()',
+      'if(NOT CMAKE_MikroC_COMPILER)',
+      '  message(FATAL_ERROR "CMAKE_MikroC_COMPILER is not set")',
+      'endif()',
+      'set(CMAKE_MikroC_COMPILER_ENV_VAR "MIKROC")',
+      'set(CMAKE_MikroC_COMPILER_ID "MikroC")',
+      'set(CMAKE_MikroC_COMPILER_ID_RUN 1)',
+      'set(CMAKE_MikroC_COMPILER_WORKS TRUE)',
+      'configure_file("${CMAKE_CURRENT_LIST_DIR}/CMakeMikroCCompiler.cmake.in" "${CMAKE_PLATFORM_INFO_DIR}/CMakeMikroCCompiler.cmake" @ONLY)',
+      ''
+    ].join('\n'),
+    'CMakeMikroCCompiler.cmake.in': [
+      'set(CMAKE_MikroC_COMPILER "@CMAKE_MikroC_COMPILER@")',
+      'set(CMAKE_MikroC_COMPILER_ID "MikroC")',
+      'set(CMAKE_MikroC_COMPILER_ID_RUN 1)',
+      'set(CMAKE_MikroC_COMPILER_LOADED 1)',
+      'set(CMAKE_MikroC_COMPILER_WORKS TRUE)',
+      'set(CMAKE_MikroC_COMPILER_ENV_VAR "MIKROC")',
+      'set(CMAKE_MikroC_SOURCE_FILE_EXTENSIONS c)',
+      'set(CMAKE_MikroC_IGNORE_EXTENSIONS h;H;o;O;obj;OBJ;mcl;emcl;a)',
+      'if(DEFINED MIKROBUS_MIKROC_OUTPUT_EXTENSION AND NOT "${MIKROBUS_MIKROC_OUTPUT_EXTENSION}" STREQUAL "")',
+      '  set(CMAKE_MikroC_OUTPUT_EXTENSION "${MIKROBUS_MIKROC_OUTPUT_EXTENSION}")',
+      'else()',
+      '  set(CMAKE_MikroC_OUTPUT_EXTENSION ".mcl")',
+      'endif()',
+      'set(CMAKE_MikroC_OUTPUT_EXTENSION_REPLACE 1)',
+      'set(CMAKE_MikroC_LINKER_PREFERENCE 40)',
+      ''
+    ].join('\n'),
+    'CMakeMikroCInformation.cmake': [
+      'cmake_path(CONVERT "${SEARCH_PATHS}" TO_CMAKE_PATH_LIST SEARCH_PATH_LIST NORMALIZE)',
+      'list(TRANSFORM SEARCH_PATH_LIST PREPEND "\\"")',
+      'list(TRANSFORM SEARCH_PATH_LIST APPEND "\\"")',
+      'list(TRANSFORM SEARCH_PATH_LIST PREPEND "-SP")',
+      'list(JOIN SEARCH_PATH_LIST " " SEARCH_PATHS_ARG)',
+      'set(CMAKE_STATIC_LIBRARY_SUFFIX_MikroC ".a")',
+      'set(CMAKE_EXECUTABLE_SUFFIX_MikroC ".hex")',
+      'set(CMAKE_C_ARCHIVE_FINISH "")',
+      'set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_MikroC_COMPILER> -ARH -NRL -b\\"${CMAKE_BINARY_DIR}\\" ${SEARCH_PATHS_ARG} -out <TARGET> <OBJECTS>")',
+      'set(CMAKE_INCLUDE_FLAG_MikroC "-IP")',
+      'set(CMAKE_INCLUDE_FLAG_SEP_MikroC " -IP")',
+      'set(CMAKE_MikroC_COMPILE_OBJECT "<CMAKE_MikroC_COMPILER> -p${MCU_NAME} -jcom -DL -NRL -b\\"${CMAKE_BINARY_DIR}\\" -fo${OSC} <FLAGS> <DEFINES> ${SEARCH_PATHS_ARG} \\"${JCFG_FILE}\\" <INCLUDES> -out <OBJECT> <SOURCE> \\"${CORE_LIB}\\"")',
+      'set(CMAKE_MikroC_LINK_EXECUTABLE "<CMAKE_MikroC_COMPILER> -p${MCU_NAME} -NRL -b\\"${CMAKE_BINARY_DIR}\\" -fo${OSC} <LINK_FLAGS> ${SEARCH_PATHS_ARG} \\"${JCFG_FILE}\\" -out <TARGET> <OBJECTS> <LINK_LIBRARIES> \\"${CORE_LIB}\\"")',
+      'set(CMAKE_MikroC_CREATE_STATIC_LIBRARY "<CMAKE_MikroC_COMPILER> -ARH -NRL -b\\"${CMAKE_BINARY_DIR}\\" ${SEARCH_PATHS_ARG} -out <TARGET> <OBJECTS> <LINK_LIBRARIES> \\"${CORE_LIB}\\"")',
+      ''
+    ].join('\n'),
+    'CMakeTestMikroCCompiler.cmake': 'set(CMAKE_MikroC_COMPILER_WORKS TRUE CACHE INTERNAL "")\n'
+  };
+  for (const [name, contents] of Object.entries(files)) fs.writeFileSync(path.join(compatibilityRoot, name), contents, 'utf8');
+  return compatibilityRoot;
+}
+
+function generateMikroeUtilsCompatibility(infrastructure, generatedRoot, options = {}) {
   const compatibilityRoot = path.join(generatedRoot, 'cmake');
   fs.mkdirSync(compatibilityRoot, { recursive: true });
+  if (options.generateMikroCLanguageSupport === true) generateMikroCLanguageSupport(compatibilityRoot);
   const outputPath = path.join(compatibilityRoot, 'mikroeUtils.cmake');
   const exportTemplatePath = path.join(compatibilityRoot, 'mikroeExportConfig.cmake.in');
   const commonModule = quoteCmake(infrastructure.cmakeModuleFile);
@@ -823,6 +1267,10 @@ function generateMikroeUtilsCompatibility(infrastructure, generatedRoot) {
   const text = `# Generated by MikroBUS Embedded Tools.\n` +
     `# Compatibility layer for the managed general_packages layout.\n` +
     `include_guard(GLOBAL)\n` +
+    `# core_install() below uses CMake package-export helpers directly. Do not\n` +
+    `# rely on individual core/SDK CMakeLists.txt files to include these first.\n` +
+    `include(GNUInstallDirs)\n` +
+    `include(CMakePackageConfigHelpers)\n` +
     `include("${commonModule}")\n\n` +
     `# The published mikroe_utils_common package omits mikroeExportConfig.cmake.in.\n` +
     `# Override core_install() so package exports use the generated template here.\n` +
@@ -882,7 +1330,7 @@ function generateMikroeUtilsCompatibility(infrastructure, generatedRoot) {
     `  if(NOT DEFINED OSC_KHZ OR "\${OSC_KHZ}" STREQUAL "")\n` +
     `    message(FATAL_ERROR "OSC_KHZ is not set by the generated toolchain.")\n` +
     `  endif()\n` +
-    `  target_compile_definitions(\${target} PRIVATE OSC_KHZ=\${OSC_KHZ})\n` +
+    `  target_compile_definitions(\${target} PUBLIC OSC_KHZ=\${OSC_KHZ})\n` +
     `endmacro()\n\n` +
     `# mikroeUtilsCommon.cmake assumes ../../../../preinit from NECTO's normal\n` +
     `# package hierarchy. The extension keeps preinit in c-runtime/packages,\n` +
@@ -915,13 +1363,14 @@ function selectionFromSetup(setup = {}) {
     sdkUid: setup.selection?.sdkUid || metadata.sdk?.uid,
     packageUid: setup.selection?.packageUid || metadata.devicePackage?.uid || undefined,
     programmerUid: setup.selection?.programmerUid || metadata.programmer?.uid,
-    boardUid: setup.selection?.boardUid || setup.boardUid || metadata.board?.uid || undefined
+    boardUid: setup.selection?.boardUid || setup.boardUid || metadata.board?.uid || undefined,
+    mode: setup.mode === 'bare-metal' ? 'bare-metal' : 'full-sdk'
   };
 }
 
 function refreshSetupMetadata(context, setup) {
   const selection = selectionFromSetup(setup);
-  if (!selection.deviceUid || !selection.compilerUid || !selection.sdkUid || !selection.programmerUid) {
+  if (!selection.deviceUid || !selection.compilerUid || (!selection.sdkUid && selection.mode !== 'bare-metal') || !selection.programmerUid) {
     throw new Error(`C setup '${setup.name || setup.id || 'unknown'}' is missing database selection identifiers. Recreate the setup.`);
   }
   setup.selection = selection;
@@ -1083,6 +1532,66 @@ function materializeMcuCardBspPackage(bspRoot, entryRoot, folderName, mcuName, p
   return destination;
 }
 
+
+function cmakeQuotedString(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/"/g, '\\"');
+}
+
+function materializeSyntheticCardlessBoard(sdkSource, setup) {
+  if (setup?.mode !== 'full-sdk') return undefined;
+  const requirements = setup?.metadata?.packageRequirements || {};
+  if (requirements.card || requirements.board) return undefined;
+
+  const board = setup?.metadata?.board;
+  const sdkConfig = setup?.metadata?.sdkConfig || {};
+  const boardName = String(
+    sdkConfig._MSDK_BOARD_NAME_
+    || sdkConfig.MSDK_BOARD_NAME
+    || board?.uid
+    || 'GENERIC_BOARD'
+  ).trim();
+  if (!boardName) return undefined;
+
+  // mikroSDK's board CMake defaults MCU_CARD to TRUE and later expands
+  // _MSDK_MCU_CARD_NAME_ unquoted. Cardless generic targets therefore need a
+  // board-specific CMake hook that turns MCU_CARD/DIP_SOCKET off before that
+  // block executes. This uses mikroSDK's normal board discovery mechanism and
+  // does not modify bsp/board/CMakeLists.txt.
+  const folderName = `board_${boardName.toLowerCase().replace(/[^a-z0-9_]+/g, '_')}`;
+  const boardRoot = path.join(sdkSource, 'bsp', 'board', 'include', 'boards', folderName);
+  fs.mkdirSync(boardRoot, { recursive: true });
+
+  const conditionValue = cmakeQuotedString(boardName);
+  const cmakeText = [
+    `if("\${_MSDK_BOARD_NAME_}" STREQUAL "${conditionValue}")`,
+    `    set(BOARD_PATH "include/boards/${folderName}")`,
+    '    set(MCU_CARD FALSE)',
+    '    set(DIP_SOCKET FALSE)',
+    '    set(MIKROBUS FALSE)',
+    '    set(SHIELD FALSE)',
+    '    set(PIM_SOCKET FALSE)',
+    // bsp/board/CMakeLists.txt evaluates this variable unquoted later even
+    // while DIP_SOCKET is FALSE, so keep a harmless non-empty sentinel.
+    '    set(MSDK_FILTERED_DIP_SOCKET_TYPE "none")',
+    'endif()',
+    ''
+  ].join('\n');
+  fs.writeFileSync(path.join(boardRoot, 'board.cmake'), cmakeText, 'utf8');
+
+  const displayName = String(board?.name || boardName || 'Generic board').replace(/"/g, '\\"');
+  const headerText = [
+    '#ifndef _BOARD_H_',
+    '#define _BOARD_H_',
+    '',
+    `#define BOARD_NAME "${displayName}"`,
+    '',
+    '#endif // _BOARD_H_',
+    ''
+  ].join('\n');
+  fs.writeFileSync(path.join(boardRoot, 'board.h'), headerText, 'utf8');
+  return { boardName, folderName, boardRoot };
+}
+
 function materializeSelectedBsp(context, sdkSource, setup, specs, installed) {
   const bspRoot = ensureBspSkeleton(context, sdkSource);
   for (const spec of specs.filter((item) => item.kind === 'bsp-board' || item.kind === 'bsp-card')) {
@@ -1117,24 +1626,52 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     progress.report({ message: `Preparing CODEGRIP device packs for ${setupMcuName(setup)}...` });
     materializeCodegripRuntime(context, setup, installed);
   }
-  const cmake = resolveBuildTool('cmake');
+  const resolved = resolveToolchain(setup, installed);
+  const mikroCSetup = isMikroCFamily(resolved.adapter?.family);
+  const managedNectoCmake = mikroCSetup ? resolveManagedNectoCmake(installed) : undefined;
+  const managedMikroCCmakeModules = mikroCSetup ? resolveManagedMikroCCmakeModules(installed) : undefined;
+  const cmake = managedNectoCmake || resolveBuildTool('cmake');
   const ninja = resolveBuildTool('ninja', ['ninja-build']);
   if (!cmake || !ninja) {
     throw new Error('CMake and Ninja are required. Install them system-wide or set mikrobusRust.cCmakePath and mikrobusRust.cNinjaPath.');
   }
-  const resolved = resolveToolchain(setup, installed);
+  if (mikroCSetup && process.platform === 'linux' && !managedNectoCmake) {
+    throw new Error('The managed NECTO CMake package required for mikroC was not found after installation. Reinstall the C setup packages.');
+  }
+  if (mikroCSetup && !managedMikroCCmakeModules) {
+    throw new Error('The managed mikroC CMake language package is incomplete. Expected CMakeDetermineMikroCCompiler.cmake, CMakeMikroCCompiler.cmake.in, CMakeMikroCInformation.cmake, and CMakeTestMikroCCompiler.cmake.');
+  }
+  if (managedNectoCmake) output.appendLine(`Managed NECTO CMake: ${managedNectoCmake}`);
+  if (managedMikroCCmakeModules) output.appendLine(`Managed mikroC CMake modules: ${managedMikroCCmakeModules}`);
   output.appendLine(`Compiler DB C binary: ${setup.metadata.compiler.cCompiler || '(not set)'} -> ${resolved.c || '(not found)'}`);
   output.appendLine(`Compiler DB ASM binary: ${setup.metadata.compiler.asmCompiler || '(not set)'} -> ${resolved.assembler || '(not found)'}`);
   output.appendLine(`CMake ASM driver: ${resolved.cmakeAsm || resolved.asm || '(not found)'}`);
   const coreSpec = specs.find((spec) => spec.kind === 'core' && spec.name === setup.metadata.corePackageName);
   const coreRoot = coreSpec ? packageRoot(installed, coreSpec.kind, coreSpec.name, coreSpec.version) : undefined;
-  const coreSource = locateCoreSource(coreRoot, setup.metadata.compiler.corePath, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME);
+  const coreSource = locateCoreSource(coreRoot, setup.metadata.compiler.corePath, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME, resolved.adapter?.family);
   if (!coreSource || !fs.existsSync(path.join(coreSource, 'CMakeLists.txt'))) throw new Error(`Core package '${setup.metadata.corePackageName}' does not contain a usable core for ${setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME}.`);
+  const mikroCCoreDefinition = isMikroCFamily(resolved.adapter?.family)
+    ? resolveCoreDefinitionFile(coreSource, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME, setup.metadata?.device?.defFile)
+    : undefined;
+  const mikroCCoreMcuName = mikroCCoreDefinition ? path.basename(mikroCCoreDefinition, path.extname(mikroCCoreDefinition)) : undefined;
+  if (mikroCCoreMcuName && mikroCCoreMcuName !== (setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME)) {
+    output.appendLine(`mikroC core MCU filename normalization: ${setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME} -> ${mikroCCoreMcuName}`);
+  }
   const setupRoot = setupDirectory(context, setup.id);
   const buildRoot = path.join(setupRoot, 'build');
   const installPrefix = path.join(setupRoot, 'install');
   const generatedRoot = path.join(setupRoot, 'generated');
   fs.mkdirSync(generatedRoot, { recursive: true });
+  const mikroCJcfgFile = mikroCSetup
+    ? generateMikroCJcfg(
+        coreSource,
+        setup.metadata,
+        setup.registerValues || {},
+        generatedRoot,
+        mikroCCoreMcuName || setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME
+      )
+    : undefined;
+  if (mikroCJcfgFile) output.appendLine(`Generated mikroC JCFG: ${mikroCJcfgFile}`);
   const infrastructure = infrastructureLocations(installed);
   const requiredInfrastructure = {
     cmakeModuleFile: infrastructure.cmakeModuleFile,
@@ -1145,19 +1682,30 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
   if (missingInfrastructure.length) {
     throw new Error(`C_core/mikroSDK build support is incomplete: ${missingInfrastructure.join(', ')}.`);
   }
-  const compatibilityModuleRoot = generateMikroeUtilsCompatibility(infrastructure, generatedRoot);
-  // The core CMake install rules consume ${CMAKE_BINARY_DIR}/core_header.h.
-  // Generate the canonical configured header directly in the core build tree,
-  // then temporarily mirror it to source/include/core_header.h while compiling.
-  // This matches the core package contract without permanently mutating C_core.
+  const compatibilityModuleRoot = generateMikroeUtilsCompatibility(infrastructure, generatedRoot, { generateMikroCLanguageSupport: false });
   const coreBuildRoot = path.join(buildRoot, 'core');
-  const coreHeader = generateCoreHeader(coreSource, setup.metadata, setup.clockMHz, coreBuildRoot, setup.registerValues || {});
-  const generatedHeaderCopy = path.join(generatedRoot, 'core_header.h');
-  fs.copyFileSync(coreHeader, generatedHeaderCopy);
+  const mikroCCore = mikroCSetup;
+  let coreHeader;
+  if (!mikroCCore) {
+    // GCC/Clang/XC/Renesas core install rules consume
+    // ${CMAKE_BINARY_DIR}/core_header.h and source/include/core_header.h.
+    coreHeader = generateCoreHeader(coreSource, setup.metadata, setup.clockMHz, coreBuildRoot, setup.registerValues || {});
+    const generatedHeaderCopy = path.join(generatedRoot, 'core_header.h');
+    fs.copyFileSync(coreHeader, generatedHeaderCopy);
+  }
   const coreToolchain = path.join(generatedRoot, 'core-toolchain.cmake');
-  writeToolchain(coreToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix });
+  writeToolchain(coreToolchain, setup, resolved, {
+    coreSource,
+    compatibilityModuleRoot,
+    infrastructureRoot: infrastructure.cmakeUtils,
+    mikroCModuleRoot: managedMikroCCmakeModules,
+    installPrefix,
+    mcuNameOverride: mikroCCoreMcuName,
+    jcfgFile: mikroCJcfgFile,
+    coreLib: ''
+  });
   progress.report({ message: `Building ${setupMcuName(setup)} core...` });
-  await withTemporaryCoreHeader(coreSource, coreHeader, () => configureBuildInstall(cmake, coreSource, coreBuildRoot, {
+  const coreDefinitions = {
     CMAKE_MAKE_PROGRAM: ninja,
     CMAKE_TOOLCHAIN_FILE: coreToolchain,
     CMAKE_BUILD_TYPE: 'Debug',
@@ -1166,14 +1714,44 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     TEST_LIB_PATH: infrastructure.testLib,
     PREINIT_ROUTINE_PATH: infrastructure.preinit,
     ...completeSdkCmakeVariables(setup.metadata),
+    ...(mikroCCoreMcuName ? { MCU_NAME: mikroCCoreMcuName } : {}),
+    MIKROSDK_TYPE: setup.mode === 'full-sdk' ? 'mikrosdk' : 'baremetal',
+    COMPILER_FLAGS: '',
+    LINKER_FLAGS: '',
+    SEARCH_PATHS: '',
+    JCFG_FILE: mikroCJcfgFile || '',
+    CORE_LIB: '',
     IS_BARE_METAL: setup.mode === 'bare-metal' ? 'TRUE' : 'FALSE',
     MCU_IS_DUALCORE: 'FALSE'
-  }, token));
+  };
+  if (mikroCCore) {
+    await configureBuildInstall(cmake, coreSource, coreBuildRoot, coreDefinitions, token);
+  } else {
+    await withTemporaryCoreHeader(coreSource, coreHeader, () => configureBuildInstall(cmake, coreSource, coreBuildRoot, coreDefinitions, token));
+  }
+
+  const mikroCCoreLib = mikroCSetup
+    ? (findRecursive(installPrefix, (_candidate, name) => name === 'lib_core.a', 5) || path.join(installPrefix, 'lib', 'lib_core.a'))
+    : undefined;
+  if (mikroCSetup && (!mikroCCoreLib || !fs.existsSync(mikroCCoreLib))) {
+    throw new Error(`mikroC core build completed but lib_core.a was not installed below ${installPrefix}.`);
+  }
+  if (mikroCCoreLib) output.appendLine(`mikroC core library: ${mikroCCoreLib}`);
 
   const linkerScript = findFirstByExtension(path.dirname(installPrefix), ['.ld', '.lds', '.gld', '.lkr']);
   const startupFile = findFirstByExtension(path.dirname(installPrefix), ['.s', '.S']);
   const projectToolchain = path.join(generatedRoot, 'toolchain.cmake');
-  writeToolchain(projectToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix, linkerScript, startupFile });
+  writeToolchain(projectToolchain, setup, resolved, {
+    coreSource,
+    compatibilityModuleRoot,
+    infrastructureRoot: infrastructure.cmakeUtils,
+    mikroCModuleRoot: managedMikroCCmakeModules,
+    installPrefix,
+    linkerScript,
+    startupFile,
+    jcfgFile: mikroCJcfgFile,
+    coreLib: mikroCCoreLib
+  });
 
   if (setup.mode === 'full-sdk') {
     const sdkSpec = specs.find((spec) => spec.kind === 'sdk' && spec.name === 'mikrosdk');
@@ -1181,8 +1759,22 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     const sdkSource = locateSdkSource(sdkRoot);
     if (!sdkSource || !fs.existsSync(path.join(sdkSource, 'CMakeLists.txt'))) throw new Error('The latest mikroSDK package has no recognizable source root.');
     materializeSelectedBsp(context, sdkSource, setup, specs, installed);
+    const syntheticBoard = materializeSyntheticCardlessBoard(sdkSource, setup);
+    if (syntheticBoard) {
+      output.appendLine(`Using cardless SDK board: ${syntheticBoard.boardName} -> ${syntheticBoard.folderName}`);
+    }
     const sdkToolchain = path.join(generatedRoot, 'sdk-toolchain.cmake');
-    writeToolchain(sdkToolchain, setup, resolved, { coreSource, compatibilityModuleRoot, infrastructureRoot: infrastructure.cmakeUtils, installPrefix, linkerScript, sdkSetupBuild: true });
+    writeToolchain(sdkToolchain, setup, resolved, {
+      coreSource,
+      compatibilityModuleRoot,
+      infrastructureRoot: infrastructure.cmakeUtils,
+      mikroCModuleRoot: managedMikroCCmakeModules,
+      installPrefix,
+      linkerScript,
+      sdkSetupBuild: true,
+      jcfgFile: mikroCJcfgFile,
+      coreLib: mikroCCoreLib
+    });
     const sdkDefinitions = {
       CMAKE_MAKE_PROGRAM: ninja,
       CMAKE_TOOLCHAIN_FILE: sdkToolchain,
@@ -1193,6 +1785,18 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
       PREINIT_ROUTINE_PATH: infrastructure.preinit,
       ...completeSdkCmakeVariables(setup.metadata),
       LOG_INTERFACE: applicationOutputCmakeValue(setup.applicationOutput),
+      // mikroSDK decides between `project(... LANGUAGES MikroC)` and
+      // `project(... LANGUAGES C ASM)` before project() loads the toolchain.
+      // NECTO therefore supplies TOOLCHAIN_LANGUAGE on the CMake command line.
+      // Setting it only inside CMAKE_TOOLCHAIN_FILE is too late here and causes
+      // host GCC/Clang to be selected for the SDK source tree.
+      ...sdkPreProjectCmakeVariables(resolved),
+      MIKROSDK_TYPE: 'mikrosdk',
+      COMPILER_FLAGS: '',
+      LINKER_FLAGS: '',
+      SEARCH_PATHS: '',
+      JCFG_FILE: mikroCJcfgFile || '',
+      CORE_LIB: mikroCCoreLib || '',
       IS_BARE_METAL: 'FALSE',
       MSDK_BUILD_TFT_MODULES: 'FALSE',
       BUILD_LVGL_FROM_NECTO: 'FALSE',
@@ -1220,8 +1824,16 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
 
   delete setup.context;
   setup.packageKeys = specs.map(packages.packageKey);
-  setup.paths = { installPrefix, toolchainFile: projectToolchain, linkerScript, startupFile };
-  setup.tools = { cmake, ninja, compiler: resolved.c, gdb: resolved.gdb, objcopy: resolved.objcopy };
+  setup.paths = { installPrefix, toolchainFile: projectToolchain, linkerScript, startupFile, jcfgFile: mikroCJcfgFile, coreSource };
+  setup.tools = {
+    cmake,
+    ninja,
+    compiler: resolved.c,
+    gdb: resolved.gdb,
+    objcopy: resolved.objcopy,
+    ar: resolved.ar,
+    rfpCli: setup.metadata.programmer.uid === rfp.RFP_PROGRAMMER_UID ? packages.managedRfpCli(context) : undefined
+  };
   setup.buildSupportVersion = C_BUILD_SUPPORT_VERSION;
   setup.builtAt = new Date().toISOString();
   writeJsonAtomic(setupFile(context, setup.id), setup);
@@ -1336,6 +1948,9 @@ async function createSetupFromSelection(context, selection) {
       delete setup.codegripCatalog;
       delete setup.codegripRuntime;
     }
+    if (previousProgrammer !== selection.programmerUid || previousDevice !== selection.deviceUid || selection.programmerUid !== rfp.RFP_PROGRAMMER_UID) {
+      delete setup.rfpProfile;
+    }
     writeJsonAtomic(setupFile(context, id), setup);
     setup = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -1368,7 +1983,9 @@ async function createSetup(context) {
 
 function generatedProjectCmake(setup) {
   const fullSdk = setup.mode === 'full-sdk';
-  return `cmake_minimum_required(VERSION 3.20)\nproject(mikrobus_c_application LANGUAGES C ASM)\n\nfind_package(MikroC.Core REQUIRED)\n${fullSdk ? 'find_package(MikroSDK.Board REQUIRED)\n' : ''}file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "src/*.c")\nadd_executable(\${PROJECT_NAME} \${APP_SOURCES})\nif(DEFINED MIKROBUS_STARTUP_FILE AND EXISTS "\${MIKROBUS_STARTUP_FILE}")\n  target_sources(\${PROJECT_NAME} PRIVATE "\${MIKROBUS_STARTUP_FILE}")\nendif()\ntarget_link_libraries(\${PROJECT_NAME} PRIVATE MikroC.Core${fullSdk ? ' MikroSDK.Board' : ''})\nset_target_properties(\${PROJECT_NAME} PROPERTIES SUFFIX ".elf")\n`;
+  const compilerFamily = compilerSupport.adapterFor(setup?.metadata?.compiler?.uid)?.family || '';
+  const projectLanguages = isMikroCFamily(compilerFamily) ? 'MikroC' : 'C ASM';
+  return `cmake_minimum_required(VERSION 3.20)\nproject(mikrobus_c_application LANGUAGES ${projectLanguages})\n\nfind_package(MikroC.Core REQUIRED)\n${fullSdk ? 'find_package(MikroSDK.Board REQUIRED)\n' : ''}file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "src/*.c")\nadd_executable(\${PROJECT_NAME} \${APP_SOURCES})\nif(DEFINED MIKROBUS_STARTUP_FILE AND EXISTS "\${MIKROBUS_STARTUP_FILE}")\n  target_sources(\${PROJECT_NAME} PRIVATE "\${MIKROBUS_STARTUP_FILE}")\nendif()\ntarget_link_libraries(\${PROJECT_NAME} PRIVATE MikroC.Core${fullSdk ? ' MikroSDK.Board' : ''})\nset_target_properties(\${PROJECT_NAME} PROPERTIES SUFFIX ".elf")\n`;
 }
 
 function starterMain() {
@@ -1376,6 +1993,7 @@ function starterMain() {
 }
 
 function cleanAppliedSetupArtifacts(root) {
+  cmakeVisibility.clear(root);
   const extensionBuildRoot = path.join(root, '.mikrobus');
   fs.rmSync(extensionBuildRoot, { recursive: true, force: true });
   const bindingPath = path.join(root, '.vscode', 'mikrobus-c.json');
@@ -1409,6 +2027,16 @@ async function applySetup(context, explicitSetupId) {
     writeJsonAtomic(path.join(vscodeDirectory, 'mikrobus-c.json'), { schemaVersion: 1, setupId: setup.id, setupName: setup.name });
     await hideCppToolsActiveFileShortcut(root);
     await updateWorkspaceContext();
+    try {
+      await refreshWorkspaceCmakeVisibility(context, root, {
+        location: vscode.ProgressLocation.Window,
+        title: `MikroBUS C: Evaluating active files for ${setup.name}...`
+      });
+    } catch (error) {
+      // Applying the setup is still valid even if a user's CMake project does
+      // not configure yet. Build will surface the full CMake error later.
+      output.appendLine(`CMake Explorer visibility refresh skipped: ${error.message || error}`);
+    }
     vscode.window.showInformationMessage(`Applied C setup '${setup.name}' to ${path.basename(root)}.`);
   } catch (error) {
     vscode.window.showErrorMessage(`MikroBUS C apply setup: ${error.message || error}`);
@@ -1433,48 +2061,243 @@ function safeWorkspaceBuildPath(root) {
   return path.join(root, '.mikrobus', 'c-build');
 }
 
+function safeWorkspaceInstallPath(root) {
+  return path.join(root, '.mikrobus', 'c-install');
+}
 
+function mirrorDirectoryStructure(source, target, maximumDepth = 16) {
+  fs.mkdirSync(target, { recursive: true });
+  if (!source || !fs.existsSync(source)) return;
+  const queue = [{ source, target, depth: 0 }];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries;
+    try { entries = fs.readdirSync(current.source, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const destination = path.join(current.target, entry.name);
+      fs.mkdirSync(destination, { recursive: true });
+      if (current.depth < maximumDepth) {
+        queue.push({ source: path.join(current.source, entry.name), target: destination, depth: current.depth + 1 });
+      }
+    }
+  }
+}
+
+function createStaticInstallPrefixDirectories(projectRoot, installPrefix) {
+  if (!projectRoot || !fs.existsSync(projectRoot)) return;
+  const queue = [projectRoot];
+  while (queue.length) {
+    const directory = queue.shift();
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === '.mikrobus' || entry.name === 'node_modules') continue;
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(candidate);
+        continue;
+      }
+      if (!entry.isFile() || !(entry.name === 'CMakeLists.txt' || entry.name.toLowerCase().endsWith('.cmake'))) continue;
+      let text;
+      try { text = fs.readFileSync(candidate, 'utf8'); } catch { continue; }
+      for (const match of text.matchAll(/\$\{CMAKE_INSTALL_PREFIX\}\/([A-Za-z0-9_.\/-]+)/g)) {
+        const relative = String(match[1] || '').replace(/^\/+|\/+$/g, '');
+        if (relative) fs.mkdirSync(path.join(installPrefix, relative), { recursive: true });
+      }
+    }
+  }
+}
+
+function prepareWorkspaceInstallPrefix(root, setup) {
+  const installPrefix = safeWorkspaceInstallPath(root);
+  fs.mkdirSync(installPrefix, { recursive: true });
+  // mikroSDK's install_headers() writes generated package headers directly
+  // below CMAKE_INSTALL_PREFIX during the configure phase. Mirror only the
+  // directory layout of the already-built setup prefix so those destinations
+  // exist without copying/importing any installed MikroSDK targets.
+  mirrorDirectoryStructure(setup?.paths?.installPrefix, installPrefix);
+  createStaticInstallPrefixDirectories(root, installPrefix);
+  return installPrefix;
+}
+
+function activeWorkspaceSource(root) {
+  const document = vscode.window.activeTextEditor?.document;
+  if (document?.uri?.scheme !== 'file' || !document.uri.fsPath || !pathIsInside(document.uri.fsPath, root)) return undefined;
+  const extension = path.extname(document.uri.fsPath).toLowerCase();
+  if (!new Set(['.c', '.cc', '.cpp', '.cxx', '.s', '.asm']).has(extension)) return undefined;
+  return path.resolve(document.uri.fsPath);
+}
+
+async function configuredTargetForActiveSource(root, build) {
+  const source = activeWorkspaceSource(root);
+  if (!source) return undefined;
+  const owning = cmakeVisibility.targetsForSource(root, build, source);
+  if (!owning.length) return undefined;
+  const executableTargets = owning.filter((target) => target.type === 'EXECUTABLE');
+  const candidates = executableTargets.length ? executableTargets : owning;
+  if (candidates.length === 1) return { source, target: candidates[0] };
+  const selected = await quickPick(candidates.map((target) => ({
+    label: target.name,
+    description: target.type || 'CMake target',
+    detail: `Owns ${path.relative(root, source)}`,
+    value: target
+  })), {
+    placeHolder: `Select the CMake target to build for ${path.basename(source)}`,
+    emptyMessage: 'No configured CMake target owns the active source file.'
+  });
+  return selected ? { source, target: selected.value } : undefined;
+}
+
+
+
+async function workspaceBuildEnvironment(context, root) {
+  let setup = getBoundSetup(context, root);
+  const missing = (setup.packageKeys || []).some((key) => !packages.getInstalledPackage(context, key));
+  const staleBuildSupport = setup.buildSupportVersion !== C_BUILD_SUPPORT_VERSION;
+  const missingCodegripRuntime = setup.metadata?.programmer?.uid === 'codegrip' && (
+    !setup.codegripRuntime?.serverExecutable || !fs.existsSync(setup.codegripRuntime.serverExecutable) ||
+    !setup.codegripRuntime?.packsRoot || !fs.existsSync(setup.codegripRuntime.packsRoot)
+  );
+  if (missing || staleBuildSupport || missingCodegripRuntime || !setup.paths?.toolchainFile || !fs.existsSync(setup.paths.toolchainFile)) {
+    setup = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `Restoring C setup: ${setup.name}`,
+      cancellable: true
+    }, (progress, token) => ensureAndBuildSetup(context, setup, progress, token));
+  }
+  const cmake = setup.tools?.cmake && fs.existsSync(setup.tools.cmake) ? setup.tools.cmake : resolveBuildTool('cmake');
+  const ninja = setup.tools?.ninja && fs.existsSync(setup.tools.ninja) ? setup.tools.ninja : resolveBuildTool('ninja', ['ninja-build']);
+  if (!cmake || !ninja) throw new Error('CMake and Ninja are required for project builds.');
+  return { setup, cmake, ninja };
+}
+
+function isMikroSdkSourceProject(root) {
+  const cmakeFile = path.join(root, 'CMakeLists.txt');
+  if (!fs.existsSync(cmakeFile)) return false;
+  try {
+    const text = fs.readFileSync(cmakeFile, 'utf8');
+    return /find_package\s*\(\s*MikroC\.Core\b/i.test(text) &&
+      /add_subdirectory\s*\(\s*drv\s*\)/i.test(text) &&
+      /add_subdirectory\s*\(\s*bsp\s*\)/i.test(text) &&
+      fs.existsSync(path.join(root, 'drv')) &&
+      fs.existsSync(path.join(root, 'bsp'));
+  } catch {
+    return false;
+  }
+}
+
+function workspacePrefixArguments(root, setup) {
+  if (!isMikroSdkSourceProject(root)) return [`-DCMAKE_PREFIX_PATH=${setup.paths.installPrefix}`];
+  const coreConfig = findInstalledPackageConfig(setup.paths.installPrefix, 'MikroC.Core');
+  if (!coreConfig) {
+    throw new Error(`The selected setup does not contain MikroC.CoreConfig.cmake below ${setup.paths.installPrefix}. Rebuild the setup first.`);
+  }
+  // A full SDK setup prefix also contains installed MikroSDK.Driver.*, Board,
+  // HAL, etc. Exposing those while configuring the mikroSDK source tree would
+  // import the installed targets before the same targets are created from
+  // source. Use only the installed core package; every MikroSDK.* target then
+  // comes from the checked-out source tree and its real CMake dependency graph.
+  return [
+    '-DMIKROBUS_WORKSPACE_PREFIX_PATH=',
+    `-DMikroC.Core_DIR=${path.dirname(coreConfig)}`
+  ];
+}
+
+function workspaceSourceTreeDefinitionArguments(setup) {
+  return [
+    `-DLOG_INTERFACE=${applicationOutputCmakeValue(setup.applicationOutput)}`,
+    `-DIS_BARE_METAL=${setup.mode === 'bare-metal' ? 'TRUE' : 'FALSE'}`,
+    '-DMSDK_BUILD_TFT_MODULES=FALSE',
+    '-DBUILD_LVGL_FROM_NECTO=FALSE',
+    '-DMCU_IS_DUALCORE=FALSE'
+  ];
+}
+
+function workspacePreProjectCmakeArguments(setup) {
+  // Some NECTO/mikroSDK application CMakeLists choose their project() language
+  // from TOOLCHAIN_LANGUAGE before project() is called. CMake only loads the
+  // toolchain file while processing project(), so setting this variable only in
+  // toolchain.cmake is one configure too late. Seed it on the first workspace
+  // configure command too, matching the SDK bootstrap/NECTO behavior.
+  const compilerUid = setup?.metadata?.compiler?.uid || setup?.selection?.compilerUid;
+  const variables = sdkPreProjectCmakeVariables({ adapter: compilerSupport.adapterFor(compilerUid) });
+  return Object.entries(variables).map(([key, value]) => `-D${key}=${cmakeValue(value)}`);
+}
+
+async function configureWorkspaceProject(root, setup, cmake, ninja, token) {
+  const build = safeWorkspaceBuildPath(root);
+  const workspaceInstallPrefix = prepareWorkspaceInstallPrefix(root, setup);
+  const sdkSourceMode = isMikroSdkSourceProject(root);
+  cmakeVisibility.prepareFileApiQuery(build);
+  output.appendLine(`CMake project root: ${root}`);
+  output.appendLine(`Workspace CMake install prefix: ${workspaceInstallPrefix}`);
+  if (sdkSourceMode) {
+    output.appendLine(`mikroSDK source-tree mode: using MikroC.Core from ${setup.paths.installPrefix}; SDK targets will be built from the opened source tree.`);
+  }
+  const sourceTreeDefinitions = sdkSourceMode ? workspaceSourceTreeDefinitionArguments(setup) : [];
+  const preProjectDefinitions = workspacePreProjectCmakeArguments(setup);
+  await runLogged(cmake, ['-S', root, '-B', build, '-G', 'Ninja',
+    `-DCMAKE_MAKE_PROGRAM=${ninja}`,
+    `-DCMAKE_TOOLCHAIN_FILE=${setup.paths.toolchainFile}`,
+    ...preProjectDefinitions,
+    `-DCMAKE_INSTALL_PREFIX=${workspaceInstallPrefix}`,
+    ...workspacePrefixArguments(root, setup),
+    ...sourceTreeDefinitions,
+    '-DCMAKE_BUILD_TYPE=Debug', '-DCMAKE_EXPORT_COMPILE_COMMANDS=1'], { token });
+  // File API codemodel + cmakeFiles already knows which targets/source files and
+  // included .cmake files survived all setup/database-dependent conditionals.
+  cmakeVisibility.updateFromBuild(root, build, ninja);
+  return build;
+}
+
+async function refreshWorkspaceCmakeVisibility(context, root = cProjectRoot(), options = {}) {
+  const { setup, cmake, ninja } = await workspaceBuildEnvironment(context, root);
+  return vscode.window.withProgress({
+    location: options.location || vscode.ProgressLocation.Window,
+    title: options.title || `MikroBUS C: Evaluating CMake configuration for ${setupMcuName(setup)}...`,
+    cancellable: true
+  }, async (_progress, token) => {
+    const build = await configureWorkspaceProject(root, setup, cmake, ninja, token);
+    cmakeVisibility.updateFromBuild(root, build, ninja);
+    return { setup, build, cmake, ninja };
+  });
+}
 
 async function buildWorkspace(context) {
   try {
     const root = cProjectRoot();
-    let setup = getBoundSetup(context, root);
-    const missing = (setup.packageKeys || []).some((key) => !packages.getInstalledPackage(context, key));
-    const staleBuildSupport = setup.buildSupportVersion !== C_BUILD_SUPPORT_VERSION;
-    const missingCodegripRuntime = setup.metadata?.programmer?.uid === 'codegrip' && (
-      !setup.codegripRuntime?.serverExecutable || !fs.existsSync(setup.codegripRuntime.serverExecutable) ||
-      !setup.codegripRuntime?.packsRoot || !fs.existsSync(setup.codegripRuntime.packsRoot)
-    );
-    if (missing || staleBuildSupport || missingCodegripRuntime || !setup.paths?.toolchainFile || !fs.existsSync(setup.paths.toolchainFile)) {
-      setup = await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: `Restoring C setup: ${setup.name}`,
-        cancellable: true
-      }, (progress, token) => ensureAndBuildSetup(context, setup, progress, token));
-    }
-    const cmake = setup.tools?.cmake && fs.existsSync(setup.tools.cmake) ? setup.tools.cmake : resolveBuildTool('cmake');
-    const ninja = setup.tools?.ninja && fs.existsSync(setup.tools.ninja) ? setup.tools.ninja : resolveBuildTool('ninja', ['ninja-build']);
-    if (!cmake || !ninja) throw new Error('CMake and Ninja are required for project builds.');
-    const build = safeWorkspaceBuildPath(root);
+    const { setup, cmake, ninja } = await workspaceBuildEnvironment(context, root);
+    let build;
+    let selectedTarget;
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Building ${setup.name}`, cancellable: true }, async (progress, token) => {
       progress.report({ message: 'Configuring project...' });
-      await runLogged(cmake, ['-S', root, '-B', build, '-G', 'Ninja',
-        `-DCMAKE_MAKE_PROGRAM=${ninja}`,
-        `-DCMAKE_TOOLCHAIN_FILE=${setup.paths.toolchainFile}`,
-        `-DCMAKE_PREFIX_PATH=${setup.paths.installPrefix}`,
-        '-DCMAKE_BUILD_TYPE=Debug', '-DCMAKE_EXPORT_COMPILE_COMMANDS=1'], { token });
-      progress.report({ message: 'Compiling project...' });
-      await runLogged(cmake, ['--build', build], { token });
+      build = await configureWorkspaceProject(root, setup, cmake, ninja, token);
+      selectedTarget = await configuredTargetForActiveSource(root, build);
+      if (selectedTarget?.target?.name) {
+        progress.report({ message: `Compiling CMake target ${selectedTarget.target.name}...` });
+        output.appendLine(`Active source target: ${path.relative(root, selectedTarget.source)} -> ${selectedTarget.target.name}`);
+        await runLogged(cmake, ['--build', build, '--target', selectedTarget.target.name], { token });
+      } else {
+        progress.report({ message: 'Compiling project...' });
+        await runLogged(cmake, ['--build', build], { token });
+      }
+      // After compilation Ninja's dependency database contains the headers that
+      // were actually selected by the compiler preprocessor under this MCU/setup.
+      cmakeVisibility.updateFromBuild(root, build, ninja);
     });
-    const elf = findBuiltExecutable(build, root);
+    const targetArtifact = selectedTarget?.target?.type === 'EXECUTABLE'
+      ? cmakeVisibility.executableArtifactForTarget(root, build, selectedTarget.target.name)
+      : undefined;
+    const elf = targetArtifact && fs.existsSync(targetArtifact) ? targetArtifact : findBuiltExecutable(build, root);
     if (!elf) throw new Error(`Build completed but no ELF executable output was found below ${build}.`);
     const hex = await ensureHex(setup, elf);
     setup.lastElf = elf;
     setup.lastHex = hex;
     setup.lastBuiltAt = new Date().toISOString();
     writeJsonAtomic(setupFile(context, setup.id), setup);
-    vscode.window.showInformationMessage(`C build complete: ${path.basename(elf)} + ${path.basename(hex)}`);
-    return { setup, elf, hex };
+    vscode.window.showInformationMessage(`C build complete${selectedTarget?.target?.name ? ` (${selectedTarget.target.name})` : ''}: ${path.basename(elf)} + ${path.basename(hex)}`);
+    return { setup, elf, hex, target: selectedTarget?.target?.name };
   } catch (error) {
     vscode.window.showErrorMessage(`MikroBUS C build: ${error.message || error}`);
     output.show(true);
@@ -1485,28 +2308,127 @@ async function cleanWorkspace() {
   try {
     const root = cProjectRoot();
     const target = path.resolve(safeWorkspaceBuildPath(root));
+    const installTarget = path.resolve(safeWorkspaceInstallPath(root));
     const parent = path.resolve(path.join(root, '.mikrobus'));
-    if (path.dirname(target) !== parent) throw new Error(`Refusing to clean unexpected path: ${target}`);
+    if (path.dirname(target) !== parent || path.dirname(installTarget) !== parent) throw new Error(`Refusing to clean unexpected path below: ${parent}`);
     fs.rmSync(target, { recursive: true, force: true });
+    fs.rmSync(installTarget, { recursive: true, force: true });
+    cmakeVisibility.clear(root);
     vscode.window.showInformationMessage('MikroBUS C build output cleaned.');
   } catch (error) {
     vscode.window.showErrorMessage(`MikroBUS C clean: ${error.message || error}`);
   }
 }
 
+function compilerFamilyForSetup(setup) {
+  return String(compilerSupport.adapterFor(setup?.metadata?.compiler?.uid)?.family || '');
+}
+
+function looksLikeIntelHex(filePath) {
+  try {
+    if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).size <= 0) return false;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(256);
+      const count = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, count).toString('ascii').trimStart().startsWith(':');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function nativeXc8HexForElf(elf, maximumTimestampDeltaMs = 60000) {
+  if (!elf || !fs.existsSync(elf)) return undefined;
+  const parsed = path.parse(elf);
+  const canonical = hexPathForExecutable(elf);
+  const candidates = [canonical, `${elf}.hex`];
+  try {
+    for (const name of fs.readdirSync(parsed.dir || '.')) {
+      if (!/\.hex$/i.test(name)) continue;
+      const candidate = path.join(parsed.dir, name);
+      const stem = path.basename(name, path.extname(name));
+      if (stem === parsed.name || stem === parsed.base || stem.startsWith(`${parsed.name}.`)) candidates.push(candidate);
+    }
+  } catch {}
+  let elfMtime = 0;
+  try { elfMtime = fs.statSync(elf).mtimeMs; } catch {}
+  const unique = [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+  const valid = unique.filter((candidate) => {
+    if (!looksLikeIntelHex(candidate)) return false;
+    if (!elfMtime) return true;
+    try {
+      // XC8 PIC creates ELF and HEX as peer outputs of the same link. The HEX
+      // can be timestamped slightly before the ELF, so do not apply the generic
+      // "HEX must be newer than ELF" post-processing rule here.
+      return Math.abs(fs.statSync(candidate).mtimeMs - elfMtime) <= maximumTimestampDeltaMs;
+    } catch {
+      return false;
+    }
+  });
+  valid.sort((left, right) => {
+    if (left === path.resolve(canonical)) return -1;
+    if (right === path.resolve(canonical)) return 1;
+    try { return fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs; } catch { return 0; }
+  });
+  return valid[0];
+}
+
+function microchipHexConversion(tool, family, elf, outputHex) {
+  const executable = String(tool || '');
+  const base = path.basename(executable).toLowerCase();
+  if ((family === 'xc16' || family === 'xc32') && base.includes('bin2hex')) {
+    return { executable: tool, args: [elf], expected: outputHex };
+  }
+  return { executable: tool, args: ['-O', 'ihex', elf, outputHex], expected: outputHex };
+}
+
+function isXc8AvrTarget(setup) {
+  const mcu = String(metadataMcuName(setup?.metadata) || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return /^(ATMEGA|ATTINY|AVR|ATA)/.test(mcu);
+}
+
 async function ensureHex(setup, elf) {
+  // Some toolchains (notably mikroC AI) link the application directly as an
+  // Intel HEX executable. In that case the CMake target artifact is already
+  // the programmer-ready file; do not try to run objcopy/bin2hex on it.
+  if (looksLikeIntelHex(elf)) return path.resolve(elf);
+
   const existing = hexPathForExecutable(elf);
+  const family = compilerFamilyForSetup(setup);
+
+  if (family === 'xc8' && !isXc8AvrTarget(setup)) {
+    const nativeHex = nativeXc8HexForElf(elf);
+    if (nativeHex) return nativeHex;
+    throw new Error(`XC8 PIC completed the ELF link but no native Intel HEX output was found beside ${path.basename(elf)}. XC8 PIC is expected to emit ELF and HEX together; see the preceding xc8-cc link output.`);
+  }
+
   if (fs.existsSync(existing)) {
     try {
-      if (fs.statSync(existing).mtimeMs >= fs.statSync(elf).mtimeMs) return existing;
+      if (fs.statSync(existing).mtimeMs >= fs.statSync(elf).mtimeMs && looksLikeIntelHex(existing)) return existing;
     } catch {}
   }
-  const objcopy = setup.tools?.objcopy && fs.existsSync(setup.tools.objcopy)
+
+  const preferredNames = family === 'xc16'
+    ? ['xc16-bin2hex']
+    : family === 'xc32'
+      ? ['xc32-bin2hex', 'xc32-objcopy']
+      : family === 'xc8' && isXc8AvrTarget(setup)
+        ? ['avr-objcopy']
+        : ['arm-none-eabi-objcopy'];
+  const converter = setup.tools?.objcopy && fs.existsSync(setup.tools.objcopy)
     ? setup.tools.objcopy
-    : packages.findOnPath(['arm-none-eabi-objcopy']);
-  if (!objcopy) throw new Error('arm-none-eabi-objcopy is required to create a CODEGRIP HEX file.');
-  await runLogged(objcopy, ['-O', 'ihex', elf, existing]);
-  return existing;
+    : packages.findOnPath(preferredNames);
+  if (!converter) throw new Error(`No HEX conversion tool is available for ${setup.metadata?.compiler?.name || setup.metadata?.compiler?.uid || 'the selected compiler'} to create an Intel HEX file.`);
+
+  const command = microchipHexConversion(converter, family, elf, existing);
+  await runLogged(command.executable, command.args, { cwd: path.dirname(elf) });
+  if (!looksLikeIntelHex(command.expected)) {
+    throw new Error(`${path.basename(command.executable)} completed but did not create the expected Intel HEX file ${path.basename(command.expected)}.`);
+  }
+  return command.expected;
 }
 
 function normalizeJlinkDeviceName(mcuName) {
@@ -1536,9 +2458,7 @@ function configuredExecutable(value, executableNames = []) {
 }
 
 function standardJlinkRoots() {
-  const home = process.env.HOME || process.env.USERPROFILE || '';
   const roots = [
-    home && path.join(home, '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'segger'),
     process.platform === 'darwin' ? '/Applications/SEGGER/JLink' : undefined,
     process.platform === 'linux' ? '/opt/SEGGER/JLink' : undefined,
     process.platform === 'win32' && process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'SEGGER', 'JLink') : undefined,
@@ -1677,6 +2597,18 @@ async function flashWorkspace(context) {
         channel: output,
         onProgress: codegripProgressToStatus(progress)
       }));
+    } else if (setup.metadata.programmer.uid === rfp.RFP_PROGRAMMER_UID) {
+      if (!setup.rfpProfile) {
+        setup.rfpProfile = await rfp.configureProfile(setup);
+        if (!setup.rfpProfile) return;
+        writeJsonAtomic(setupFile(context, setup.id), setup);
+      }
+      await withProgrammerStatus(setup, 'Programming', async (progress) => rfp.program(
+        setup,
+        hex || await ensureHex(setup, elf),
+        setup.rfpProfile,
+        { channel: output, cwd: cProjectRoot(), onStatus: (message) => progress.report({ message }) }
+      ));
     } else {
       throw new Error(`Programmer '${setup.metadata.programmer.uid}' is not implemented by this C adapter.`);
     }
@@ -1731,7 +2663,7 @@ async function eraseWorkspace(context) {
     if (answer !== 'Erase MCU') return;
 
     if (setup.metadata.programmer.uid === 'segger_jlink') {
-      await eraseJlink(setup);
+      await withProgrammerStatus(setup, 'Erasing', () => eraseJlink(setup));
     } else if (setup.metadata.programmer.uid === 'codegrip') {
       if (!setup.programmerProfile) {
         setup.programmerProfile = await selectCodegrip(context, setup);
@@ -1740,13 +2672,24 @@ async function eraseWorkspace(context) {
       }
       const runtime = programmerRuntime(context, setup);
       const eraseCommand = String(vscode.workspace.getConfiguration('mikrobusRust').get('codegripEraseCommand', 'erase') || 'erase');
-      await eraseCodegrip({
+      await withProgrammerStatus(setup, 'Erasing', () => eraseCodegrip({
         ...runtime,
         profile: setup.programmerProfile,
         mcu: setupMcuName(setup),
         eraseCommand,
         channel: output
-      });
+      }));
+    } else if (setup.metadata.programmer.uid === rfp.RFP_PROGRAMMER_UID) {
+      if (!setup.rfpProfile) {
+        setup.rfpProfile = await rfp.configureProfile(setup);
+        if (!setup.rfpProfile) return;
+        writeJsonAtomic(setupFile(context, setup.id), setup);
+      }
+      await withProgrammerStatus(setup, 'Erasing', async (progress) => rfp.erase(
+        setup,
+        setup.rfpProfile,
+        { channel: output, cwd: cProjectRoot(), onStatus: (message) => progress.report({ message }) }
+      ));
     } else {
       throw new Error(`Erase with '${setup.metadata.programmer.uid}' is not implemented.`);
     }
@@ -1848,6 +2791,201 @@ function ensureCMainEntryBreakpoint(projectRoot = cProjectRoot()) {
   return { breakpoint, source, line, owned: true };
 }
 
+
+function findAvailableLocalPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = address && typeof address === 'object' ? address.port : undefined;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (!port) reject(new Error('Could not allocate a local Renesas GDB server port.'));
+        else resolve(port);
+      });
+    });
+  });
+}
+
+function quoteDebugServerArg(value) {
+  const text = String(value ?? '');
+  if (!/[\\s|"']/u.test(text)) return text;
+  return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function rl78G24ServerArgs(target, port) {
+  return [
+    '-p', String(port),
+    '-g', target.debuggerType,
+    '-t', target.device,
+    '-uConnectionTimeout=', '30',
+    '-umFreq=', '0',
+    '-usFreq=', '0',
+    '-umClock=', '1',
+    '-w', '0',
+    '-usupplyVoltage=', '0',
+    '-ucommMethod=', '0',
+    '-uSelfCodeSet=', '0',
+    '-usecurityID=', '00000000000000000000',
+    '-usecurityIdSize', '10',
+    '-upermitFlash=', '1',
+    '-uuseWideVoltageMode=', '1',
+    '-ueraseRom=', '1',
+    '-ubankSwapEnable=', '0',
+    '-uresetOnReload=', '1',
+    '-ustopTimerEmu=', '0',
+    '-ustopSerialEmu=', '0',
+    '-umaskInternalResetSignal=', '0',
+    '-umaskTargetResetSignal=', '0',
+    '-n', '0',
+    '-uverifyOnWritingMemory=', '1',
+    '-uAllowRRMDMM=', '0',
+    '-uOSRestriction=', '0',
+    '-uRelayBreak=', '1',
+    '-l',
+    '-uCore=', 'CPU|enabled|256|main',
+    '-uSyncMode=', 'async',
+    '-uTraceCore=', 'CPU',
+    '-uFirstGDB=', 'main',
+    '--english',
+    '--gdbVersion=', '16.2'
+  ];
+}
+
+function isRl78G24Setup(setup = {}) {
+  const family = String(setup?.metadata?.device?.familyUid || setup?.metadata?.device?.family_uid || '').toUpperCase();
+  const mcu = String(setup?.metadata?.device?.mcuName || setup?.metadata?.device?.uid || '').toUpperCase();
+  return family.includes('G24') || /^R7F101/.test(mcu);
+}
+
+function findFileRecursive(root, names, maxDepth = 5, depth = 0) {
+  if (!root || depth > maxDepth || !fs.existsSync(root)) return undefined;
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return undefined; }
+  const wanted = new Set(names.map((name) => process.platform === 'win32' ? name.toLowerCase() : name));
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const key = process.platform === 'win32' ? entry.name.toLowerCase() : entry.name;
+    if (wanted.has(key)) return path.join(root, entry.name);
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findFileRecursive(path.join(root, entry.name), names, maxDepth, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function renesasDebugCompRoots() {
+  const roots = [];
+  const home = os.homedir();
+  // Prefer e2 studio support files when present. The user's G24/E2 session is
+  // known-good there, while current Renesas VS Code support files misclassify
+  // G24 as SINGLE_CORE.
+  const eclipseRoot = path.join(home, '.eclipse');
+  if (fs.existsSync(eclipseRoot)) {
+    try {
+      const entries = fs.readdirSync(eclipseRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith('com.renesas.platform_'))
+        .map((entry) => path.join(eclipseRoot, entry.name, 'DebugComp'))
+        .filter((candidate) => fs.existsSync(candidate));
+      entries.sort((a, b) => {
+        try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
+      });
+      roots.push(...entries);
+    } catch {}
+  }
+  roots.push(
+    path.join(home, '.renesas', 'platform', 'DebugComp'),
+    path.join(home, '.config', 'Code', 'User', 'globalStorage', 'renesaselectronicscorporation.renesas-debug', 'DebugComp')
+  );
+  return [...new Set(roots)].filter((candidate) => fs.existsSync(candidate));
+}
+
+function resolveRl78DirectDebugTools() {
+  const serverNames = process.platform === 'win32' ? ['e2-server-gdb.exe'] : ['e2-server-gdb'];
+  const gdbNames = process.platform === 'win32' ? ['rl78-elf-gdb.exe'] : ['rl78-elf-gdb'];
+  const roots = renesasDebugCompRoots();
+  for (const root of roots) {
+    const server = findFileRecursive(path.join(root, 'RL78'), serverNames, 3) || findFileRecursive(root, serverNames, 4);
+    const gdb = findFileRecursive(root, gdbNames, 4);
+    if (server && gdb) return { server, gdb, root };
+  }
+  const anyServer = roots.map((root) => findFileRecursive(path.join(root, 'RL78'), serverNames, 3) || findFileRecursive(root, serverNames, 4)).find(Boolean);
+  const anyGdb = roots.map((root) => findFileRecursive(root, gdbNames, 4)).find(Boolean);
+  if (anyServer && anyGdb) return { server: anyServer, gdb: anyGdb, root: path.dirname(anyServer) };
+  throw new Error(
+    'RL78 direct debugging could not locate e2-server-gdb and rl78-elf-gdb. Install Renesas RL78 Support Files through Renesas Quick Install (or e2 studio RL78 debug support).'
+  );
+}
+
+function renesasRl78DirectCppDebugConfiguration(setup, projectRoot, elf, profile, generation, tools, port) {
+  const target = rfp.renesasRl78DebugTarget(setup, profile);
+  if (!target) throw new Error('RL78 direct E2/E2 Lite debugging requires an RFP E2/E2 Lite profile using uart1.');
+  const args = rl78G24ServerArgs(target, port);
+  return {
+    type: 'cppdbg',
+    request: 'launch',
+    name: `MikroBUS C ${target.debuggerType === 'E2LITE' ? 'E2 Lite' : 'E2'} RL78/G24: ${setup.name}`,
+    presentation: { hidden: true },
+    program: elf,
+    cwd: projectRoot,
+    MIMode: 'gdb',
+    miDebuggerPath: tools.gdb,
+    miDebuggerServerAddress: `127.0.0.1:${port}`,
+    debugServerPath: tools.server,
+    debugServerArgs: args.map(quoteDebugServerArg).join(' '),
+    serverStarted: 'GDB:',
+    filterStdout: true,
+    filterStderr: true,
+    externalConsole: false,
+    stopAtEntry: false,
+    launchCompleteCommand: 'exec-continue',
+    __mikrobusRenesas: true,
+    __mikrobusRenesasRl78: true,
+    __mikrobusRenesasRl78Direct: true,
+    __mikrobusCDebugInstance: generation,
+    __mikrobusCDebug: true
+  };
+}
+
+function renesasRfpDebugConfiguration(setup, projectRoot, elf, profile, generation) {
+  const target = rfp.renesasDebugTarget(setup, profile);
+  if (!target) {
+    throw new Error('Renesas hardware debug requires an RFP setup configured for E2 Lite or E2. RL78 uses the uart1 RFP interface; RX uses FINE. UART boot mode and RFP J-Link profiles cannot use this debug path.');
+  }
+  return {
+    type: 'renesas-hardware',
+    request: 'launch',
+    name: `MikroBUS C ${target.debuggerType === 'E2LITE' ? 'E2 Lite' : 'E2'}: ${setup.name}`,
+    presentation: { hidden: true },
+    program: elf,
+    cwd: projectRoot,
+    target,
+    __mikrobusRenesas: true,
+    __mikrobusRenesasRx: target.deviceFamily === 'RX',
+    __mikrobusRenesasRl78: target.deviceFamily === 'RL78',
+    __mikrobusCDebugInstance: generation,
+    __mikrobusCDebug: true
+  };
+}
+
+async function ensureRenesasDebugExtension(deviceFamily = 'Renesas') {
+  const extension = vscode.extensions?.getExtension(rfp.RENESAS_DEBUG_EXTENSION_ID);
+  if (!extension) {
+    const family = String(deviceFamily || 'Renesas').toUpperCase();
+    const supportFiles = family === 'RL78' ? 'Renesas RL78 Support Files' : family === 'RX' ? 'Renesas RX Support Files' : 'Renesas device-family Support Files';
+    throw new Error(
+      `${family} E2/E2 Lite debugging requires the Renesas Debug extension (${rfp.RENESAS_DEBUG_EXTENSION_ID}). ` +
+      `Install/enable it and install the ${supportFiles} through Renesas Platform → Quick Install.`
+    );
+  }
+  await extension.activate();
+  return extension;
+}
+
 function codegripCppDebugConfiguration(setup, projectRoot, elf, debugPort, generation) {
   const gdbPath = setup.tools?.gdb;
   return {
@@ -1886,6 +3024,25 @@ async function debugWorkspace(context, debugOptions = {}) {
   let entryBreakpoint;
   let debugInstanceId;
   try {
+    const selectedSetup = getBoundSetup(context, cProjectRoot());
+    if (selectedSetup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID) {
+      if (!selectedSetup.rfpProfile) {
+        selectedSetup.rfpProfile = await rfp.configureProfile(selectedSetup);
+        if (!selectedSetup.rfpProfile) return;
+        writeJsonAtomic(setupFile(context, selectedSetup.id), selectedSetup);
+      }
+      if (!rfp.renesasDebugTarget(selectedSetup, selectedSetup.rfpProfile)) {
+        const connection = selectedSetup.rfpProfile.connection === 'uart'
+          ? 'UART boot mode'
+          : `${selectedSetup.rfpProfile.tool || 'selected RFP tool'} / ${selectedSetup.rfpProfile.interface || 'default interface'}`;
+        const family = rfp.isRl78Device(selectedSetup.metadata || selectedSetup) ? 'RL78' : 'RX';
+        const requiredInterface = family === 'RL78' ? 'uart1 (1-wire UART)' : 'fine';
+        throw new Error(
+          `Debug is not available for the current RFP connection (${connection}). ` +
+          `For ${family} hardware debugging, configure this setup for E2 emulator Lite (or E2) using ${requiredInterface}.`
+        );
+      }
+    }
     const built = await buildWorkspace(context);
     if (!built) return;
     const { setup, elf, hex } = built;
@@ -1911,17 +3068,55 @@ async function debugWorkspace(context, debugOptions = {}) {
         gdbPath: setup.tools?.gdb, runToEntryPoint: 'main', loadFiles: [],
         __mikrobusJlink: true, __mikrobusCDebugInstance: debugInstanceId, __mikrobusCDebug: true
       };
+    } else if (setup.metadata.programmer.uid === rfp.RFP_PROGRAMMER_UID) {
+      if (!setup.rfpProfile) {
+        setup.rfpProfile = await rfp.configureProfile(setup);
+        if (!setup.rfpProfile) return;
+        writeJsonAtomic(setupFile(context, setup.id), setup);
+      }
+      const debugTarget = rfp.renesasDebugTarget(setup, setup.rfpProfile);
+      debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const rfpInterface = setup.rfpProfile.connection === 'tool' ? rfp.effectiveToolInterface(setup.rfpProfile) : (setup.rfpProfile.interface || 'default');
+      // Use Renesas' own DAP adapter for RL78 as well as RX. The previous
+      // G24 workaround launched e2-server-gdb directly and attached through
+      // Microsoft's cppdbg. cppdbg cannot reliably identify the RL78 target
+      // architecture and, after a pause, may issue MI frame/step operations
+      // against an invalid frame (for example PC=0xFFFF), producing
+      // "Cannot find bounds of current function" and stale-session behaviour.
+      // Current Renesas Debug versions support RL78 with E2/E2 Lite directly
+      // and own the server/GDB lifecycle. For G24, c_rfp_backend supplies
+      // disabledCores=['FAA']; -uCore is intentionally left to Renesas Debug.
+      await ensureRenesasDebugExtension(debugTarget?.deviceFamily);
+      configuration = renesasRfpDebugConfiguration(setup, projectRoot, elf, setup.rfpProfile, debugInstanceId);
+      const debugFamily = configuration.target.deviceFamily;
+      output.appendLine(
+        `Starting Renesas ${debugFamily} hardware debug: ${configuration.target.debuggerType} / ` +
+        `${configuration.target.device} / RFP ${rfpInterface}.`
+      );
+      if (debugFamily === 'RL78' && isRl78G24Setup(setup)) {
+        output.appendLine('RL78/G24: using native Renesas Debug adapter; FAA is disabled and Renesas Debug owns CPU core/GDB-server setup.');
+      }
+      output.appendLine('Renesas Debug will load the built ELF and own the E2/E2 Lite GDB server for this session.');
+      output.appendLine(`Host requirement: Renesas ${debugFamily} Support Files and the E2/E2 Lite USB driver must be installed (Renesas Platform -> Quick Install -> Renesas ${debugFamily}).`);
     } else if (setup.metadata.programmer.uid === 'codegrip') {
       if (!setup.programmerProfile) {
         setup.programmerProfile = await selectCodegrip(context, setup);
         if (!setup.programmerProfile) return;
         writeJsonAtomic(setupFile(context, setup.id), setup);
       }
-      const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
-      if (!cppTools) {
-        throw new Error('CODEGRIP debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
+      const mikroCAdapterId = mikrocDebug.adapterIdForCompiler(setup.metadata?.compiler?.uid);
+      if (!mikroCAdapterId) {
+        const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
+        if (!cppTools) {
+          throw new Error('CODEGRIP debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
+        }
+        await cppTools.activate();
+      } else {
+        // Validate the managed native runtime before programming the target. If a
+        // host Qt dependency is missing it is better to fail before CODEGRIP is
+        // put into a debug session.
+        mikrocDebug.probeRuntime(context);
       }
-      await cppTools.activate();
       const runtime = programmerRuntime(context, setup);
       debugRuntime = await withProgrammerStatus(setup, 'Programming for debug', async (progress) => prepareCodegripDebug({
         ...runtime,
@@ -1934,8 +3129,53 @@ async function debugWorkspace(context, debugOptions = {}) {
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const generation = debugInstanceId;
       activeExternalDebugRuntime = { runtime: debugRuntime, setupId: setup.id, generation };
-      output.appendLine(`Starting cppdbg against CODEGRIP GDB at 127.0.0.1:${debugRuntime.debugPort}.`);
-      configuration = codegripCppDebugConfiguration(setup, projectRoot, elf, debugRuntime.debugPort, generation);
+      if (mikroCAdapterId) {
+        const dbgFile = mikrocDebug.dbgPathForArtifact(elf);
+        if (!dbgFile || !fs.existsSync(dbgFile)) {
+          throw new Error(`mikroC build completed but ${path.basename(dbgFile || 'application.dbg')} was not found beside ${path.basename(elf)}.`);
+        }
+        const coreSource = setup.paths?.coreSource;
+        if (!coreSource || !fs.existsSync(coreSource)) {
+          throw new Error('This mikroC setup predates managed mikroDap debugging and does not contain its core source path. Rebuild the workspace setup once.');
+        }
+        const compilerPath = setup.tools?.compiler ? path.dirname(setup.tools.compiler) : undefined;
+        if (!compilerPath || !fs.existsSync(compilerPath)) {
+          throw new Error('The installed mikroC compiler directory could not be resolved for debugging. Rebuild the workspace setup.');
+        }
+        output.appendLine(
+          `Starting mikroDap ${mikroCAdapterId} against CODEGRIP RSP at 127.0.0.1:${debugRuntime.debugPort}; ` +
+          `debug database: ${dbgFile}.`
+        );
+        // Use the exact same target-option values that configureControlClient()
+        // has just applied to CodegripGdbServer. The connection profile stores
+        // probe discovery/authentication data; it is not the source of NECTO's
+        // per-MCU debug protocol/speed/reset defaults (PIC32, for example, is
+        // configured as 2-wire EJTAG rather than the profile's generic SWD).
+        const codegripDebugDefaults = nectoDefaultOptionValues(setupMcuName(setup));
+        configuration = mikrocDebug.debugConfiguration({
+          name: `MikroBUS C mikroC CODEGRIP: ${setup.name}`,
+          cwd: projectRoot,
+          generation,
+          adapterID: mikroCAdapterId,
+          mcu: setupMcuName(setup),
+          compilerPath,
+          corePath: coreSource,
+          writeToStd: normalizeApplicationOutput(setup.applicationOutput) === 'debug-terminal',
+          ipAddress: '127.0.0.1',
+          port: debugRuntime.debugPort,
+          remoteCommands: '',
+          resetType: codegripDebugDefaults.get('Reset Type') || 'Hardware reset',
+          connectionType: codegripDebugDefaults.get('Connection') || 'Normal',
+          speed: codegripDebugDefaults.get('Speed') || '',
+          protocol: codegripDebugDefaults.get('Protocol') || '',
+          programmingType: 'debugging',
+          tool: 'codegrip',
+          dbgFile
+        });
+      } else {
+        output.appendLine(`Starting cppdbg against CODEGRIP GDB at 127.0.0.1:${debugRuntime.debugPort}.`);
+        configuration = codegripCppDebugConfiguration(setup, projectRoot, elf, debugRuntime.debugPort, generation);
+      }
     } else {
       throw new Error(`Debugging with '${setup.metadata.programmer.uid}' is not implemented.`);
     }
@@ -2060,14 +3300,77 @@ async function removeSetupById(context, setupId) {
   vscode.window.showInformationMessage(`Removed C setup '${setup.name || setupId}'.`);
 }
 
+function isSetupDebugAvailable(setup) {
+  if (!setup) return false;
+  const rfpSelected = setup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID;
+  if (!rfpSelected) return true;
+  // Make Debug visible for Renesas targets only when the saved/default RFP
+  // profile is a hardware-debug-capable E2/E2 Lite connection. RX uses FINE;
+  // RL78 uses 1-wire UART (uart1). RL78 still defaults to direct UART boot mode.
+  const profile = setup.rfpProfile || rfp.defaultProfile(setup);
+  return Boolean(rfp.renesasDebugTarget(setup, profile));
+}
+
 async function updateWorkspaceContext() {
   let root;
   try { root = cProjectRoot(); } catch {}
   const hasCmake = Boolean(root && fs.existsSync(path.join(root, 'CMakeLists.txt')));
   const bound = Boolean(root && fs.existsSync(path.join(root, '.vscode', 'mikrobus-c.json')));
+  let debugAvailable = false;
+  let rfpSelected = false;
+  if (bound && hasCmake && globalCContext) {
+    try {
+      const setup = getBoundSetup(globalCContext, root);
+      rfpSelected = setup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID;
+      debugAvailable = isSetupDebugAvailable(setup);
+    } catch {
+      debugAvailable = false;
+      rfpSelected = false;
+    }
+  }
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cWorkspaceBound', bound);
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cProjectReady', bound && hasCmake);
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.cDebugAvailable', debugAvailable);
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.cRfpSelected', rfpSelected);
   if (bound) await hideCppToolsActiveFileShortcut(root);
+}
+
+function scheduleCmakeVisibilityRefresh(context, document) {
+  let root;
+  try { root = cProjectRoot(); } catch { return; }
+  if (!root || !fs.existsSync(path.join(root, '.vscode', 'mikrobus-c.json'))) return;
+  if (document?.uri?.scheme === 'file' && !pathIsInside(document.uri.fsPath, root)) return;
+  if (document) {
+    const base = path.basename(document.uri.fsPath);
+    if (base !== 'CMakeLists.txt' && path.extname(base).toLowerCase() !== '.cmake') return;
+  }
+  if (cmakeVisibilityRefreshTimer) clearTimeout(cmakeVisibilityRefreshTimer);
+  cmakeVisibilityRefreshTimer = setTimeout(() => {
+    cmakeVisibilityRefreshTimer = undefined;
+    if (cmakeVisibilityRefreshRunning) return;
+    cmakeVisibilityRefreshRunning = true;
+    void refreshWorkspaceCmakeVisibility(context, root).catch((error) => {
+      output.appendLine(`Automatic CMake Explorer visibility refresh failed: ${error.message || error}`);
+    }).finally(() => { cmakeVisibilityRefreshRunning = false; });
+  }, 600);
+}
+
+async function configureRfpConnection(context) {
+  try {
+    const root = cProjectRoot();
+    const setup = getBoundSetup(context, root);
+    if (setup.metadata?.programmer?.uid !== rfp.RFP_PROGRAMMER_UID) {
+      throw new Error('The active C setup is not using Renesas Flash Programmer (rfp-cli).');
+    }
+    const profile = await rfp.configureProfile(setup, setup.rfpProfile);
+    if (!profile) return;
+    setup.rfpProfile = profile;
+    writeJsonAtomic(setupFile(context, setup.id), setup);
+    await updateWorkspaceContext();
+    vscode.window.showInformationMessage(`Updated RFP connection for ${setupMcuName(setup)}.`);
+  } catch (error) {
+    vscode.window.showErrorMessage(`MikroBUS C RFP: ${error.message || error}`);
+  }
 }
 
 function guardedCommand(context, name, callback) {
@@ -2187,6 +3490,41 @@ function registerDebugRuntimeLifecycle(context) {
     }
   });
 
+  // mikroC uses the native mikroDap adapter but still owns the same dynamic
+  // CODEGRIP server lifecycle as cppdbg. Keep Stop/Restart cleanup symmetric.
+  const mikrocTrackerFactory = vscode.debug.registerDebugAdapterTrackerFactory(mikrocDebug.DEBUG_TYPE, {
+    createDebugAdapterTracker(session) {
+      if (session.configuration?.__mikrobusCodegripC !== true) return undefined;
+      return {
+        onWillReceiveMessage(message) {
+          if (isCodegripRestartRequest(message)) {
+            output.appendLine('mikroC CODEGRIP Restart requested; waiting for the current debugger session to terminate cleanly...');
+            codegripRestartRequested.set(session.id, Date.now());
+            const timer = codegripStopTimers.get(session.id);
+            if (timer) clearTimeout(timer);
+            codegripStopTimers.delete(session.id);
+            return;
+          }
+          if (!isCodegripFinalStopRequest(message)) return;
+          codegripRestartRequested.delete(session.id);
+          const active = activeExternalDebugRuntime;
+          if (active?.runtime && active.generation === session.configuration?.__mikrobusCodegripGeneration) {
+            scheduleCodegripCleanup(session, active.runtime);
+          }
+        },
+        onExit() {
+          const timer = codegripStopTimers.get(session.id);
+          if (timer) clearTimeout(timer);
+          codegripStopTimers.delete(session.id);
+          const active = activeExternalDebugRuntime;
+          if (!active || active.generation !== session.configuration?.__mikrobusCodegripGeneration) return;
+          activeExternalDebugRuntime = undefined;
+          void stopCodegripServer(active.runtime);
+        }
+      };
+    }
+  });
+
   const codegripTermination = vscode.debug.onDidTerminateDebugSession((session) => {
     if (session.configuration?.__mikrobusCodegripC !== true) return;
     const restartRequested = codegripRestartRequested.has(session.id);
@@ -2218,7 +3556,7 @@ function registerDebugRuntimeLifecycle(context) {
     })();
   });
 
-  context.subscriptions.push(cortexTrackerFactory, cppTrackerFactory, codegripTermination, {
+  context.subscriptions.push(cortexTrackerFactory, cppTrackerFactory, mikrocTrackerFactory, codegripTermination, {
     dispose() {
       for (const timer of codegripStopTimers.values()) clearTimeout(timer);
       codegripStopTimers.clear();
@@ -2232,6 +3570,9 @@ function registerDebugRuntimeLifecycle(context) {
 }
 
 function registerCSupport(context) {
+  globalCContext = context;
+  cmakeVisibility.register(context);
+  mikrocDebug.register(context, output);
   registerDebugRuntimeLifecycle(context);
   guardedCommand(context, 'mikrobusC.createSetup', () => openCConfigurator(context));
   guardedCommand(context, 'mikrobusC.createSetupFromVisual', (selection) => createSetupFromSelection(context, selection));
@@ -2242,14 +3583,30 @@ function registerCSupport(context) {
   guardedCommand(context, 'mikrobusC.flash', () => flashWorkspace(context));
   guardedCommand(context, 'mikrobusC.debug', () => debugWorkspace(context));
   guardedCommand(context, 'mikrobusC.erase', () => eraseWorkspace(context));
+  guardedCommand(context, 'mikrobusC.configureRfpConnection', () => configureRfpConnection(context));
   guardedCommand(context, 'mikrobusC.openInstalledPackages', () => packages.openInstalledPackages(context));
   guardedCommand(context, 'mikrobusC.openCompilerPackages', () => packages.openCompilerPackages(context));
   guardedCommand(context, 'mikrobusC.installEnvironment', () => installCEnvironment(context));
   guardedCommand(context, 'mikrobusC.rebuildSetupById', (setupId) => rebuildSetupById(context, setupId));
   guardedCommand(context, 'mikrobusC.reconfigureSetupById', (setupId) => reconfigureSetupById(context, setupId));
   guardedCommand(context, 'mikrobusC.removeSetupById', (setupId) => removeSetupById(context, setupId));
-  context.subscriptions.push(output, vscode.workspace.onDidChangeWorkspaceFolders(updateWorkspaceContext), vscode.window.onDidChangeActiveTextEditor(updateWorkspaceContext), vscode.workspace.onDidCreateFiles(updateWorkspaceContext), vscode.workspace.onDidDeleteFiles(updateWorkspaceContext));
+  context.subscriptions.push(
+    output,
+    vscode.workspace.onDidChangeWorkspaceFolders(updateWorkspaceContext),
+    vscode.window.onDidChangeActiveTextEditor(updateWorkspaceContext),
+    vscode.workspace.onDidCreateFiles((event) => { void updateWorkspaceContext(); for (const uri of event.files || []) scheduleCmakeVisibilityRefresh(context, { uri }); }),
+    vscode.workspace.onDidDeleteFiles((event) => { void updateWorkspaceContext(); for (const uri of event.files || []) scheduleCmakeVisibilityRefresh(context, { uri }); }),
+    vscode.workspace.onDidSaveTextDocument((document) => scheduleCmakeVisibilityRefresh(context, document)),
+    { dispose() { if (cmakeVisibilityRefreshTimer) clearTimeout(cmakeVisibilityRefreshTimer); cmakeVisibilityRefreshTimer = undefined; globalCContext = undefined; } }
+  );
   void updateWorkspaceContext();
+  try {
+    const root = cProjectRoot();
+    const build = safeWorkspaceBuildPath(root);
+    const setup = getBoundSetup(context, root);
+    const ninja = setup.tools?.ninja && fs.existsSync(setup.tools.ninja) ? setup.tools.ninja : resolveBuildTool('ninja', ['ninja-build']);
+    if (fs.existsSync(build)) cmakeVisibility.updateFromBuild(root, build, ninja);
+  } catch {}
 }
 
 module.exports = {
@@ -2263,6 +3620,7 @@ module.exports = {
     defaultRegisterValue,
     registerFieldId,
     splitFlags,
+    rxCoreDeclaredFlags,
     armArchitectureFlags,
     generatedProjectCmake,
     starterMain,
@@ -2271,15 +3629,37 @@ module.exports = {
     cmakeExecutableTargets,
     findCmakeProjectRoot,
     hexPathForExecutable,
+    compilerFamilyForSetup,
+    looksLikeIntelHex,
+    nativeXc8HexForElf,
+    microchipHexConversion,
+    isXc8AvrTarget,
     normalizeJlinkDeviceName,
     jlinkEraseScript,
     codegripCppDebugConfiguration,
+    renesasRfpDebugConfiguration,
+    isRl78G24Setup,
+    rl78G24ServerArgs,
+    renesasRl78DirectCppDebugConfiguration,
+    isSetupDebugAvailable,
     isCodegripRestartRequest,
     isCodegripFinalStopRequest,
     findCMainEntryLine,
     findProjectMainSource,
     locateCoreSource,
+    resolveCoreDefinitionFile,
+    isMikroCFamily,
+    mikroCPlatformBinDirectory,
+    mikroCOutputExtension,
+    parseMikroCDefaultOptions,
+    mikroCCompilerFlags,
+    mikroCSearchPathInfo,
+    mikroCSearchPaths,
+    resolveManagedNectoCmake,
+    resolveManagedMikroCCmakeModules,
+    generateMikroCJcfg,
     infrastructureLocations,
+    generateMikroCLanguageSupport,
     generateMikroeUtilsCompatibility,
     generateCoreHeader,
     sdkCmakeVariables,
@@ -2287,6 +3667,7 @@ module.exports = {
     sdkMemoryVariables,
     normalizeApplicationOutput,
     applicationOutputCmakeValue,
+    sdkPreProjectCmakeVariables,
     versionAtLeast,
     coreCompatibilityFlags,
     writeToolchain,
@@ -2296,7 +3677,14 @@ module.exports = {
     findBspBoardSource,
     materializeBoardBspPackage,
     materializeMcuCardBspPackage,
+    materializeSyntheticCardlessBoard,
     cleanAppliedSetupArtifacts,
+    safeWorkspaceInstallPath,
+    prepareWorkspaceInstallPrefix,
+    isMikroSdkSourceProject,
+    workspacePrefixArguments,
+    workspaceSourceTreeDefinitionArguments,
+    workspacePreProjectCmakeArguments,
     selectionFromSetup,
     expectedSdkDriverPackages,
     validateSdkDriverPackages,

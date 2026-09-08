@@ -5,6 +5,8 @@
     mcus: [],
     boards: [],
     filtered: [],
+    filteredBoards: [],
+    filteredBoardMcus: [],
     setups: [],
     activeSetupId: undefined,
     detail: undefined,
@@ -37,6 +39,11 @@
   const mcuCount = document.getElementById('mcuCount');
   const setupCount = document.getElementById('setupCount');
   const search = document.getElementById('mcuSearch');
+  const boardSearch = document.getElementById('boardSearch');
+  const boardMcuSearch = document.getElementById('boardMcuSearch');
+  const mcuVendorFilter = document.getElementById('mcuVendorFilter');
+  const boardVendorFilter = document.getElementById('boardVendorFilter');
+  const boardMcuVendorFilter = document.getElementById('boardMcuVendorFilter');
   const registerGrid = document.getElementById('registerGrid');
   const generateButton = document.getElementById('generate');
   const generationStatus = document.getElementById('generationStatus');
@@ -63,8 +70,13 @@
   document.getElementById('backToBoardsFromBoardMcus').addEventListener('click', showBoardCatalog);
   document.getElementById('backToMcus').addEventListener('click', showSelectionCatalog);
   document.getElementById('backToMcusFromSetups').addEventListener('click', showStart);
+  boardSearch.addEventListener('input', filterBoardList);
+  boardMcuSearch.addEventListener('input', filterBoardMcuList);
+  boardVendorFilter.addEventListener('change', filterBoardList);
+  boardMcuVendorFilter.addEventListener('change', filterBoardMcuList);
 
   search.addEventListener('input', filterMcuList);
+  mcuVendorFilter.addEventListener('change', filterMcuList);
   programmerSelect.addEventListener('change', updateProgrammerUi);
 
   findCodegripUsb.addEventListener('click', () => {
@@ -138,8 +150,10 @@
       state.activeSetupId = message.activeSetupId;
       state.workspaceBinding = message.workspace;
       state.project = message.project || { available: false, hasCargoToml: false };
+      populateVendorFilter(mcuVendorFilter, state.mcus);
+      populateVendorFilter(boardVendorFilter, state.boards);
       filterMcuList();
-      renderBoardTable();
+      filterBoardList();
       renderConfiguredSetups();
       updateTopCounts();
       if (state.view === 'start') showStart();
@@ -167,6 +181,8 @@
       state.selectionMode = 'board';
       state.selectedBoard = message.board;
       state.boardMcuOptions = Array.isArray(message.mcuOptions) ? message.mcuOptions : [];
+      boardMcuVendorFilter.value = '';
+      populateVendorFilter(boardMcuVendorFilter, state.boardMcuOptions);
       state.shields = Array.isArray(message.shields) ? message.shields : [];
       state.programmers = Array.isArray(message.programmers) ? message.programmers : [];
       state.codegripConnection = message.setup?.codegripConnection;
@@ -175,7 +191,7 @@
         renderMcuDetail(message.mcu, message.setup);
         showView('config');
       } else {
-        renderBoardMcuTable();
+        filterBoardMcuList();
         showView('boardMcus');
       }
       return;
@@ -282,13 +298,27 @@
     setupCount.textContent = String(state.setups.length);
   }
 
+  function populateVendorFilter(select, items) {
+    if (!select) return;
+    const previous = select.value;
+    const vendors = [...new Set((items || []).map((item) => String(item?.vendor || '').trim()).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true }));
+    select.replaceChildren(
+      Object.assign(document.createElement('option'), { value: '', textContent: 'All vendors' }),
+      ...vendors.map((vendor) => Object.assign(document.createElement('option'), { value: vendor, textContent: vendor }))
+    );
+    if (previous && vendors.includes(previous)) select.value = previous;
+  }
+
   function filterMcuList() {
     const query = search.value.trim().toLowerCase();
-    state.filtered = !query
-      ? state.mcus
-      : state.mcus.filter((mcu) => [mcu.name, mcu.family, mcu.vendor, mcu.target, mcu.systemLib]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(query)));
+    const vendor = mcuVendorFilter.value;
+    state.filtered = state.mcus.filter((mcu) => {
+      if (vendor && String(mcu.vendor || '') !== vendor) return false;
+      return !query || [mcu.name, mcu.family, mcu.vendor, mcu.target, mcu.systemLib]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+    });
     renderMcuTable();
   }
 
@@ -308,22 +338,6 @@
 
       appendCell(row, mcu.name, 'mcuNameCell');
       appendCell(row, mcu.vendor || '—');
-      appendCell(row, mcu.family || '—');
-      appendCodeCell(row, mcu.target || '—');
-      appendCodeCell(row, mcu.systemLib || '—');
-
-      const statusCell = document.createElement('td');
-      const saved = setupForMcu(mcu.name);
-      const badge = document.createElement('span');
-      if (saved) {
-        badge.className = saved.id === state.activeSetupId ? 'statusBadge active' : 'statusBadge configured';
-        badge.textContent = saved.id === state.activeSetupId ? 'Active' : 'Configured';
-      } else {
-        badge.className = 'statusBadge available';
-        badge.textContent = 'Available';
-      }
-      statusCell.append(badge);
-      row.append(statusCell);
       return row;
     }));
   }
@@ -334,9 +348,21 @@
     vscode.postMessage({ type: 'selectMcu', name });
   }
 
+  function filterBoardList() {
+    const query = boardSearch.value.trim().toLowerCase();
+    const vendor = boardVendorFilter.value;
+    state.filteredBoards = state.boards.filter((board) => {
+      if (vendor && String(board.vendor || '') !== vendor) return false;
+      return !query || [board.name, board.uid, board.vendor, board.mcuName, board.selectableMcuCount]
+        .filter((value) => value !== undefined && value !== null)
+        .some((value) => String(value).toLowerCase().includes(query));
+    });
+    renderBoardTable();
+  }
+
   function renderBoardTable() {
-    document.getElementById('boardCount').textContent = String(state.boards.length);
-    boardTableBody.replaceChildren(...state.boards.map((board) => {
+    document.getElementById('boardCount').textContent = String(state.filteredBoards.length);
+    boardTableBody.replaceChildren(...state.filteredBoards.map((board) => {
       const row = document.createElement('tr');
       row.tabIndex = 0;
       row.className = 'clickableRow';
@@ -351,13 +377,6 @@
       appendCell(row, board.name || board.uid, 'mcuNameCell');
       appendCell(row, board.vendor || '—');
       appendCodeCell(row, board.hasMcuCards ? `${board.selectableMcuCount || 0} selectable MCUs` : (board.mcuName || '—'));
-      const saved = state.setups.find((setup) => setup.selectionMode === 'board' && setup.boardUid === board.uid);
-      const statusCell = document.createElement('td');
-      const badge = document.createElement('span');
-      badge.className = saved ? 'statusBadge configured' : 'statusBadge available';
-      badge.textContent = saved ? 'Configured' : 'Available';
-      statusCell.append(badge);
-      row.append(statusCell);
       return row;
     }));
   }
@@ -368,11 +387,23 @@
     vscode.postMessage({ type: 'selectBoard', uid });
   }
 
+  function filterBoardMcuList() {
+    const query = boardMcuSearch.value.trim().toLowerCase();
+    const vendor = boardMcuVendorFilter.value;
+    state.filteredBoardMcus = state.boardMcuOptions.filter((mcu) => {
+      if (vendor && String(mcu.vendor || '') !== vendor) return false;
+      return !query || [mcu.mcuName, mcu.vendor, mcu.family, mcu.mcuCardName]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+    });
+    renderBoardMcuTable();
+  }
+
   function renderBoardMcuTable() {
     const boardName = state.selectedBoard?.name || state.selectedBoard?.uid || 'Board';
     document.getElementById('boardMcuCatalogTitle').textContent = `${boardName} compatible MCUs`;
-    document.getElementById('boardMcuCount').textContent = String(state.boardMcuOptions.length);
-    boardMcuTableBody.replaceChildren(...state.boardMcuOptions.map((mcu) => {
+    document.getElementById('boardMcuCount').textContent = String(state.filteredBoardMcus.length);
+    boardMcuTableBody.replaceChildren(...state.filteredBoardMcus.map((mcu) => {
       const row = document.createElement('tr');
       row.tabIndex = 0;
       row.className = 'clickableRow';
@@ -384,25 +415,8 @@
           open();
         }
       });
-
       appendCell(row, mcu.mcuName || '—', 'mcuNameCell');
       appendCell(row, mcu.vendor || '—');
-      appendCell(row, mcu.family || '—');
-      appendCodeCell(row, mcu.target || '—');
-      appendCodeCell(row, mcu.systemLib || '—');
-      appendCell(row, mcu.mcuCardName || '—');
-
-      const saved = state.setups.find((setup) =>
-        setup.selectionMode === 'board' &&
-        setup.boardUid === state.selectedBoard?.uid &&
-        String(setup.mcuName || '').toLowerCase() === String(mcu.mcuName || '').toLowerCase()
-      );
-      const statusCell = document.createElement('td');
-      const badge = document.createElement('span');
-      badge.className = saved ? 'statusBadge configured' : 'statusBadge available';
-      badge.textContent = saved ? 'Configured' : 'Available';
-      statusCell.append(badge);
-      row.append(statusCell);
       return row;
     }));
   }
@@ -704,8 +718,9 @@
     state.detail = undefined;
     state.currentSetup = undefined;
     generationStatus.textContent = '';
-    renderBoardTable();
+    filterBoardList();
     showView('boards');
+    boardSearch.focus();
   }
 
   function showStart() {
@@ -721,8 +736,9 @@
       state.detail = undefined;
       state.currentSetup = undefined;
       generationStatus.textContent = '';
-      renderBoardMcuTable();
+      filterBoardMcuList();
       showView('boardMcus');
+      boardMcuSearch.focus();
     } else if (state.selectionMode === 'board') showBoardCatalog();
     else showCatalog();
   }

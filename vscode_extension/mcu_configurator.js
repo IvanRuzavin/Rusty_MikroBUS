@@ -1054,9 +1054,7 @@ function findNamedFile(root, names, maximumDepth = 4) {
 }
 
 function standardJlinkRoots() {
-  const home = os.homedir();
   return [
-    path.join(home, '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'segger'),
     process.platform === 'darwin' ? '/Applications/SEGGER/JLink' : undefined,
     process.platform === 'linux' ? '/opt/SEGGER/JLink' : undefined,
     process.platform === 'win32' && process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'SEGGER', 'JLink') : undefined,
@@ -1238,19 +1236,9 @@ function resolveCodegripExecutable(context) {
   const fromPath = findExecutableOnPath('CodegripGdbServer');
   if (fromPath) return fromPath;
 
-  const codegripPackageRoot = path.join(
-    os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip'
-  );
-  const nectoCandidate = process.platform === 'win32'
-    ? path.join(codegripPackageRoot, 'apps', 'CodegripGdbServer.exe')
-    : process.platform === 'darwin'
-      ? path.join(codegripPackageRoot, 'apps', 'CodegripGdbServer.app', 'Contents', 'MacOS', 'CodegripGdbServer')
-      : path.join(codegripPackageRoot, 'apps', 'bin', 'CodegripGdbServer');
-  if (isExecutableFile(nectoCandidate)) return nectoCandidate;
-
   throw new Error(
     `CodegripGdbServer was not found. Install MIKROE CODEGRIP from Development Environment, or set ` +
-    `mikrobusRust.codegripServerPath to the executable or its directory. The detected NECTO location was ${nectoCandidate}.`
+    `mikrobusRust.codegripServerPath to the executable or its directory.`
   );
 }
 
@@ -1271,8 +1259,7 @@ function resolveCodegripPacksPath(serverExecutable, context) {
   const candidates = [
     configured,
     inferredRoot ? path.join(inferredRoot, 'packs') : undefined,
-    context ? path.join(getManagedRoot(context), 'runner', 'codegrip', 'packs') : undefined,
-    path.join(os.homedir(), '.MIKROE', 'NECTOStudio7', 'packages', 'programmers', 'codegrip', 'packs')
+    context ? path.join(getManagedRoot(context), 'runner', 'codegrip', 'packs') : undefined
   ].filter(Boolean);
   const found = candidates.find((candidate) => {
     try { return fs.statSync(candidate).isDirectory(); } catch { return false; }
@@ -3582,8 +3569,9 @@ function getMcuHtml(webview, extensionUri) {
           <div class="catalogTools">
             <label class="searchBox">
               <span>Search</span>
-              <input id="mcuSearch" type="search" placeholder="MCU, vendor, family, target..." autocomplete="off">
+              <input id="mcuSearch" type="search" placeholder="Search MCU or vendor..." autocomplete="off">
             </label>
+            <label class="vendorFilter"><span>Vendor</span><select id="mcuVendorFilter"><option value="">All vendors</option></select></label>
             <div class="resultCount"><strong id="mcuCount">0</strong><span>MCUs</span></div>
           </div>
         </div>
@@ -3594,10 +3582,6 @@ function getMcuHtml(webview, extensionUri) {
               <tr>
                 <th>MCU</th>
                 <th>Vendor</th>
-                <th>Family</th>
-                <th>Rust target</th>
-                <th>System library</th>
-                <th>Status</th>
               </tr>
             </thead>
             <tbody id="mcuTableBody"></tbody>
@@ -3613,11 +3597,18 @@ function getMcuHtml(webview, extensionUri) {
             <h2>Board catalog</h2>
             <p>Select a board, then choose its MCU when the board uses an MCU card. Shield, clock settings, and programmer are configured afterward.</p>
           </div>
-          <div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div>
+          <div class="catalogTools">
+            <label class="searchBox">
+              <span>Search</span>
+              <input id="boardSearch" type="search" placeholder="Search board, vendor or MCU..." autocomplete="off">
+            </label>
+            <label class="vendorFilter"><span>Vendor</span><select id="boardVendorFilter"><option value="">All vendors</option></select></label>
+            <div class="resultCount"><strong id="boardCount">0</strong><span>Boards</span></div>
+          </div>
         </div>
         <div class="tableShell">
           <table class="dataTable boardTable">
-            <thead><tr><th>Board</th><th>Vendor</th><th>Rust compatibility MCU</th><th>Status</th></tr></thead>
+            <thead><tr><th>Board</th><th>Vendor</th><th>Rust compatibility MCU</th></tr></thead>
             <tbody id="boardTableBody"></tbody>
           </table>
         </div>
@@ -3631,7 +3622,14 @@ function getMcuHtml(webview, extensionUri) {
             <h2 id="boardMcuCatalogTitle">Compatible MCUs</h2>
             <p>Select the MCU fitted through this board's MCU card. The corresponding BoardToCard → CardToMCU relationship is used automatically.</p>
           </div>
-          <div class="resultCount"><strong id="boardMcuCount">0</strong><span>MCUs</span></div>
+          <div class="catalogTools">
+            <label class="searchBox">
+              <span>Search</span>
+              <input id="boardMcuSearch" type="search" placeholder="Search MCU or vendor..." autocomplete="off">
+            </label>
+            <label class="vendorFilter"><span>Vendor</span><select id="boardMcuVendorFilter"><option value="">All vendors</option></select></label>
+            <div class="resultCount"><strong id="boardMcuCount">0</strong><span>MCUs</span></div>
+          </div>
         </div>
         <div class="tableShell">
           <table class="dataTable mcuTable">
@@ -3639,11 +3637,6 @@ function getMcuHtml(webview, extensionUri) {
               <tr>
                 <th>MCU</th>
                 <th>Vendor</th>
-                <th>Family</th>
-                <th>Rust target</th>
-                <th>System library</th>
-                <th>MCU card</th>
-                <th>Status</th>
               </tr>
             </thead>
             <tbody id="boardMcuTableBody"></tbody>
@@ -3680,10 +3673,13 @@ function getMcuHtml(webview, extensionUri) {
 
         <section id="systemClockCard" class="clockSection card">
           <div>
-            <h3>System clock</h3>
-            <p>Changing this value updates <code>FOSC_KHZ_VALUE</code> when the setup is built.</p>
+            <h3>System clock and programmer</h3>
+            <p>Changing the clock updates <code>FOSC_KHZ_VALUE</code>. Available programmers come from <code>DeviceToProgrammer</code>.</p>
           </div>
-          <label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
+          <div class="clockControls">
+            <label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
+            <label class="clockInput">Programmer<select id="programmerSelect"></select></label>
+          </div>
         </section>
 
         <section id="boardSelectionCard" class="clockSection card hidden">
@@ -3701,14 +3697,6 @@ function getMcuHtml(webview, extensionUri) {
             <div><h3>Clock / configuration registers</h3><p>Options come directly from the selected MCU JSON. Hidden fields keep their JSON initialization value.</p></div>
           </div>
           <div id="registerGrid" class="registerGrid"></div>
-        </section>
-
-        <section id="programmerSection" class="clockSection card programmerSection">
-          <div>
-            <h3>Programmer / debugger</h3>
-            <p>The available programmers come from <code>DeviceToProgrammer</code>.</p>
-          </div>
-          <label class="clockInput">Programmer<select id="programmerSelect"></select></label>
         </section>
 
         <section id="codegripConnectionCard" class="codegripConnectionCard card hidden">
