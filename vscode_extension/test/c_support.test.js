@@ -285,6 +285,54 @@ try {
   assert.strictEqual(rustMcu.isJlinkProgrammer({ programmerUid: 'SEGGER_JLINK', programmerName: 'SEGGER J-Link' }), true);
   assert.strictEqual(rustMcu.isJlinkProgrammer({ programmerUid: 'MIKROE_CODEGRIP', programmerName: 'CODEGRIP' }), false);
   assert.strictEqual(rustMcu.isCodegripProgrammer({ programmerUid: 'MIKROE_CODEGRIP' }), true);
+  assert.strictEqual(rustMcu.isProbeRsProgrammer({ programmerUid: 'PROBE_RS' }), true);
+  assert.strictEqual(rustMcu.isProbeRsProgrammer({ programmerName: 'probe-rs (Auto-detect)' }), true);
+  {
+    const reports = [];
+    const reporter = rustMcu.probeRsProgressReporter({ report: (value) => reports.push(value) }, 'Programming');
+    rustMcu.updateProbeRsProgressFromOutput('Erasing ✔ 100% [####################]\n', reporter, 'Programming');
+    rustMcu.updateProbeRsProgressFromOutput('Programming ✔ 52% [##########----------]\n', reporter, 'Programming');
+    rustMcu.updateProbeRsProgressFromOutput('Programming ✔ 100% [####################] Finished in 0.55s\n', reporter, 'Programming');
+    reporter(100, 'Programming: 100%');
+    assert.ok(reports.some((item) => /Erasing: 100%/.test(item.message || '')));
+    assert.ok(reports.some((item) => /Programming: 52%/.test(item.message || '')));
+    assert.ok(reports.some((item) => item.message === 'Programming: 100%'));
+    assert.ok(reports.some((item) => Number(item.increment) > 0));
+  }
+  const probeRsGdbConfig = rustMcu.probeRsGdbCppDebugConfiguration(
+    { mcuName: 'STM32F756ZG' },
+    { sdkRoot: '/tmp/rust-sdk' },
+    '/tmp/project/main.rs',
+    '/tmp/rust-sdk/target/thumbv7em-none-eabi/debug/app',
+    '/tmp/gcc/bin/arm-none-eabi-gdb',
+    1337,
+    'probe-token'
+  );
+  assert.strictEqual(probeRsGdbConfig.type, 'cppdbg');
+  assert.strictEqual(probeRsGdbConfig.miDebuggerServerAddress, '127.0.0.1:1337');
+  assert.strictEqual(probeRsGdbConfig.launchCompleteCommand, 'exec-continue');
+  assert.strictEqual(probeRsGdbConfig.targetArchitecture, 'arm');
+  assert.strictEqual(probeRsGdbConfig.useExtendedRemote, false);
+  assert.ok(probeRsGdbConfig.setupCommands.some((item) => item.text === '-gdb-set scheduler-locking off'));
+  assert.ok(probeRsGdbConfig.setupCommands.some((item) => item.text === '-gdb-set schedule-multiple off'));
+  assert.strictEqual(probeRsGdbConfig.__mikrobusProbeRsGdb, true);
+  assert.deepStrictEqual(rustMcu.parseProbeRsSemver('probe-rs 0.32.0'), [0, 32, 0]);
+  assert.deepStrictEqual(rustMcu.parseProbeRsSemver('probe-rs v1.2.3'), [1, 2, 3]);
+  assert.strictEqual(rustMcu.semverAtLeast([0, 32, 0], [0, 32, 0]), true);
+  assert.strictEqual(rustMcu.semverAtLeast([0, 31, 0], [0, 32, 0]), false);
+
+  {
+    const reports = [];
+    const reporter = rustMcu.jlinkProgressReporter({ report: (value) => reports.push(value) }, 'Programming');
+    rustMcu.updateJlinkProgressFromOutput('Connecting to target via SWD...\nCortex-M7 identified\n', reporter, 'Programming');
+    rustMcu.updateJlinkProgressFromOutput('Downloading file... 50 %\n', reporter, 'Programming');
+    rustMcu.updateJlinkProgressFromOutput('O.K.\n', reporter, 'Programming');
+    reporter(100, 'Programming: 100%');
+    assert.ok(reports.some((item) => /Connected to J-Link target/.test(item.message || '')));
+    assert.ok(reports.some((item) => /50% flash write/.test(item.message || '')));
+    assert.ok(reports.some((item) => item.message === 'Programming: 100%'));
+    assert.ok(reports.some((item) => Number(item.increment) > 0));
+  }
   const fakeUsbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-jlink-usb-'));
   try {
     const stlink = path.join(fakeUsbRoot, '1-1');
@@ -302,7 +350,7 @@ try {
     assert.strictEqual(probes[0].serialNumber, '123456789');
     assert.strictEqual(rustMcu.shouldUseNativeJlink({ programmerUid: 'SEGGER_JLINK' }, probes), true);
     if (process.platform === 'linux') {
-      assert.strictEqual(rustMcu.shouldUseNativeJlink({ programmerUid: 'SEGGER_JLINK' }, []), false);
+      assert.strictEqual(rustMcu.shouldUseNativeJlink({ programmerUid: 'SEGGER_JLINK' }, []), true);
     }
   } finally {
     fs.rmSync(fakeUsbRoot, { recursive: true, force: true });
@@ -787,6 +835,8 @@ try {
       CREATE TABLE MCUCard (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, BSP_PATH TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
       CREATE TABLE BoardToCard (BOARD_UID TEXT, CARD_UID TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (BOARD_UID, CARD_UID));
       CREATE TABLE CardToMCU (CARD_UID TEXT, DEVICE_NAME TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (CARD_UID, DEVICE_NAME));
+      CREATE TABLE Programmer (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, KIND TEXT, TRANSPORT TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
+      CREATE TABLE DeviceToProgrammer (DEVICE_NAME TEXT, PROGRAMMER_UID TEXT, INTERFACE TEXT, PRIORITY INTEGER, PRIMARY KEY (DEVICE_NAME, PROGRAMMER_UID));
       INSERT INTO Board VALUES ('UNI_DS_V8','UNI-DS v8','MikroElektronika','bsp/boards/uni_ds_v8/board.cfg','{"mcuSelection":"card","mikrobusSource":"board-card"}',1);
       INSERT INTO Family VALUES ('F4','STMicroelectronics','thumbv7em-none-eabihf');
       INSERT INTO Family VALUES ('F7','STMicroelectronics','thumbv7em-none-eabihf');
@@ -796,6 +846,10 @@ try {
       INSERT INTO BoardToCard VALUES ('UNI_DS_V8','MCU_CARD_FOR_STM32',0,'{}');
       INSERT INTO CardToMCU VALUES ('MCU_CARD_FOR_STM32','STM32F407ZG',1,'{}');
       INSERT INTO CardToMCU VALUES ('MCU_CARD_FOR_STM32','STM32F756ZG',0,'{}');
+      INSERT INTO Programmer VALUES ('SEGGER_JLINK','SEGGER J-Link','SEGGER','debug','SWD','{}',1);
+      INSERT INTO Programmer VALUES ('MIKROE_CODEGRIP','MIKROE CODEGRIP','MikroElektronika','debug','SWD','{}',1);
+      INSERT INTO DeviceToProgrammer VALUES ('STM32F756ZG','SEGGER_JLINK','SWD',10);
+      INSERT INTO DeviceToProgrammer VALUES ('STM32F756ZG','MIKROE_CODEGRIP','SWD',20);
     `);
     db.close();
     const boardRows = rustMcu.readBoardList(rustBoardDb);
@@ -811,6 +865,13 @@ try {
     const f756Card = rustMcu.resolveBoardMcuOption(rustBoardDb, 'UNI_DS_V8', 'STM32F756ZG');
     assert.strictEqual(f756Card.mcuCardUid, 'MCU_CARD_FOR_STM32');
     assert.strictEqual(f756Card.mcuCardBspPath, 'bsp/cards/mcu_card_for_stm32/card.cfg');
+    const rustProgrammers = rustMcu.readProgrammersForDevice(rustBoardDb, 'STM32F756ZG');
+    assert.strictEqual(rustProgrammers[0].uid, 'PROBE_RS');
+    assert.strictEqual(rustProgrammers[0].universal, true);
+    assert.strictEqual(rustProgrammers.some((item) => item.uid === 'SEGGER_JLINK'), true);
+    assert.strictEqual(rustProgrammers.some((item) => item.uid === 'MIKROE_CODEGRIP'), true);
+    const unknownMcuProgrammers = rustMcu.readProgrammersForDevice(rustBoardDb, 'NOT_IN_PROGRAMMER_DB');
+    assert.deepStrictEqual(unknownMcuProgrammers.map((item) => item.uid), ['PROBE_RS']);
   } finally {
     fs.rmSync(rustBoardDbRoot, { recursive: true, force: true });
   }
@@ -1792,7 +1853,7 @@ endfunction()
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.7.49');
+  assert.strictEqual(packageJson.version, '0.7.53');
   assert.strictEqual(packageJson.icon, 'media/mikrobus-module-3d-transparent.png');
   assert.strictEqual(
     packageJson.contributes.viewsContainers.activitybar.find((item) => item.id === 'mikrobusRust')?.icon,
@@ -1802,7 +1863,47 @@ endfunction()
     packageJson.contributes.commands.find((item) => item.command === 'mikrobusC.debug')?.icon,
     '$(debug-alt)'
   );
+  assert.strictEqual(
+    packageJson.contributes.commands.find((item) => item.command === 'mikrobusRust.debugCurrentFile')?.icon,
+    '$(debug-alt)'
+  );
+  assert.strictEqual(packageJson.contributes.commands.some((item) => item.command === 'mikrobusRust.dumpDebugVariables'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.menus, 'debug/toolBar'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.configuration.properties, 'mikrobusRust.dumpVariablesOnStop'), false);
+
+  const rustCodegripDebug = rustMcu.rustCodegripCppDebugConfiguration(
+    { mcuName: 'STM32F756ZG' },
+    { sdkRoot: '/tmp/rust-sdk' },
+    '/tmp/project/main.rs',
+    '/tmp/rust-sdk/target/thumbv7em-none-eabi/debug/app',
+    '/tmp/gcc/bin/arm-none-eabi-gdb',
+    4242,
+    'token-1'
+  );
+  assert.strictEqual(rustCodegripDebug.type, 'cppdbg');
+  assert.strictEqual(rustCodegripDebug.request, 'launch');
+  assert.strictEqual(rustCodegripDebug.MIMode, 'gdb');
+  assert.strictEqual(rustCodegripDebug.miDebuggerServerAddress, '127.0.0.1:4242');
+  assert.strictEqual(rustCodegripDebug.launchCompleteCommand, 'exec-continue');
+  assert.strictEqual(rustCodegripDebug.__mikrobusCodegripRust, true);
+  assert.strictEqual(rustCodegripDebug.__mikrobusRustSource, '/tmp/project/main.rs');
+  assert.strictEqual(rustMcu.isCodegripRestartRequest({ type: 'request', command: 'restart' }), true);
+  assert.strictEqual(rustMcu.isCodegripRestartRequest({ type: 'request', command: 'disconnect', arguments: { restart: true } }), true);
+  assert.strictEqual(rustMcu.isCodegripFinalStopRequest({ type: 'request', command: 'disconnect', arguments: { restart: false } }), true);
+  const rustProgressReports = [];
+  const rustProgress = rustMcu.codegripProgressReporter({ report(value) { rustProgressReports.push(value); } }, 'Programming');
+  rustProgress(10);
+  rustProgress(42);
+  rustProgress(30);
+  rustProgress(100);
+  assert.deepStrictEqual(rustProgressReports.map((item) => item.increment), [0, 10, 32, 0, 58]);
+  assert.strictEqual(rustProgressReports[rustProgressReports.length - 1].message, 'Programming: 100%');
   const rustConfiguratorHtmlSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
+  assert.ok(
+    rustConfiguratorHtmlSource.indexOf('Programmer<select id="programmerSelect"') <
+    rustConfiguratorHtmlSource.indexOf('Clock (MHz)<input id="clockMhz"'),
+    'Rust programmer selector must appear to the left of the clock value.'
+  );
   assert.ok(rustConfiguratorHtmlSource.includes('id="mcuVendorFilter"'));
   assert.ok(rustConfiguratorHtmlSource.includes('id="boardVendorFilter"'));
   assert.ok(rustConfiguratorHtmlSource.includes('id="boardMcuVendorFilter"'));

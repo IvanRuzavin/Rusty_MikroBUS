@@ -1,3 +1,23 @@
+## v0.7.52
+
+### Rust universal probe-rs programming and stable GDB stepping
+
+- The Rust Debug editor-title action now uses the same theme-colored `$(debug-alt)` play/bug icon as the C debugger; there is no custom blue debug icon.
+- `probe-rs (Auto-detect)` is always available in the Rust Programmer selector and is the default for newly configured Rust setups, independent of `DeviceToProgrammer`. Explicit CODEGRIP and SEGGER J-Link choices remain database-driven.
+- Normal Rust Flash uses `probe-rs download` for the exact built ELF and forwards erase/program/verify progress into the VS Code notification progress bar.
+- For ARM Rust targets, the default probe-rs debugger now programs with probe-rs, starts the probe-rs GDB server, and connects VS Code through `cppdbg`/ARM GDB. This keeps probe-rs probe auto-detection while avoiding the native DAP source-statement stepping timeout on long-running peripheral calls.
+- If the Microsoft C/C++ debug adapter or a compatible ARM GDB client is unavailable, the extension reports the fallback in the MikroBUS Rust output and uses the native probe-rs DAP path.
+
+## v0.7.51
+
+### Rust J-Link debugger and flash improvements
+
+- An explicit SEGGER J-Link selection is now authoritative on every platform. Rust no longer silently falls back to probe-rs when Linux USB vendor probing does not see VID 1366.
+- Rust J-Link debug now mirrors the known-good C J-Link flow: program with J-Link Commander, then launch Cortex-Debug with the native J-Link GDB Server and `loadFiles: []`.
+- Normal Rust J-Link flash and debug pre-flash now use a determinate VS Code notification progress bar, including J-Link output-derived write progress where available.
+- The Rust Debug editor-title icon is explicitly colored so it no longer looks disabled when debugging is available.
+- Programmer is explicitly ordered to the left of Clock in the Rust MCU configuration UI.
+
 ## v0.7.46
 
 ### Environment and Click Board workflow improvements
@@ -507,3 +527,10 @@ For GNU ARM, `Compilers.c_compiler` and `Compilers.asm_compiler` are treated as 
 - mikroC setup generation now resolves the actual `<MCU>.mlk` definition directory and the corresponding precompiled `Uses` library directories before configuring a core. A compiler executable directory alone is no longer treated as a sufficient `SEARCH_PATHS` value.
 - Standard and Experimental NECTO 7 package trees are used as a compatibility fallback when the extension-managed mikroC executable archive does not contain `Defs`/`Uses`.
 - mikroC compiler flags are now generated from the database `default_options` exactly like the NECTO toolchain plugins: PIC omits `-SSA`; dsPIC/PIC32/ARM/AVR enable it; ARM handles `-BIN`/`-ATYPE`; `-DBG` is retained and `-UICD` is Debug-only.
+## Rust CODEGRIP debugger UX and lifecycle (0.7.50)
+
+Rust CODEGRIP debugging now uses the same Microsoft `cppdbg` + external CODEGRIP GDB-server model as the stable GCC/C workflow. The target is programmed with `debugEnable=true`, then `cppdbg` connects through `miDebuggerServerAddress`, loads symbols from the Rust ELF, installs normal VS Code source breakpoints, and continues the CODEGRIP-halted core. This removes Cortex-Debug-specific reset commands from the CODEGRIP path and keeps local Rust variables in the standard **Run and Debug → Variables** view instead of printing a second variable tree into the Debug Console.
+
+The Rust debug toolbar no longer contributes **Print Variables**. CODEGRIP sessions now use the normal compact red **Stop** action from `cppdbg`; Stop disconnects the debugger and releases CodegripGdbServer. Restart is serialized like the C CODEGRIP implementation: the extension waits for the old session to terminate, releases the old dynamic server, programs again, creates a fresh dynamic CODEGRIP GDB port, and starts a compact replacement `cppdbg` session. This avoids unsupported `monitor reset halt` commands.
+
+CODEGRIP programming, including the pre-programming stage of Rust Debug, reports real CODEGRIP percentage events into a determinate VS Code notification progress bar. The Rust hardware configuration also places **Programmer** immediately to the left of **Clock (MHz)**.

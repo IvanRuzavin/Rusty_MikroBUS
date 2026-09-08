@@ -10,9 +10,9 @@
   "mcuCardUid": "MCU_CARD_FOR_STM32",
   "mcuCardName": "MCU CARD for STM32",
   "mcuCardBspPath": "bsp/cards/mcu_card_for_stm32/card.cfg",
-  "programmerUid": "MIKROE_CODEGRIP",
-  "programmerName": "MIKROE CODEGRIP",
+  "programmerUid": "SEGGER_JLINK",
+  "programmerName": "SEGGER J-Link",
   "sdkRoot": "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-stm32f756zg-no-shield",
-  "configuredAt": "2026-09-08T10:23:19.574Z",
+  "configuredAt": "2026-09-08T10:30:29.044Z",
   "setupRoot": "/home/ivan-ruzavin/.config/Code/User/globalStorage/mikroe-dev.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-stm32f756zg-no-shield/.setup"
 }

@@ -20,12 +20,16 @@ let mcuPanel;
 let outputChannel;
 const debugServerProcesses = new Map();
 const debugOwnedBreakpoints = new Map();
-const debugVariableDumpTimers = new Map();
-const debugVariableDumpInProgress = new Set();
 let pendingDebugLaunch;
 let pendingCodegripDebugLaunch;
 let pendingSetupEditId;
 const codegripDebugServers = new Map();
+const codegripRestartRequested = new Set();
+const probeRsGdbServers = new Map();
+let pendingProbeRsGdbLaunch;
+
+const PROBE_RS_PROGRAMMER_UID = 'PROBE_RS';
+const PROBE_RS_PROGRAMMER_NAME = 'probe-rs (Auto-detect)';
 
 function getManagedRoot(context) {
   const configured = vscode.workspace.getConfiguration('mikrobusRust').get('storageRoot', '').trim();
@@ -179,8 +183,8 @@ function saveConfiguredSetup(context, payload, result) {
     mcuCardBspPath: result.mcuCardBspPath || payload.mcuCardBspPath || undefined,
     shieldUid: payload.shieldUid || undefined,
     shieldName: payload.shieldName || undefined,
-    programmerUid: result.programmerUid || payload.programmerUid || 'SEGGER_JLINK',
-    programmerName: result.programmerName || payload.programmerName || 'SEGGER J-Link',
+    programmerUid: result.programmerUid || payload.programmerUid || PROBE_RS_PROGRAMMER_UID,
+    programmerName: result.programmerName || payload.programmerName || PROBE_RS_PROGRAMMER_NAME,
     codegripConnection: result.programmerUid === 'MIKROE_CODEGRIP'
       ? normalizeDiscoveredDevice(result.codegripConnection || payload.codegripConnection)
       : undefined,
@@ -224,18 +228,24 @@ function removeConfiguredSetup(context, id) {
   return setup;
 }
 
+function isCodegripRestartRequest(message) {
+  if (message?.type !== 'request') return false;
+  if (message.command === 'restart') return true;
+  return message.command === 'disconnect' && message.arguments?.restart === true;
+}
+
+function isCodegripFinalStopRequest(message) {
+  if (message?.type !== 'request') return false;
+  if (message.command === 'terminate') return true;
+  return message.command === 'disconnect' && message.arguments?.restart !== true;
+}
+
 function createMikrobusDebugTracker(session, continueAfterConfiguration) {
   let configurationDoneRequestSeq;
   return {
     onWillReceiveMessage(message) {
       if (continueAfterConfiguration && message?.type === 'request' && message.command === 'configurationDone') {
         configurationDoneRequestSeq = message.seq;
-      }
-      if (
-        message?.type === 'request' &&
-        ['continue', 'next', 'stepIn', 'stepOut', 'restart', 'disconnect', 'terminate'].includes(message.command)
-      ) {
-        cancelScheduledVariableDump(session.id);
       }
     },
     onDidSendMessage(message) {
@@ -248,9 +258,6 @@ function createMikrobusDebugTracker(session, continueAfterConfiguration) {
       ) {
         configurationDoneRequestSeq = undefined;
         void continueFromResetToEntry(session);
-      }
-      if (message?.type === 'event' && message.event === 'stopped') {
-        scheduleVariableDump(session, message.body?.threadId, message.body?.reason);
       }
     }
   };
@@ -284,9 +291,6 @@ function registerMcuConfigurator(context) {
     }),
     vscode.commands.registerCommand('mikrobusRust.debugCurrentFile', async () => {
       await debugCurrentRustFile(context);
-    }),
-    vscode.commands.registerCommand('mikrobusRust.dumpDebugVariables', async () => {
-      await dumpDebugVariables();
     }),
     vscode.commands.registerCommand('mikrobusRust.eraseWorkspaceMcu', async () => {
       await runBoundWorkspaceAction(context, 'erase');
@@ -359,8 +363,22 @@ function registerMcuConfigurator(context) {
         return;
       }
       if (
-        session.type === 'cortex-debug' &&
-        session.configuration.__mikrobusCodegrip === true &&
+        session.type === 'cppdbg' &&
+        session.configuration.__mikrobusProbeRsGdb === true &&
+        pendingProbeRsGdbLaunch &&
+        session.configuration.__mikrobusProbeRsToken === pendingProbeRsGdbLaunch.token
+      ) {
+        const pending = pendingProbeRsGdbLaunch;
+        pendingProbeRsGdbLaunch = undefined;
+        probeRsGdbServers.set(session.id, pending.runtime);
+        if (pending.ownedBreakpoint) {
+          debugOwnedBreakpoints.set(session.id, pending.ownedBreakpoint);
+        }
+        return;
+      }
+      if (
+        session.type === 'cppdbg' &&
+        session.configuration.__mikrobusCodegripRust === true &&
         pendingCodegripDebugLaunch &&
         session.configuration.__mikrobusCodegripToken === pendingCodegripDebugLaunch.token
       ) {
@@ -380,42 +398,77 @@ function registerMcuConfigurator(context) {
     }),
     vscode.debug.registerDebugAdapterTrackerFactory('cortex-debug', {
       createDebugAdapterTracker(session) {
-        if (session.configuration.__mikrobusCodegrip === true) {
-          // CODEGRIP programs the device before Cortex-Debug attaches. Once VS Code
-          // has installed source breakpoints, continue from CODEGRIP's halted state.
-          return createMikrobusDebugTracker(session, true);
-        }
         if (session.configuration.__mikrobusRustJlink === true) {
-          // Native J-Link/Cortex-Debug owns launch/continue itself. Keep only the
-          // variable-stop tracking; do not inject the probe-rs reset continuation.
+          // Native J-Link/Cortex-Debug owns launch/continue/reset itself.
           return createMikrobusDebugTracker(session, false);
         }
         return undefined;
       }
     }),
+    vscode.debug.registerDebugAdapterTrackerFactory('cppdbg', {
+      createDebugAdapterTracker(session) {
+        if (session.configuration.__mikrobusCodegripRust !== true) return undefined;
+        return {
+          onWillReceiveMessage(message) {
+            if (isCodegripRestartRequest(message)) {
+              getOutputChannel().appendLine('CODEGRIP Restart requested; waiting for the current Rust debug session to disconnect cleanly...');
+              codegripRestartRequested.add(session.id);
+              return;
+            }
+            if (isCodegripFinalStopRequest(message)) {
+              codegripRestartRequested.delete(session.id);
+            }
+          },
+          onExit() {
+            // Runtime cleanup is synchronized by onDidTerminateDebugSession.
+          }
+        };
+      }
+    }),
     vscode.debug.onDidTerminateDebugSession((session) => {
       stopDebugServerProcess(session.id);
+      const probeRsRuntime = probeRsGdbServers.get(session.id);
+      if (probeRsRuntime) probeRsGdbServers.delete(session.id);
       const codegripRuntime = codegripDebugServers.get(session.id);
+      const restartRequested = codegripRestartRequested.has(session.id);
+      const restartSource = session.configuration?.__mikrobusRustSource;
+      codegripRestartRequested.delete(session.id);
       if (codegripRuntime) {
         codegripDebugServers.delete(session.id);
-        void stopCodegripServer(codegripRuntime);
-        if (codegripDebugServers.size === 0) {
-          void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', false);
-        }
       }
-      cancelScheduledVariableDump(session.id);
-      debugVariableDumpInProgress.delete(session.id);
       const breakpoint = debugOwnedBreakpoints.get(session.id);
       if (breakpoint) {
         vscode.debug.removeBreakpoints([breakpoint]);
         debugOwnedBreakpoints.delete(session.id);
       }
+      if (codegripDebugServers.size === 0) {
+        void vscode.commands.executeCommand('setContext', 'mikrobusRust.codegripDebugActive', false);
+      }
+      if (!codegripRuntime && !restartRequested && !probeRsRuntime) return;
+      void (async () => {
+        if (probeRsRuntime) await stopProbeRsGdbServer(probeRsRuntime);
+        if (codegripRuntime) await stopCodegripServer(codegripRuntime);
+        if (!restartRequested) return;
+        try {
+          getOutputChannel().appendLine('CODEGRIP Restart: previous Rust debug session terminated; programming and starting a fresh session.');
+          await new Promise((resolve) => setImmediate(resolve));
+          await debugCurrentRustFile(context, { source: restartSource, restartParentSession: session });
+        } catch (error) {
+          getOutputChannel().appendLine(`CODEGRIP Restart failed: ${error?.message || error}`);
+          vscode.window.showErrorMessage(`CODEGRIP Restart failed: ${error?.message || error}`);
+        }
+      })();
     }),
     {
       dispose() {
         for (const sessionId of [...debugServerProcesses.keys()]) stopDebugServerProcess(sessionId);
+        for (const runtime of probeRsGdbServers.values()) void stopProbeRsGdbServer(runtime);
+        probeRsGdbServers.clear();
+        if (pendingProbeRsGdbLaunch?.runtime) void stopProbeRsGdbServer(pendingProbeRsGdbLaunch.runtime);
+        pendingProbeRsGdbLaunch = undefined;
         for (const runtime of codegripDebugServers.values()) void stopCodegripServer(runtime);
         codegripDebugServers.clear();
+        codegripRestartRequested.clear();
         if (pendingCodegripDebugLaunch?.runtime) void stopCodegripServer(pendingCodegripDebugLaunch.runtime);
         pendingCodegripDebugLaunch = undefined;
       }
@@ -963,6 +1016,10 @@ function resolveToolExecutable(tool) {
   );
 }
 
+function isProbeRsProgrammer(setup) {
+  return String(setup?.programmerUid || '').toUpperCase() === PROBE_RS_PROGRAMMER_UID || /probe[- ]?rs/i.test(String(setup?.programmerName || ''));
+}
+
 function isCodegripProgrammer(setup) {
   return /codegrip/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
 }
@@ -998,14 +1055,14 @@ function findLocalJlinkUsbProbes(sysfsRoot = '/sys/bus/usb/devices') {
   return probes;
 }
 
-function shouldUseNativeJlink(setup, probes = undefined) {
-  if (!isJlinkProgrammer(setup)) return false;
-  // On Linux we can reliably distinguish installed SEGGER software from a
-  // connected USB J-Link. On platforms without this sysfs signal, preserve the
-  // explicit J-Link selection and let the native backend handle discovery.
-  if (process.platform !== 'linux') return true;
-  const detected = probes === undefined ? findLocalJlinkUsbProbes() : probes;
-  return Array.isArray(detected) && detected.length > 0;
+function shouldUseNativeJlink(setup, _probes = undefined) {
+  // Programmer selection is authoritative. The C environment already treats an
+  // explicit SEGGER J-Link selection this way: use the native J-Link backend and
+  // let J-Link report a missing/disconnected probe instead of silently changing
+  // the debugger to probe-rs. The old Linux USB-vendor heuristic caused a setup
+  // configured for J-Link to launch probe-rs, which in turn broke source stepping
+  // on long-running embedded operations.
+  return isJlinkProgrammer(setup);
 }
 
 function normalizeJlinkDeviceName(mcuName) {
@@ -1321,7 +1378,7 @@ async function resolveCodegripConnectionForOperation(context, setup, executable,
   return normalized;
 }
 
-async function codegripOperationOptions(context, setup, channel) {
+async function codegripOperationOptions(context, setup, channel, onProgress) {
   const storedExecutable = String(setup?.codegripRuntime?.serverExecutable || '');
   const storedPacks = String(setup?.codegripRuntime?.packsRoot || '');
   const executable = isExecutableFile(storedExecutable) ? storedExecutable : resolveCodegripExecutable(context);
@@ -1336,9 +1393,29 @@ async function codegripOperationOptions(context, setup, channel) {
     mcu: setup.mcuName,
     profile,
     eraseCommand: String(vscode.workspace.getConfiguration('mikrobusRust').get('codegripEraseCommand', 'erase') || 'erase').trim(),
-    channel
+    channel,
+    onProgress: typeof onProgress === 'function' ? onProgress : undefined
   };
 }
+
+function codegripProgressReporter(progress, label = 'Programming') {
+  let lastPercent = 0;
+  if (progress) progress.report({ increment: 0, message: `${label}: 0%` });
+  return (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return;
+    const percent = Math.max(0, Math.min(100, Math.round(numeric)));
+    const increment = Math.max(0, percent - lastPercent);
+    lastPercent = Math.max(lastPercent, percent);
+    progress?.report({ increment, message: `${label}: ${percent}%` });
+  };
+}
+
+function finishCodegripProgress(progress, reporter, label = 'Programming') {
+  if (typeof reporter === 'function') reporter(100);
+  else progress?.report({ message: `${label}: 100%` });
+}
+
 
 async function codegripDiscoveryOptions(context, mcuName, channel, progress, token) {
   const discoveryRoot = path.join(getManagedRoot(context), 'configured-setups', '.codegrip-discovery', setupIdForMcu(mcuName));
@@ -1409,11 +1486,13 @@ async function withCodegripHex(context, programBinary, channel, action) {
   }
 }
 
-async function flashElfWithCodegrip(context, setup, programBinary, channel) {
-  const options = await codegripOperationOptions(context, setup, channel);
+async function flashElfWithCodegrip(context, setup, programBinary, channel, progress) {
+  const report = codegripProgressReporter(progress, 'Programming');
+  const options = await codegripOperationOptions(context, setup, channel, report);
   await withCodegripHex(context, programBinary, channel, async (hexFile) => {
     await programCodegrip({ ...options, hexFile, debugEnable: false });
   });
+  finishCodegripProgress(progress, report, 'Programming');
 }
 
 function jlinkCommandFile(lines) {
@@ -1422,43 +1501,87 @@ function jlinkCommandFile(lines) {
   return filePath;
 }
 
-async function runJlinkCommander(setup, lines, channel) {
+function jlinkProgressReporter(progress, label = 'Programming') {
+  let lastPercent = 0;
+  const report = (value, message = undefined) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    const percent = Math.max(0, Math.min(100, Math.round(numeric)));
+    const increment = Math.max(0, percent - lastPercent);
+    lastPercent = Math.max(lastPercent, percent);
+    progress?.report({ increment, message: message || `${label}: ${percent}%` });
+  };
+  report(0);
+  return report;
+}
+
+function updateJlinkProgressFromOutput(text, report, label = 'Programming') {
+  if (typeof report !== 'function') return;
+  const value = String(text || '');
+  // Recent J-Link versions may emit an explicit percent while writing flash.
+  // Map that physical-write percentage into the 35..95% part of the complete
+  // operation, leaving room for connect/reset/finalization.
+  const percentages = [...value.matchAll(/(?:^|\s)(\d{1,3})\s*%/g)];
+  if (percentages.length) {
+    const raw = Math.max(...percentages.map((match) => Number(match[1])).filter(Number.isFinite));
+    if (Number.isFinite(raw)) report(35 + Math.min(100, raw) * 0.60, `${label}: ${Math.min(100, raw)}% flash write`);
+  }
+  if (/Connecting to target|Connected successfully|Cortex-[AM]|Found SWD-DP/i.test(value)) report(25, 'Connected to J-Link target');
+  if (/Downloading file|loadfile|Flash download|Writing target memory|Programming flash/i.test(value)) report(40, `${label} device flash...`);
+  if (/O\.K\.|Flash download.*Total|Downloading file.*finished|Verify.*O\.K/i.test(value)) report(95, 'Finalizing J-Link operation...');
+}
+
+async function runJlinkCommander(setup, lines, channel, progress, label = 'Programming') {
   const tools = resolveJlinkTools();
   if (!tools.commander) {
     throw new Error('J-Link Commander was not found. Set mikrobusRust.jlinkCommanderPath or install SEGGER J-Link.');
   }
   const device = normalizeJlinkDeviceName(setup.mcuName);
   const commandFile = jlinkCommandFile(lines);
+  const report = jlinkProgressReporter(progress, label);
   channel.appendLine(`Resolved J-Link Commander: ${tools.commander}`);
   channel.appendLine(`J-Link target: ${device} (MCU ${setup.mcuName})`);
+  report(10, 'Starting J-Link Commander...');
   try {
     const args = ['-device', device, '-if', 'SWD', '-speed', '4000', '-AutoConnect', '1', '-NoGui', '1', '-ExitOnError', '1', '-CommandFile', commandFile];
-    const code = await runStreaming(tools.commander, args, path.dirname(commandFile), channel);
+    const code = await runStreaming(
+      tools.commander,
+      args,
+      path.dirname(commandFile),
+      channel,
+      (text) => updateJlinkProgressFromOutput(text, report, label)
+    );
     if (code !== 0) throw new Error(`J-Link Commander failed with exit code ${code}. See the MikroBUS Rust output.`);
+    report(100, `${label}: 100%`);
   } finally {
     fs.rmSync(commandFile, { force: true });
   }
 }
 
-async function flashElfWithJlink(setup, programBinary, channel) {
-  await runJlinkCommander(setup, [
-    `device ${normalizeJlinkDeviceName(setup.mcuName)}`,
-    'connect',
-    `loadfile "${String(programBinary).replace(/\\/g, '/')}"`,
-    'r',
-    'g',
-    'exit'
-  ], channel);
+async function flashElfWithJlink(context, setup, programBinary, channel, progress, label = 'Programming') {
+  // J-Link Commander does not reliably accept Rust ELF files directly on all
+  // installations/versions. Mirror the C/J-Link workflow: convert the ELF to
+  // Intel HEX with the ARM toolchain first, then program that exact image.
+  await withCodegripHex(context, programBinary, channel, async (hexFile) => {
+    await runJlinkCommander(setup, [
+      `device ${normalizeJlinkDeviceName(setup.mcuName)}`,
+      'connect',
+      `loadfile "${String(hexFile).replace(/\\/g, '/')}"`,
+      'r',
+      'g',
+      'exit'
+    ], channel, progress, label);
+  });
 }
 
-async function eraseWithJlink(setup, channel) {
+async function eraseWithJlink(setup, channel, progress) {
   await runJlinkCommander(setup, [
     `device ${normalizeJlinkDeviceName(setup.mcuName)}`,
     'connect',
     'erase',
     'r',
     'exit'
-  ], channel);
+  ], channel, progress, 'Erasing');
 }
 
 function buildToolEnvironment(executable) {
@@ -1479,7 +1602,7 @@ function buildToolEnvironment(executable) {
   return env;
 }
 
-function runStreaming(executable, args, cwd, channel) {
+function runStreaming(executable, args, cwd, channel, onOutput) {
   return new Promise((resolve, reject) => {
     channel.appendLine(`\n$ ${[executable, ...args].join(' ')}`);
     const child = childProcess.spawn(executable, args, {
@@ -1488,8 +1611,13 @@ function runStreaming(executable, args, cwd, channel) {
       windowsHide: true,
       env: buildToolEnvironment(executable)
     });
-    child.stdout.on('data', (data) => channel.append(data.toString()));
-    child.stderr.on('data', (data) => channel.append(data.toString()));
+    const forward = (data) => {
+      const text = data.toString();
+      channel.append(text);
+      if (typeof onOutput === 'function') onOutput(text);
+    };
+    child.stdout.on('data', forward);
+    child.stderr.on('data', forward);
     child.on('error', reject);
     child.on('close', (code) => resolve(code ?? -1));
   });
@@ -1598,217 +1726,6 @@ function stopDebugServerProcess(sessionId) {
   }
 }
 
-function activeMikrobusDebugSession() {
-  const session = vscode.debug.activeDebugSession;
-  const isProbeRs = session?.type === 'mikrobus-rust-debug';
-  const isCodegrip = session?.type === 'cortex-debug' && session.configuration.__mikrobusCodegrip === true;
-  const isJlink = session?.type === 'cortex-debug' && session.configuration.__mikrobusRustJlink === true;
-  if (!session || (!isProbeRs && !isCodegrip && !isJlink)) {
-    throw new Error('No active MikroBUS Rust debug session. Start debugging a Rust file first.');
-  }
-  return session;
-}
-
-async function activeDebugThreadId(session) {
-  const response = await session.customRequest('threads');
-  const threadId = response?.threads?.[0]?.id;
-  if (threadId === undefined) {
-    throw new Error('The debugger did not report an active target thread. Pause at a source line and try again.');
-  }
-  return threadId;
-}
-
-function boundedIntegerSetting(name, fallback, minimum, maximum) {
-  const configured = Number(vscode.workspace.getConfiguration('mikrobusRust').get(name, fallback));
-  if (!Number.isFinite(configured)) return fallback;
-  return Math.min(maximum, Math.max(minimum, Math.trunc(configured)));
-}
-
-function variableDumpSettings() {
-  const configuration = vscode.workspace.getConfiguration('mikrobusRust');
-  return {
-    enabled: configuration.get('dumpVariablesOnStop', true),
-    maxDepth: boundedIntegerSetting('variableDumpMaxDepth', 5, 0, 16),
-    maxEntries: boundedIntegerSetting('variableDumpMaxEntries', 5000, 100, 20000),
-    maxValueLength: boundedIntegerSetting('variableDumpMaxValueLength', 512, 64, 8192)
-  };
-}
-
-function cancelScheduledVariableDump(sessionId) {
-  const timer = debugVariableDumpTimers.get(sessionId);
-  if (timer) clearTimeout(timer);
-  debugVariableDumpTimers.delete(sessionId);
-}
-
-function scheduleVariableDump(session, threadId, reason) {
-  if (!variableDumpSettings().enabled) return;
-  cancelScheduledVariableDump(session.id);
-  const timer = setTimeout(() => {
-    debugVariableDumpTimers.delete(session.id);
-    void dumpDebugVariablesForSession(session, threadId, reason).catch((error) => {
-      const detail = error?.message || String(error);
-      getOutputChannel().appendLine(`Automatic variable dump was unavailable: ${detail}`);
-    });
-  }, 600);
-  debugVariableDumpTimers.set(session.id, timer);
-}
-
-function sanitizeDebugText(value, maxLength) {
-  const compact = String(value ?? '').replace(/\r?\n/g, '\\n').replace(/\s+/g, ' ').trim();
-  if (compact.length <= maxLength) return compact;
-  return `${compact.slice(0, Math.max(0, maxLength - 1))}\u2026`;
-}
-
-function isExcludedDebugScope(scope) {
-  const name = String(scope?.name || '');
-  return scope?.presentationHint === 'registers' || /register|peripheral/i.test(name);
-}
-
-function isGlobalDebugScope(scope) {
-  return /static|global/i.test(String(scope?.name || ''));
-}
-
-function formatDebugVariable(variable, depth, maxValueLength) {
-  const indent = '  '.repeat(depth + 1);
-  const name = sanitizeDebugText(variable?.name || '<unnamed>', maxValueLength);
-  const type = sanitizeDebugText(variable?.type || '', maxValueLength);
-  const value = sanitizeDebugText(variable?.value || '<not available>', maxValueLength);
-  return `${indent}${name}${type ? `: ${type}` : ''} = ${value}`;
-}
-
-async function expandDebugVariables(session, variablesReference, depth, state) {
-  if (!variablesReference || state.count >= state.settings.maxEntries) {
-    if (state.count >= state.settings.maxEntries) state.truncated = true;
-    return;
-  }
-  if (state.seenReferences.has(variablesReference)) {
-    state.lines.push(`${'  '.repeat(depth + 1)}<already expanded>`);
-    return;
-  }
-  state.seenReferences.add(variablesReference);
-
-  let variables;
-  try {
-    const remaining = state.settings.maxEntries - state.count;
-    const response = await session.customRequest('variables', {
-      variablesReference,
-      start: 0,
-      count: remaining
-    });
-    variables = Array.isArray(response?.variables) ? response.variables : [];
-  } catch (error) {
-    state.lines.push(`${'  '.repeat(depth + 1)}<unable to expand: ${sanitizeDebugText(error?.message || error, state.settings.maxValueLength)}>`);
-    return;
-  }
-
-  for (const variable of variables) {
-    if (state.count >= state.settings.maxEntries) {
-      state.truncated = true;
-      break;
-    }
-    state.lines.push(formatDebugVariable(variable, depth, state.settings.maxValueLength));
-    state.count += 1;
-
-    const childReference = Number(variable?.variablesReference || 0);
-    if (!childReference) continue;
-    if (depth >= state.settings.maxDepth) {
-      state.lines.push(`${'  '.repeat(depth + 2)}<max depth reached>`);
-      continue;
-    }
-    await expandDebugVariables(session, childReference, depth + 1, state);
-  }
-}
-
-function frameDescription(frame, index, maxValueLength) {
-  const name = sanitizeDebugText(frame?.name || '<anonymous>', maxValueLength);
-  const source = frame?.source?.path || frame?.source?.name;
-  const location = source
-    ? ` @ ${sanitizeDebugText(source, maxValueLength)}${frame?.line ? `:${frame.line}` : ''}`
-    : '';
-  return `Frame ${index}: ${name}${location}`;
-}
-
-function appendVariableDump(session, text) {
-  if (vscode.debug.activeDebugSession?.id === session.id && vscode.debug.activeDebugConsole) {
-    vscode.debug.activeDebugConsole.appendLine(text);
-    return;
-  }
-  getOutputChannel().appendLine(text);
-}
-
-async function dumpDebugVariablesForSession(session, requestedThreadId, reason = 'manual') {
-  if (debugVariableDumpInProgress.has(session.id)) return;
-  debugVariableDumpInProgress.add(session.id);
-  try {
-    const settings = variableDumpSettings();
-    const threadId = requestedThreadId ?? await activeDebugThreadId(session);
-    const stackResponse = await session.customRequest('stackTrace', {
-      threadId,
-      startFrame: 0,
-      levels: 256
-    });
-    const frames = Array.isArray(stackResponse?.stackFrames) ? stackResponse.stackFrames : [];
-    if (!frames.length) {
-      throw new Error('The debugger did not expose a stack frame. Pause at a Rust source line and try again.');
-    }
-
-    const state = {
-      settings,
-      lines: [`\n=== MikroBUS Rust variables (${reason || 'stopped'}) ===`],
-      count: 0,
-      truncated: false,
-      seenReferences: new Set()
-    };
-    let includedScopes = 0;
-
-    for (let frameIndex = 0; frameIndex < frames.length && state.count < settings.maxEntries; frameIndex += 1) {
-      const frame = frames[frameIndex];
-      let scopesResponse;
-      try {
-        scopesResponse = await session.customRequest('scopes', { frameId: frame.id });
-      } catch (error) {
-        state.lines.push(frameDescription(frame, frameIndex, settings.maxValueLength));
-        state.lines.push(`  <unable to read scopes: ${sanitizeDebugText(error?.message || error, settings.maxValueLength)}>`);
-        continue;
-      }
-      const scopes = (Array.isArray(scopesResponse?.scopes) ? scopesResponse.scopes : [])
-        .filter((scope) => !isExcludedDebugScope(scope))
-        .filter((scope) => frameIndex === 0 || !isGlobalDebugScope(scope));
-      if (!scopes.length) continue;
-
-      state.lines.push(frameDescription(frame, frameIndex, settings.maxValueLength));
-      for (const scope of scopes) {
-        if (state.count >= settings.maxEntries) {
-          state.truncated = true;
-          break;
-        }
-        includedScopes += 1;
-        state.lines.push(`  [${sanitizeDebugText(scope.name || 'Variables', settings.maxValueLength)}]`);
-        await expandDebugVariables(session, Number(scope.variablesReference || 0), 0, state);
-      }
-    }
-
-    if (!includedScopes) {
-      state.lines.push('[No local, static, or global variable scopes were exposed at this stop.]');
-    } else if (!state.count) {
-      state.lines.push('[The exposed variable scopes are empty at this stop.]');
-    }
-    if (state.truncated || state.count >= settings.maxEntries) {
-      state.lines.push(`[Variable dump truncated after ${settings.maxEntries} entries.]`);
-    }
-    state.lines.push(`=== End variables (${state.count} entries) ===`);
-    appendVariableDump(session, state.lines.join('\n'));
-  } finally {
-    debugVariableDumpInProgress.delete(session.id);
-  }
-}
-
-async function dumpDebugVariables() {
-  const session = activeMikrobusDebugSession();
-  const threadId = await activeDebugThreadId(session);
-  await dumpDebugVariablesForSession(session, threadId, 'manual request');
-}
-
 function cargoTomlString(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
@@ -1865,25 +1782,86 @@ async function buildCurrentRustSourceForDebug(binding, setup, source, channel) {
   });
 }
 
-async function flashCargoBinWithProbeRs(binding, setup, binName, channel) {
-  const baseArgs = ['flash'];
-  if (binName) baseArgs.push('--bin', binName);
-  baseArgs.push('--chip', setup.mcuName);
-  try {
-    await executeChecked(channel, 'cargo', baseArgs, binding.sdkRoot);
-  } catch (error) {
-    channel.appendLine('probe-rs normal SWD connection failed; retrying once with connect-under-reset.');
-    await executeChecked(channel, 'cargo', [...baseArgs, '--connect-under-reset'], binding.sdkRoot);
-  }
+function probeRsProgressReporter(progress, label = 'Programming') {
+  let lastPercent = 0;
+  const report = (value, message = undefined) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    const percent = Math.max(0, Math.min(100, Math.round(numeric)));
+    const increment = Math.max(0, percent - lastPercent);
+    lastPercent = Math.max(lastPercent, percent);
+    progress?.report({ increment, message: message || `${label}: ${percent}%` });
+  };
+  report(0);
+  return report;
 }
 
-async function buildCurrentRustSource(binding, setup, source, channel, flash) {
+function updateProbeRsProgressFromOutput(text, report, label = 'Programming') {
+  if (typeof report !== 'function') return;
+  const value = String(text || '');
+  const stageRanges = {
+    erasing: [10, 35],
+    programming: [35, 88],
+    verifying: [88, 98]
+  };
+  for (const match of value.matchAll(/(Erasing|Programming|Verifying)[^\r\n]*?(\d{1,3})%/gi)) {
+    const stage = match[1].toLowerCase();
+    const raw = Math.max(0, Math.min(100, Number(match[2])));
+    const [start, end] = stageRanges[stage];
+    const mapped = start + ((end - start) * raw / 100);
+    report(mapped, `${match[1]}: ${raw}%`);
+  }
+  if (/chip erase|erase sector|Erasing/i.test(value)) report(12, 'Erasing target flash...');
+  if (/Programming/i.test(value)) report(38, `${label} target flash...`);
+  if (/Verifying/i.test(value)) report(89, 'Verifying target flash...');
+  if (/Finished in|Finished.*success|Programming.*100%/i.test(value)) report(98, 'Finalizing probe-rs operation...');
+}
+
+async function flashElfWithProbeRs(setup, programBinary, channel, progress, label = 'Programming', resetAfter = true) {
+  const executable = resolveToolExecutable('probe-rs');
+  const report = probeRsProgressReporter(progress, label);
+  const baseArgs = ['download', programBinary, '--chip', setup.mcuName, '--protocol', 'swd'];
+  channel.appendLine(`Resolved probe-rs: ${executable}`);
+  channel.appendLine(`probe-rs version: ${probeRsVersion(executable) || 'unknown'}`);
+  channel.appendLine(`probe-rs target: ${setup.mcuName} · auto-detect debug probe`);
+  report(5, 'Connecting with probe-rs...');
+
+  const run = async (args) => {
+    const code = await runStreaming(
+      executable,
+      args,
+      path.dirname(programBinary),
+      channel,
+      (text) => updateProbeRsProgressFromOutput(text, report, label)
+    );
+    if (code !== 0) throw new Error(`probe-rs ${args.join(' ')} failed with exit code ${code}. See the MikroBUS Rust output.`);
+  };
+
+  try {
+    await run(baseArgs);
+  } catch (error) {
+    channel.appendLine('probe-rs normal SWD connection failed; retrying once with connect-under-reset.');
+    report(8, 'Retrying connection under reset...');
+    await run([...baseArgs, '--connect-under-reset']);
+  }
+
+  if (resetAfter) {
+    report(98, 'Resetting target...');
+    // `probe-rs download` programs the image but does not guarantee the target
+    // is reset into the newly-flashed application. Make ordinary Flash behave
+    // like a programmer operation: reset and run the MCU afterwards.
+    await run(['reset', '--chip', setup.mcuName, '--protocol', 'swd']);
+  }
+  report(100, `${label}: 100%`);
+}
+
+async function buildCurrentRustSource(binding, setup, source, channel, flash, progress) {
   const binName = 'mikrobus_current';
   return withTemporaryRustBinary(binding, source, binName, async () => {
     await executeChecked(channel, 'cargo', ['build', '--bin', binName], binding.sdkRoot);
     const programBinary = resolveBuiltNamedBinary(binding, setup, binName);
     if (flash) {
-      await flashCargoBinWithProbeRs(binding, setup, binName, channel);
+      await flashElfWithProbeRs(setup, programBinary, channel, progress);
     }
     return { programBinary, binName };
   });
@@ -1969,96 +1947,284 @@ async function continueFromResetToEntry(session) {
   channel.appendLine('Debugger stayed halted after reset. Press Continue once to run to the first source breakpoint.');
 }
 
-async function debugCurrentRustFile(context) {
+function isArmRustTarget(setup) {
+  const target = String(setup?.target || '').toLowerCase();
+  return target.startsWith('thumb') || target.startsWith('arm');
+}
+
+function resolveProbeRsGdbClient(context, setup) {
+  if (!isArmRustTarget(setup)) return undefined;
+  try {
+    return resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
+  } catch {
+    return findExecutableOnPath('gdb-multiarch') || findExecutableOnPath('gdb');
+  }
+}
+
+function probeRsGdbCppDebugConfiguration(setup, binding, source, programBinary, gdbPath, debugPort, token) {
+  return {
+    type: 'cppdbg',
+    request: 'launch',
+    name: `MikroBUS Rust probe-rs: ${setup.mcuName}`,
+    presentation: { hidden: true },
+    program: programBinary,
+    cwd: binding.sdkRoot,
+    MIMode: 'gdb',
+    miDebuggerPath: gdbPath,
+    miDebuggerServerAddress: `127.0.0.1:${debugPort}`,
+    // This is a bare-metal Arm remote target. Without this hint MIEngine may
+    // report `Debuggee TargetArchitecture not detected, assuming x86_64` and
+    // apply host-oriented debugger behaviour.
+    targetArchitecture: 'arm',
+    // probe-rs exposes one embedded inferior/core here; do not use GDB's
+    // extended-remote process-management mode.
+    useExtendedRemote: false,
+    stopAtEntry: false,
+    externalConsole: false,
+    launchCompleteCommand: 'exec-continue',
+    setupCommands: [
+      {
+        description: 'Allow access to all MCU memory regions',
+        text: '-gdb-set mem inaccessible-by-default off',
+        ignoreFailures: true
+      },
+      {
+        description: 'Select source language from DWARF debug information',
+        text: '-gdb-set language auto',
+        ignoreFailures: true
+      },
+      {
+        description: 'Disable scheduler locking for the single-core bare-metal target',
+        text: '-gdb-set scheduler-locking off',
+        ignoreFailures: true
+      },
+      {
+        description: 'Keep execution on the single embedded inferior only',
+        text: '-gdb-set schedule-multiple off',
+        ignoreFailures: true
+      },
+      {
+        description: 'Enable GDB pretty printing',
+        text: '-enable-pretty-printing',
+        ignoreFailures: true
+      }
+    ],
+    __mikrobusProbeRsGdb: true,
+    __mikrobusProbeRsToken: token,
+    __mikrobusRustSource: source
+  };
+}
+
+async function waitForChildStartup(child, timeoutMs, label) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (child.__mikrobusStartError) {
+      throw new Error(`${label} could not be started: ${child.__mikrobusStartError.message}`);
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`${label} exited before VS Code could connect (exit code ${child.exitCode}).`);
+    }
+    await delay(50);
+  }
+  if (child.exitCode !== null) {
+    throw new Error(`${label} exited before VS Code could connect (exit code ${child.exitCode}).`);
+  }
+}
+
+function parseProbeRsSemver(versionText) {
+  const match = String(versionText || '').match(/(?:probe-rs\s+)?v?(\d+)\.(\d+)\.(\d+)/i);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function semverAtLeast(version, minimum) {
+  if (!Array.isArray(version) || !Array.isArray(minimum)) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if ((version[index] || 0) > (minimum[index] || 0)) return true;
+    if ((version[index] || 0) < (minimum[index] || 0)) return false;
+  }
+  return true;
+}
+
+async function startProbeRsGdbServer(setup, binding, channel) {
+  const executable = resolveToolExecutable('probe-rs');
+  const versionText = probeRsVersion(executable);
+  const version = parseProbeRsSemver(versionText);
+  channel.appendLine(`probe-rs version: ${versionText || 'unknown'}`);
+  // 0.32.0 contains important GDB fixes for scheduler-locking and hardware
+  // breakpoints after reset. Source-level GDB next/step depends on temporary
+  // hardware breakpoints, so older versions can run past the requested line
+  // until the frontend interrupts the MCU with SIGINT.
+  if (version && !semverAtLeast(version, [0, 32, 0])) {
+    throw new Error(
+      `probe-rs ${versionText} is too old for reliable Rust source stepping. ` +
+      'Update probe-rs to 0.32.0 or newer from Rust Environment → Development Environment, then retry debugging.'
+    );
+  }
+  const port = await findAvailableDebugPort();
+  const args = [
+    'gdb',
+    '--chip', setup.mcuName,
+    '--protocol', 'swd',
+    '--speed', '4000',
+    '--gdb-connection-string', `127.0.0.1:${port}`,
+    '--reset-halt'
+  ];
+  channel.appendLine(`Starting probe-rs GDB server on 127.0.0.1:${port}.`);
+  channel.appendLine(`$ ${[executable, ...args].join(' ')}`);
+  const child = childProcess.spawn(executable, args, {
+    cwd: binding.sdkRoot,
+    shell: false,
+    windowsHide: true,
+    env: buildToolEnvironment(executable)
+  });
+  child.stdout.on('data', (data) => channel.append(`[probe-rs gdb] ${data.toString()}`));
+  child.stderr.on('data', (data) => channel.append(`[probe-rs gdb] ${data.toString()}`));
+  child.on('error', (error) => {
+    child.__mikrobusStartError = error;
+    channel.appendLine(`[probe-rs gdb] failed to start: ${error.message}`);
+  });
+  child.on('close', (code) => channel.appendLine(`[probe-rs gdb] server exited with code ${code ?? -1}.`));
+  try {
+    await waitForChildStartup(child, process.platform === 'win32' ? 1300 : 800, 'probe-rs GDB server');
+  } catch (error) {
+    try { if (!child.killed) child.kill(); } catch {}
+    throw error;
+  }
+  return { child, port, executable };
+}
+
+async function stopProbeRsGdbServer(runtime) {
+  const child = runtime?.child;
+  if (!child) return;
+  try {
+    if (!child.killed && child.exitCode === null) child.kill();
+  } catch {}
+}
+
+function rustCodegripCppDebugConfiguration(setup, binding, source, programBinary, gdbPath, debugPort, token) {
+  return {
+    type: 'cppdbg',
+    request: 'launch',
+    name: `MikroBUS Rust CODEGRIP: ${setup.mcuName}`,
+    presentation: { hidden: true },
+    program: programBinary,
+    cwd: binding.sdkRoot,
+    MIMode: 'gdb',
+    miDebuggerPath: gdbPath,
+    miDebuggerServerAddress: `127.0.0.1:${debugPort}`,
+    stopAtEntry: false,
+    externalConsole: false,
+    // CODEGRIP has already programmed the ELF image and starts the MCU halted.
+    // Let cppdbg connect, install VS Code breakpoints, and continue the existing
+    // target. This matches the stable GCC/C CODEGRIP debug lifecycle and avoids
+    // Cortex-Debug's server-specific monitor reset commands.
+    launchCompleteCommand: 'exec-continue',
+    setupCommands: [
+      {
+        description: 'Allow access to all MCU memory regions',
+        text: '-gdb-set mem inaccessible-by-default off',
+        ignoreFailures: true
+      },
+      {
+        description: 'Select source language from DWARF debug information',
+        text: '-gdb-set language auto',
+        ignoreFailures: true
+      },
+      {
+        description: 'Enable GDB pretty printing',
+        text: '-enable-pretty-printing',
+        ignoreFailures: true
+      }
+    ],
+    __mikrobusCodegripRust: true,
+    __mikrobusCodegripToken: token,
+    __mikrobusRustSource: source
+  };
+}
+
+async function debugCurrentRustFile(context, debugOptions = {}) {
   const { binding, setup } = requireWorkspaceBinding(context);
   const channel = getOutputChannel();
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz · Debug current Rust file ===`);
   channel.appendLine(`Reusable setup: ${binding.sdkRoot}`);
 
-  const source = getActiveRustSource(binding);
+  const source = debugOptions.source ? path.resolve(debugOptions.source) : getActiveRustSource(binding);
+  if (!binding.workspaceFolder || !isPathWithin(binding.workspaceFolder.uri.fsPath, source) || path.extname(source).toLowerCase() !== '.rs') {
+    throw new Error(`The Rust source selected for debugging is outside the active workspace: ${source}`);
+  }
   const editor = vscode.window.activeTextEditor;
-  if (editor) await editor.document.save();
+  if (editor?.document?.uri?.scheme === 'file' && sameFilePath(editor.document.uri.fsPath, source)) {
+    await editor.document.save();
+  }
 
   const { programBinary } = await buildCurrentRustSourceForDebug(binding, setup, source, channel);
   if (isCodegripProgrammer(setup)) {
-    const cortexDebug = vscode.extensions.getExtension('marus25.cortex-debug');
-    if (!cortexDebug) {
-      throw new Error('CODEGRIP debugging requires the Cortex-Debug extension (marus25.cortex-debug). Install it and reload VS Code.');
+    const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
+    if (!cppTools) {
+      throw new Error('CODEGRIP Rust debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
     }
-    await cortexDebug.activate();
+    await cppTools.activate();
     const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
-    const objdumpPath = resolveArmGccExecutable(context, 'arm-none-eabi-objdump');
-    const armToolchainPath = path.dirname(gdbPath);
-    const options = await codegripOperationOptions(context, setup, channel);
     const entry = ensureEntryBreakpoint(source);
     channel.appendLine(`Debug source: ${source}`);
     channel.appendLine(`Debug ELF: ${programBinary}`);
     channel.appendLine(`Resolved ARM GDB: ${gdbPath}`);
-    channel.appendLine(`Resolved ARM objdump: ${objdumpPath}`);
-    channel.appendLine(`ARM toolchain directory: ${armToolchainPath}`);
     channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
 
-    const runtime = await withCodegripHex(context, programBinary, channel, (hexFile) => (
-      prepareCodegripDebug({ ...options, hexFile })
-    ));
+    let runtime;
     const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    pendingCodegripDebugLaunch = {
-      token,
-      runtime,
-      ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
-    };
     try {
-      channel.appendLine(`Attaching Cortex-Debug to CODEGRIP GDB at 127.0.0.1:${runtime.debugPort}.`);
-      const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
-        type: 'cortex-debug',
-        // CODEGRIP already programmed the image with debugEnable=true. Cortex-Debug
-        // must only attach to the externally managed CODEGRIP GDB server; using a
-        // launch request makes Cortex-Debug assume responsibility for flash/reset.
-        request: 'attach',
-        name: `MikroBUS Rust CODEGRIP: ${setup.mcuName}`,
-        servertype: 'external',
-        gdbTarget: `127.0.0.1:${runtime.debugPort}`,
-        executable: programBinary,
-        gdbPath,
-        armToolchainPath,
-        objdumpPath,
-        toolchainPrefix: 'arm-none-eabi',
-        cwd: binding.sdkRoot,
-        device: setup.mcuName,
-        interface: 'swd',
-        // External Cortex-Debug servers otherwise inherit OpenOCD-style attach
-        // commands (for example `monitor halt`). CODEGRIP target setup already
-        // requested Halt on Connect, so avoid sending server-specific monitor
-        // commands that CodegripGdbServer may not implement. Cortex-Debug itself
-        // adds `target-select extended-remote <gdbTarget>` before this sequence.
-        overrideAttachCommands: [
-          'set mem inaccessible-by-default off'
-        ],
-        // Keep raw GDB/MI traffic visible while CODEGRIP support is being brought
-        // up. This makes any remaining GDB remote-protocol error immediately clear.
-        showDevDebugOutput: 'raw',
-        __mikrobusCodegrip: true,
-        __mikrobusCodegripToken: token
+      runtime = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `MikroBUS Rust: Programming ${setup.mcuName} with CODEGRIP for debugging...`,
+        cancellable: false
+      }, async (progress) => {
+        const report = codegripProgressReporter(progress, 'Programming');
+        const options = await codegripOperationOptions(context, setup, channel, report);
+        const prepared = await withCodegripHex(context, programBinary, channel, (hexFile) => (
+          prepareCodegripDebug({ ...options, hexFile })
+        ));
+        finishCodegripProgress(progress, report, 'Programming');
+        progress.report({ message: 'Starting debug server...' });
+        return prepared;
       });
-      if (!started) throw new Error('VS Code did not start the CODEGRIP debug session.');
+      pendingCodegripDebugLaunch = {
+        token,
+        runtime,
+        ownedBreakpoint: entry.owned ? entry.breakpoint : undefined,
+        source
+      };
+      channel.appendLine(`Starting cppdbg against CODEGRIP GDB at 127.0.0.1:${runtime.debugPort}.`);
+      const configuration = rustCodegripCppDebugConfiguration(
+        setup,
+        binding,
+        source,
+        programBinary,
+        gdbPath,
+        runtime.debugPort,
+        token
+      );
+      const startOptions = debugOptions.restartParentSession ? {
+        parentSession: debugOptions.restartParentSession,
+        lifecycleManagedByParent: false,
+        compact: true,
+        consoleMode: vscode.DebugConsoleMode?.MergeWithParent,
+        suppressDebugView: true
+      } : undefined;
+      const started = await vscode.debug.startDebugging(binding.workspaceFolder, configuration, startOptions);
+      if (!started) throw new Error('VS Code did not start the CODEGRIP Rust debug session.');
       return;
     } catch (error) {
       if (pendingCodegripDebugLaunch?.token === token) pendingCodegripDebugLaunch = undefined;
       if (entry.owned) vscode.debug.removeBreakpoints([entry.breakpoint]);
-      await stopCodegripServer(runtime);
+      if (runtime) await stopCodegripServer(runtime);
       throw error;
     }
   }
 
-  const jlinkSelected = isJlinkProgrammer(setup);
-  const localJlinkProbes = jlinkSelected ? findLocalJlinkUsbProbes() : [];
-  const nativeJlink = shouldUseNativeJlink(setup, localJlinkProbes);
-
-  if (jlinkSelected && !nativeJlink) {
-    channel.appendLine('SEGGER J-Link is selected, but no physical USB J-Link probe was detected.');
-    channel.appendLine('Using probe-rs with the connected onboard/debug probe instead (for Nucleo boards this is normally ST-LINK).');
-  }
+  const nativeJlink = shouldUseNativeJlink(setup);
 
   if (nativeJlink) {
     const cortexDebug = vscode.extensions.getExtension('marus25.cortex-debug');
@@ -2082,6 +2248,17 @@ async function debugCurrentRustFile(context) {
     channel.appendLine(`J-Link target: ${device} (MCU ${setup.mcuName})`);
     channel.appendLine(`J-Link speed: 4000 kHz`);
     channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
+
+    // Mirror the known-good C/J-Link path: program first with J-Link Commander,
+    // then let Cortex-Debug own only the J-Link GDB server/debug lifecycle.
+    // This avoids probe-rs entirely and prevents a second implicit flash.
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `MikroBUS Rust: Programming ${setup.mcuName} with J-Link for debugging...`,
+      cancellable: false
+    }, async (progress) => {
+      await flashElfWithJlink(context, setup, programBinary, channel, progress, 'Programming for debug');
+    });
 
     pendingDebugLaunch = {
       source,
@@ -2109,6 +2286,7 @@ async function debugCurrentRustFile(context) {
       // fallback for DWARF line tables that place the function symbol on its
       // declaration rather than its first executable statement.
       runToEntryPoint: 'main',
+      loadFiles: [],
       showDevDebugOutput: 'none',
       __mikrobusRustJlink: true
     });
@@ -2125,12 +2303,66 @@ async function debugCurrentRustFile(context) {
   channel.appendLine(`Debug source: ${source}`);
   channel.appendLine(`Debug ELF: ${programBinary}`);
   channel.appendLine(`Resolved probe-rs: ${probeRsExecutable}`);
-  channel.appendLine(`Programmer profile: ${setup.programmerName || 'SEGGER J-Link'} (${setup.programmerUid || 'SEGGER_JLINK'})`);
+  channel.appendLine(`Programmer profile: ${setup.programmerName || PROBE_RS_PROGRAMMER_NAME} (${setup.programmerUid || PROBE_RS_PROGRAMMER_UID})`);
   channel.appendLine(`Entry breakpoint: ${path.basename(source)}:${entry.line + 1}`);
 
+  // probe-rs' native DAP statement-step implementation can time out when a
+  // source-level step crosses a long-running peripheral call. For ARM Rust
+  // targets, use probe-rs as the universal hardware/GDB server and let GDB do
+  // source-level stepping. This keeps ST-Link, J-Link, CMSIS-DAP and any other
+  // probe supported by probe-rs auto-detection while avoiding the DAP
+  // "Long running operations between debug steps" failure.
+  const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
+  const probeRsGdbPath = resolveProbeRsGdbClient(context, setup);
+  if (cppTools && probeRsGdbPath) {
+    await cppTools.activate();
+    channel.appendLine(`Resolved GDB for probe-rs: ${probeRsGdbPath}`);
+    let runtime;
+    const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `MikroBUS Rust: Programming ${setup.mcuName} with probe-rs for debugging...`,
+        cancellable: false
+      }, async (progress) => {
+        await flashElfWithProbeRs(setup, programBinary, channel, progress, 'Programming for debug', false);
+      });
+      runtime = await startProbeRsGdbServer(setup, binding, channel);
+      pendingProbeRsGdbLaunch = {
+        token,
+        runtime,
+        ownedBreakpoint: entry.owned ? entry.breakpoint : undefined,
+        source
+      };
+      const started = await vscode.debug.startDebugging(
+        binding.workspaceFolder,
+        probeRsGdbCppDebugConfiguration(
+          setup,
+          binding,
+          source,
+          programBinary,
+          probeRsGdbPath,
+          runtime.port,
+          token
+        )
+      );
+      if (!started) throw new Error('VS Code did not start the probe-rs/GDB Rust debug session.');
+      return;
+    } catch (error) {
+      if (pendingProbeRsGdbLaunch?.token === token) pendingProbeRsGdbLaunch = undefined;
+      if (entry.owned) vscode.debug.removeBreakpoints([entry.breakpoint]);
+      if (runtime) await stopProbeRsGdbServer(runtime);
+      throw error;
+    }
+  }
+
+  channel.appendLine(
+    'probe-rs/GDB source stepping is unavailable because Microsoft C/C++ or a compatible GDB client was not found; falling back to native probe-rs DAP.'
+  );
   pendingDebugLaunch = {
     source,
-    ownedBreakpoint: entry.owned ? entry.breakpoint : undefined
+    ownedBreakpoint: entry.owned ? entry.breakpoint : undefined,
+    kind: 'probe-rs-dap'
   };
 
   const started = await vscode.debug.startDebugging(binding.workspaceFolder, {
@@ -2140,8 +2372,6 @@ async function debugCurrentRustFile(context) {
     cwd: binding.sdkRoot,
     chip: setup.mcuName,
     wireProtocol: 'Swd',
-    // Normal SWD attach is considerably faster for onboard ST-LINK/CMSIS-DAP.
-    // Flash commands retry under reset only if the normal connection fails.
     connectUnderReset: false,
     flashingConfig: {
       flashingEnabled: true,
@@ -2164,15 +2394,12 @@ async function debugCurrentRustFile(context) {
 async function runBoundWorkspaceAction(context, action) {
   const { binding, setup } = requireWorkspaceBinding(context);
   const useCodegrip = isCodegripProgrammer(setup);
-  const jlinkSelected = isJlinkProgrammer(setup);
-  const localJlinkProbes = jlinkSelected ? findLocalJlinkUsbProbes() : [];
-  const useJlink = shouldUseNativeJlink(setup, localJlinkProbes);
-  const useProbeRsFallback = jlinkSelected && !useJlink;
+  const useJlink = shouldUseNativeJlink(setup);
 
   if (action === 'erase') {
     const confirmation = await vscode.window.showWarningMessage(
       `Erase all flash memory on ${setup.mcuName}?`,
-      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\nProgrammer: ${setup.programmerName || setup.programmerUid}\n\nThis will erase the MCU flash through ${useCodegrip ? 'CODEGRIP' : useJlink ? 'SEGGER J-Link' : useProbeRsFallback ? 'probe-rs using the connected onboard/debug probe' : 'probe-rs'}. The configured setup itself will not be removed.` },
+      { modal: true, detail: `Project: ${binding.workspaceFolder?.uri?.fsPath || ''}\nReusable setup: ${binding.sdkRoot}\nMCU: ${setup.mcuName}\nProgrammer: ${setup.programmerName || setup.programmerUid}\n\nThis will erase the MCU flash through ${useCodegrip ? 'CODEGRIP' : useJlink ? 'SEGGER J-Link' : 'probe-rs'}. The configured setup itself will not be removed.` },
       'Erase MCU'
     );
     if (confirmation !== 'Erase MCU') return;
@@ -2182,22 +2409,20 @@ async function runBoundWorkspaceAction(context, action) {
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz ===`);
   channel.appendLine(`Reusable setup: ${binding.sdkRoot}`);
-  if (useProbeRsFallback) {
-    channel.appendLine('No physical USB J-Link probe detected; using probe-rs with the connected onboard/debug probe.');
-  }
 
   await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
-    title: `MikroBUS Rust: ${action === 'erase' ? 'Erasing' : action === 'flash' ? 'Flashing' : 'Building'} ${setup.mcuName}...`,
+    title: `MikroBUS Rust: ${action === 'erase' ? 'Erasing' : ['flash', 'flashCurrent', 'buildFlashCurrent'].includes(action) ? 'Flashing' : 'Building'} ${setup.mcuName}...`,
     cancellable: false
-  }, async () => {
+  }, async (progress) => {
+    progress.report({ message: action === 'erase' ? 'Preparing programmer...' : 'Building project...' });
     if (action === 'buildFlashCurrent' || action === 'flashCurrent') {
       const source = getActiveRustSource(binding);
       const editor = vscode.window.activeTextEditor;
       if (editor) await editor.document.save();
-      const result = await buildCurrentRustSource(binding, setup, source, channel, !useCodegrip && !useJlink);
-      if (useCodegrip) await flashElfWithCodegrip(context, setup, result.programBinary, channel);
-      else if (useJlink) await flashElfWithJlink(setup, result.programBinary, channel);
+      const result = await buildCurrentRustSource(binding, setup, source, channel, !useCodegrip && !useJlink, progress);
+      if (useCodegrip) await flashElfWithCodegrip(context, setup, result.programBinary, channel, progress);
+      else if (useJlink) await flashElfWithJlink(context, setup, result.programBinary, channel, progress);
       return;
     }
     if (action === 'buildCurrent') {
@@ -2214,20 +2439,23 @@ async function runBoundWorkspaceAction(context, action) {
     if (action === 'flash') {
       if (useCodegrip) {
         await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
-        await flashElfWithCodegrip(context, setup, resolveBuiltProgramBinary(binding, setup), channel);
+        await flashElfWithCodegrip(context, setup, resolveBuiltProgramBinary(binding, setup), channel, progress);
       } else if (useJlink) {
         await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
-        await flashElfWithJlink(setup, resolveBuiltProgramBinary(binding, setup), channel);
+        await flashElfWithJlink(context, setup, resolveBuiltProgramBinary(binding, setup), channel, progress);
       } else {
-        await flashCargoBinWithProbeRs(binding, setup, undefined, channel);
+        await executeChecked(channel, 'cargo', ['build'], binding.sdkRoot);
+        await flashElfWithProbeRs(setup, resolveBuiltProgramBinary(binding, setup), channel, progress);
       }
       return;
     }
     if (action === 'erase') {
       if (useCodegrip) {
-        await eraseCodegrip(await codegripOperationOptions(context, setup, channel));
+        const report = codegripProgressReporter(progress, 'Erasing');
+        await eraseCodegrip(await codegripOperationOptions(context, setup, channel, report));
+        finishCodegripProgress(progress, report, 'Erasing');
       } else if (useJlink) {
-        await eraseWithJlink(setup, channel);
+        await eraseWithJlink(setup, channel, progress);
       } else {
         await executeChecked(channel, 'probe-rs', ['erase', '--chip', setup.mcuName], binding.sdkRoot);
       }
@@ -2543,8 +2771,8 @@ async function handleMcuMessage(message, panel, context) {
       mcuCardBspPath: setup.mcuCardBspPath,
       shieldUid: setup.shieldUid,
       shieldName: setup.shieldName,
-      programmerUid: setup.programmerUid || 'SEGGER_JLINK',
-      programmerName: setup.programmerName || 'SEGGER J-Link',
+      programmerUid: setup.programmerUid || PROBE_RS_PROGRAMMER_UID,
+      programmerName: setup.programmerName || PROBE_RS_PROGRAMMER_NAME,
       codegripConnection: setup.codegripConnection
     };
     const result = await vscode.window.withProgress({
@@ -2781,8 +3009,22 @@ function resolveBoardMcuOption(databasePath, boardUid, mcuName) {
   return readBoardMcuOptions(databasePath, boardUid).find((item) => String(item.mcuName || '').toLowerCase() === target);
 }
 
+function universalProbeRsProgrammer() {
+  return {
+    uid: PROBE_RS_PROGRAMMER_UID,
+    name: PROBE_RS_PROGRAMMER_NAME,
+    vendor: 'probe-rs',
+    kind: 'universal',
+    transport: 'Auto-detect',
+    interface: 'SWD / JTAG',
+    priority: -1000,
+    config: {},
+    universal: true
+  };
+}
+
 function readProgrammersForDevice(databasePath, mcuName) {
-  return withDatabase(databasePath, (db) => db.prepare(`
+  const databaseProgrammers = withDatabase(databasePath, (db) => db.prepare(`
     SELECT
       Programmer.UID AS uid,
       Programmer.NAME AS name,
@@ -2800,6 +3042,13 @@ function readProgrammersForDevice(databasePath, mcuName) {
     const normalized = normalizeSqlRow(row);
     return { ...normalized, config: parseDatabaseJson(normalized.configJson) };
   }));
+
+  // probe-rs is a universal Rust backend and must not depend on DeviceToProgrammer.
+  // Vendor-specific CODEGRIP/J-Link availability still comes from the database.
+  const withoutDuplicateProbeRs = databaseProgrammers.filter(
+    (programmer) => String(programmer.uid || '').toUpperCase() !== PROBE_RS_PROGRAMMER_UID
+  );
+  return [universalProbeRsProgrammer(), ...withoutDuplicateProbeRs];
 }
 
 function readShieldsForBoard(databasePath, boardUid) {
@@ -3241,7 +3490,7 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   }
 
   const metadata = readMcuMetadata(paths.database, mcuName);
-  const programmerUid = String(payload.programmerUid || 'SEGGER_JLINK').trim();
+  const programmerUid = String(payload.programmerUid || PROBE_RS_PROGRAMMER_UID).trim();
   const programmers = readProgrammersForDevice(paths.database, mcuName);
   const selectedProgrammer = programmers.find((programmer) => programmer.uid === programmerUid);
   if (!selectedProgrammer) {
@@ -3674,11 +3923,11 @@ function getMcuHtml(webview, extensionUri) {
         <section id="systemClockCard" class="clockSection card">
           <div>
             <h3>System clock and programmer</h3>
-            <p>Changing the clock updates <code>FOSC_KHZ_VALUE</code>. Available programmers come from <code>DeviceToProgrammer</code>.</p>
+            <p>Changing the clock updates <code>FOSC_KHZ_VALUE</code>. <code>probe-rs</code> is always available and auto-detects supported probes. CODEGRIP, J-Link and other vendor programmer choices come from <code>DeviceToProgrammer</code>.</p>
           </div>
           <div class="clockControls">
-            <label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
-            <label class="clockInput">Programmer<select id="programmerSelect"></select></label>
+            <label id="programmerField" class="clockInput">Programmer<select id="programmerSelect"></select></label>
+            <label id="clockField" class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
           </div>
         </section>
 
@@ -3802,12 +4051,19 @@ module.exports = {
     resolveCodegripPacksPath,
     codegripOperationOptions,
     codegripDiscoveryOptions,
+    codegripProgressReporter,
+    probeRsProgressReporter,
+    updateProbeRsProgressFromOutput,
+    jlinkProgressReporter,
+    updateJlinkProgressFromOutput,
+    rustCodegripCppDebugConfiguration,
+    probeRsGdbCppDebugConfiguration,
+    resolveProbeRsGdbClient,
+    parseProbeRsSemver,
+    semverAtLeast,
+    isCodegripRestartRequest,
+    isCodegripFinalStopRequest,
     buildToolEnvironment,
-    sanitizeDebugText,
-    isExcludedDebugScope,
-    isGlobalDebugScope,
-    formatDebugVariable,
-    expandDebugVariables,
     validateDatabaseSchema,
     readBoardList,
     readBoardMcuOptions,
@@ -3827,6 +4083,7 @@ module.exports = {
     readCargoPackageName,
     resolveBuiltProgramBinary,
     findMainEntryLine,
+    isProbeRsProgrammer,
     isCodegripProgrammer,
     isJlinkProgrammer,
     findLocalJlinkUsbProbes,

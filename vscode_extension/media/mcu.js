@@ -484,7 +484,7 @@
       const option = document.createElement('option');
       option.value = programmer.uid;
       option.textContent = `${programmer.name} · ${programmer.interface || programmer.transport || ''}`;
-      option.selected = setup?.programmerUid ? setup.programmerUid === programmer.uid : programmer.uid === 'SEGGER_JLINK';
+      option.selected = setup?.programmerUid ? setup.programmerUid === programmer.uid : programmer.uid === 'PROBE_RS';
       return option;
     }));
     updateProgrammerUi();
