@@ -1950,7 +1950,19 @@ endfunction()
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.7.58');
+  assert.strictEqual(packageJson.version, '0.8.0');
+  assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
+  assert.strictEqual(packageJson.author, 'IvanRuzavin');
+  assert.strictEqual(packageJson.license, 'MIT');
+  assert.match(packageJson.description || '', /Embedded Rust and C development/i);
+  const publicReadme = fs.readFileSync(path.join(__dirname, '..', 'readme.md'), 'utf8');
+  assert.match(publicReadme, /# MikroBUS Embedded Tools/);
+  assert.match(publicReadme, /# Rust support/);
+  assert.match(publicReadme, /# C support/);
+  assert.match(publicReadme, /\| Compiler family \| Architectures \/ MCU families \|/);
+  assert.match(publicReadme, /\| Programmer \/ debugger \| Programming \| Debugging \|/);
+  assert.strictEqual(/##?\s+v0\.|changelog/i.test(publicReadme), false);
+  assert.strictEqual(fs.existsSync(path.join(__dirname, '..', 'LICENSE')), true);
   assert.strictEqual(packageJson.icon, 'media/mikrobus-module-3d-transparent.png');
   assert.strictEqual(
     packageJson.contributes.viewsContainers.activitybar.find((item) => item.id === 'mikrobusRust')?.icon,

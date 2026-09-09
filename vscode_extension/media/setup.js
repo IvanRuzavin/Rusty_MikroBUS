@@ -52,9 +52,6 @@
     if (!['win32', 'linux'].includes(message.platform)) {
       notice.classList.remove('hidden');
       notice.textContent = 'System dependency installation is currently implemented for Windows and Linux. Extension-managed package detection is still shown below.';
-    } else if (message.platform === 'linux') {
-      notice.classList.remove('hidden');
-      notice.textContent = 'Linux profile active: ST-Link does not need the Windows driver. Non-root debug-probe access is checked through the probe-rs udev rules instead.';
     } else {
       notice.classList.add('hidden');
       notice.textContent = '';

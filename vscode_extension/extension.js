@@ -53,6 +53,25 @@ const URLS = {
 let setupView;
 let environmentPanel;
 
+function migrateLegacyPublisherStorage(context) {
+  const configured = String(vscode.workspace.getConfiguration('mikrobusRust').get('storageRoot', '') || '').trim();
+  if (configured) return;
+
+  const currentRoot = context.globalStorageUri.fsPath;
+  const legacyRoot = path.join(path.dirname(currentRoot), 'mikroe-dev.mikrobus-rust-tools');
+  if (path.resolve(currentRoot) === path.resolve(legacyRoot) || !fs.existsSync(legacyRoot)) return;
+
+  try {
+    const currentHasData = fs.existsSync(currentRoot) && fs.readdirSync(currentRoot).length > 0;
+    if (currentHasData) return;
+
+    fs.mkdirSync(path.dirname(currentRoot), { recursive: true });
+    fs.cpSync(legacyRoot, currentRoot, { recursive: true, force: false, errorOnExist: false });
+  } catch (error) {
+    console.warn(`MikroBUS Embedded Tools: could not migrate legacy publisher storage: ${error?.message || error}`);
+  }
+}
+
 function getActiveEnvironment(context) {
   const saved = String(context.globalState.get('mikrobus.activeEnvironment', 'rust')).toLowerCase();
   return cLanguageSupport && saved === 'c' ? 'c' : 'rust';
@@ -98,6 +117,7 @@ class MikrobusSetupViewProvider {
 }
 
 function activate(context) {
+  migrateLegacyPublisherStorage(context);
   void vscode.commands.executeCommand('setContext', 'mikrobusRust.cSupportEnabled', cLanguageSupport);
   void vscode.commands.executeCommand('setContext', 'mikrobusRust.activeEnvironment', getActiveEnvironment(context));
   if (cLanguageSupport) registerCSupport(context);
