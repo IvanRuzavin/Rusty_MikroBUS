@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Embedded Tools",
   "description": "Cross-platform Rust and C MikroBUS tools with reusable NECTO-style MCU setups, managed packages and programmer integration.",
-  "version": "0.7.53",
+  "version": "0.7.56",
   "publisher": "mikroe-dev",
   "engines": {
     "vscode": "^1.101.0"
@@ -45,8 +45,7 @@
     "onCommand:mikrobusC.openClickExamples",
     "onCommand:mikrobusC.openDemoExamples",
     "onCommand:mikrobusC.installEnvironment",
-    "onWebviewPanel:mikrobusC.hardwareConfigurator",
-    "onDebug:mikrobus-mikroc-debug"
+    "onWebviewPanel:mikrobusC.hardwareConfigurator"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -186,6 +185,18 @@
         "command": "mikrobusC.openDemoExamples",
         "title": "MikroBUS C: Demo Examples",
         "icon": "$(beaker)"
+      },
+      {
+        "command": "mikrobusC.debugUnavailableMikrocCodegrip",
+        "title": "Debug is not available in VS Code for mikroC + CODEGRIP \u2014 use NECTO Studio",
+        "icon": "$(debug-alt)",
+        "enablement": "false"
+      },
+      {
+        "command": "mikrobusC.debugUnavailableRenesasE2",
+        "title": "Debug is supported only with Renesas E2 and E2 Lite",
+        "icon": "$(debug-alt)",
+        "enablement": "false"
       }
     ],
     "configuration": {
@@ -239,12 +250,12 @@
         "mikrobusRust.cCmakePath": {
           "type": "string",
           "default": "",
-          "description": "Optional absolute path to CMake for C core, SDK and project builds. Leave empty to resolve cmake from PATH."
+          "description": "Optional path to the CMake executable or a directory containing it for C core, SDK and project builds. Leave empty to use PATH/common host locations or the extension-managed CMake package."
         },
         "mikrobusRust.cNinjaPath": {
           "type": "string",
           "default": "",
-          "description": "Optional absolute path to Ninja for C core, SDK and project builds. Leave empty to resolve ninja from PATH."
+          "description": "Optional path to the Ninja executable or a directory containing it for C core, SDK and project builds. Leave empty to use PATH/common host locations or the extension-managed Ninja package."
         },
         "mikrobusRust.jlinkCommanderPath": {
           "type": "string",
@@ -290,18 +301,6 @@
       ]
     },
     "menus": {
-      "view/title": [
-        {
-          "command": "mikrobusRust.configureMcu",
-          "when": "view == mikrobusRust.setupView",
-          "group": "navigation"
-        },
-        {
-          "command": "mikrobusRust.openEnvironmentSetup",
-          "when": "view == mikrobusRust.setupView",
-          "group": "navigation@2"
-        }
-      ],
       "editor/title": [
         {
           "command": "mikrobusRust.buildCurrentFile",
@@ -336,6 +335,16 @@
         {
           "command": "mikrobusC.debug",
           "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugAvailable",
+          "group": "navigation@22"
+        },
+        {
+          "command": "mikrobusC.debugUnavailableMikrocCodegrip",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugUnavailableMikrocCodegrip",
+          "group": "navigation@22"
+        },
+        {
+          "command": "mikrobusC.debugUnavailableRenesasE2",
+          "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cProjectReady && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugUnavailableRenesasE2Required",
           "group": "navigation@22"
         },
         {
@@ -388,6 +397,14 @@
         {
           "command": "mikrobusC.configureRfpConnection",
           "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cRfpSelected"
+        },
+        {
+          "command": "mikrobusC.debugUnavailableMikrocCodegrip",
+          "when": "false"
+        },
+        {
+          "command": "mikrobusC.debugUnavailableRenesasE2",
+          "when": "false"
         }
       ]
     },
@@ -471,36 +488,11 @@
             }
           }
         }
-      },
-      {
-        "type": "mikrobus-mikroc-debug",
-        "label": "MikroBUS mikroC (mikroDap)",
-        "languages": [
-          "c",
-          "cpp"
-        ],
-        "configurationAttributes": {
-          "launch": {
-            "required": [
-              "program"
-            ],
-            "properties": {
-              "program": {
-                "type": "string",
-                "description": "mikroC .dbg database path."
-              },
-              "cwd": {
-                "type": "string",
-                "description": "Project working directory."
-              }
-            }
-          }
-        }
       }
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js && node --check c_rfp_backend.js && node --check c_cmake_visibility.js && node --check c_mikroc_debug.js",
+    "check": "node --check extension.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js && node --check c_rfp_backend.js && node --check c_cmake_visibility.js",
     "test": "node test/c_support.test.js",
     "build": "npx @vscode/vsce package"
   },

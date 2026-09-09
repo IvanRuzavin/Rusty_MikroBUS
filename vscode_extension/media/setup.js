@@ -7,16 +7,8 @@
   const platformLabel = document.getElementById('platformLabel');
   const notice = document.getElementById('platformNotice');
 
-  document.getElementById('refresh').addEventListener('click', () => {
-    vscode.postMessage({ type: 'refresh' });
-  });
-
   document.getElementById('updateManaged').addEventListener('click', () => {
     vscode.postMessage({ type: 'updateManagedAll' });
-  });
-
-  document.getElementById('configureMcu').addEventListener('click', () => {
-    vscode.postMessage({ type: 'configureMcu' });
   });
 
   document.getElementById('settings').addEventListener('click', () => {

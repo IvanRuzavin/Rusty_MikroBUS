@@ -37,7 +37,6 @@
   const boardMcuTableBody = document.getElementById('boardMcuTableBody');
   const setupTableBody = document.getElementById('setupTableBody');
   const mcuCount = document.getElementById('mcuCount');
-  const setupCount = document.getElementById('setupCount');
   const search = document.getElementById('mcuSearch');
   const boardSearch = document.getElementById('boardSearch');
   const boardMcuSearch = document.getElementById('boardMcuSearch');
@@ -61,8 +60,6 @@
     refreshButton.textContent = 'Refreshing database…';
     vscode.postMessage({ type: 'refreshDatabase' });
   });
-  document.getElementById('showSetups').addEventListener('click', showConfiguredSetups);
-  document.getElementById('showSetupsFromConfig').addEventListener('click', showConfiguredSetups);
   document.getElementById('chooseMcuMode').addEventListener('click', showCatalog);
   document.getElementById('chooseBoardMode').addEventListener('click', showBoardCatalog);
   document.getElementById('backToStartFromMcus').addEventListener('click', showStart);
@@ -225,7 +222,7 @@
       renderConfiguredSetups();
       updateTopCounts();
       setSetupsStatus(result.warning ? `Generated with warning: ${result.warning}` : `Generated ${result.mcuName || 'configuration'} successfully.`);
-      showConfiguredSetups();
+      showView('config');
       return;
     }
 
@@ -251,7 +248,6 @@
       renderBoardTable();
       updateTopCounts();
       setSetupsStatus(message.workspace ? `${message.workspace.mcuName} is now used by the current Rust workspace.` : 'Workspace binding updated.');
-      showConfiguredSetups();
       return;
     }
 
@@ -295,7 +291,7 @@
   });
 
   function updateTopCounts() {
-    setupCount.textContent = String(state.setups.length);
+    // Configured setups are shown in the extension sidebar.
   }
 
   function populateVendorFilter(select, items) {
@@ -594,7 +590,6 @@
   }
 
   function renderConfiguredSetups() {
-    setupCount.textContent = String(state.setups.length);
     renderWorkspaceBinding();
     const empty = document.getElementById('setupEmpty');
     const table = document.getElementById('setupTable');

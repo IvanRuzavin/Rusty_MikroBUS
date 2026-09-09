@@ -41,7 +41,6 @@ try {
   const cConfigurator = require('../c_configurator')._test;
   const rfp = require('../c_rfp_backend')._test;
   const cmakeVisibility = require('../c_cmake_visibility')._test;
-  const mikrocDebug = require('../c_mikroc_debug');
 
   // config_registers settings_array fields must be materialized into real
   // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
@@ -1743,42 +1742,72 @@ endfunction()
     }
   }
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 56);
-  assert.strictEqual(mikrocDebug.adapterIdForCompiler('mikrocpic32'), 'mikroe:pic32:gdb_rsp');
-  assert.strictEqual(mikrocDebug.adapterIdForCompiler('mikrocarm'), 'mikroe:arm:gdb_rsp');
-  const qtSpec = mikrocDebug.qtRuntimePackageSpec();
-  assert.strictEqual(qtSpec.name, 'mikrodap_qt_runtime');
-  assert.strictEqual(qtSpec.version, '6.9.1');
-  assert.match(qtSpec.downloadUrl, /download\.qt\.io\/online\/qtsdkrepository\/linux_x64\/desktop\/qt6_691/);
-  assert.strictEqual(qtSpec.installRelativePath, 'tools/mikrodap-qt/6.9.1');
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 58);
 
-  assert.strictEqual(mikrocDebug.isMikroCCompiler('mikrocpic'), true);
-  assert.strictEqual(mikrocDebug.isMikroCCompiler('gcc_arm_none_eabi'), false);
-  assert.strictEqual(mikrocDebug.dbgPathForArtifact('/tmp/build/example.hex'), '/tmp/build/example.dbg');
-  const mikroInit = mikrocDebug.makeInitializationOptions({
-    adapterID: 'mikroe:pic32:gdb_rsp', mcu: 'PIC32MZ2048EFH144',
-    compilerPath: '/tmp/compiler', corePath: '/tmp/core', port: 34433, tool: 'codegrip',
-    resetType: 'Hardware reset', connectionType: 'Normal', speed: '4 MHz',
-    protocol: '2-wire EJTAG', programmingType: 'debugging'
+  const mikrocCodegripAvailability = setup.cDebugAvailability({
+    metadata: {
+      compiler: { uid: 'mikrocarm' },
+      programmer: { uid: 'codegrip' }
+    }
   });
-  assert.strictEqual(mikroInit.adapterID, 'mikroe:pic32:gdb_rsp');
-  assert.strictEqual(mikroInit.projectParameters.mcu, 'PIC32MZ2048EFH144');
-  assert.strictEqual(mikroInit.debuggerSettings.hardware_debuger.settings.port, '34433');
-  assert.strictEqual(mikroInit.debuggerSettings.hardware_debuger.name, 'codegrip');
-  assert.strictEqual(mikroInit.debuggerSettings.resetType, 'Hardware reset');
-  assert.strictEqual(mikroInit.debuggerSettings.connectionType, 'Normal');
-  assert.strictEqual(mikroInit.debuggerSettings.speed, '4 MHz');
-  assert.strictEqual(mikroInit.debuggerSettings.protocol, '2-wire EJTAG');
-  assert.strictEqual(mikroInit.debuggerSettings['Programming Type'], 'debugging');
-  const mikroCfg = mikrocDebug.debugConfiguration({
-    name: 'PIC32 mikroC', cwd: '/tmp/project', generation: 'g1',
-    adapterID: 'mikroe:pic32:gdb_rsp', mcu: 'PIC32MZ2048EFH144',
-    compilerPath: '/tmp/compiler', corePath: '/tmp/core', port: 34433,
-    dbgFile: '/tmp/project/build/example.dbg'
+  assert.strictEqual(mikrocCodegripAvailability.available, false);
+  assert.strictEqual(mikrocCodegripAvailability.reason, 'mikroc-codegrip');
+  assert.match(mikrocCodegripAvailability.hint, /NECTO Studio/);
+  const renesasUartAvailability = setup.cDebugAvailability({
+    metadata: {
+      compiler: { uid: 'llvm-rl78-elf' },
+      programmer: { uid: 'renesas_rfp' },
+      device: { uid: 'R7F124FPJ5xFB' }
+    },
+    rfpProfile: { connection: 'uart', interface: 'uart1' }
   });
-  assert.strictEqual(mikroCfg.type, 'mikrobus-mikroc-debug');
-  assert.strictEqual(mikroCfg.program, '/tmp/project/build/example.dbg');
-  assert.strictEqual(mikroCfg.__mikrobusMikroCOptions.adapterID, 'mikroe:pic32:gdb_rsp');
+  assert.strictEqual(renesasUartAvailability.available, false);
+  assert.strictEqual(renesasUartAvailability.reason, 'renesas-e2-required');
+  assert.match(renesasUartAvailability.hint, /E2 and E2 Lite/);
+
+  const clangToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-clang-compat-'));
+  try {
+    const clangToolchain = path.join(clangToolchainRoot, 'toolchain.cmake');
+    setup.writeToolchain(clangToolchain, {
+      clockMHz: '168', applicationOutput: 'none', mode: 'full-sdk',
+      metadata: {
+        device: { uid: 'STM32F407ZG', mcuName: 'STM32F407ZG', flash: 1048576, ram: 131072, compilerFlags: '', linkerFlags: '' },
+        compiler: { uid: 'clang-llvm' },
+        sdkConfig: { MCU_NAME: 'STM32F407ZG', CORE_NAME: 'M4', _MSDK_COMPILER_ID_: 'Clang' }
+      }
+    }, {
+      c: '/toolchain/bin/clang', cxx: '/toolchain/bin/clang++', asm: '/toolchain/bin/clang', cmakeAsm: '/toolchain/bin/clang',
+      adapter: compilerSupport.adapterFor('clang-llvm')
+    }, { compatibilityModuleRoot: clangToolchainRoot, infrastructureRoot: clangToolchainRoot, installPrefix: clangToolchainRoot });
+    const clangText = fs.readFileSync(clangToolchain, 'utf8');
+    assert.ok(clangText.includes('"-Wno-int-conversion"'));
+    assert.ok(clangText.includes('"-Wno-incompatible-function-pointer-types"'));
+  } finally {
+    fs.rmSync(clangToolchainRoot, { recursive: true, force: true });
+  }
+
+  const cleanupRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-obsolete-mikroc-debug-'));
+  try {
+    const cleanupContext = { globalStorageUri: { fsPath: cleanupRoot } };
+    const packagesRoot = path.join(cleanupRoot, 'c-runtime', 'packages');
+    const qtRoot = path.join(packagesRoot, 'tools', 'mikrodap-qt', '6.9.1');
+    const debugRoot = path.join(packagesRoot, 'shared', 'debuggers', 'current');
+    fs.mkdirSync(qtRoot, { recursive: true });
+    fs.mkdirSync(debugRoot, { recursive: true });
+    const registryPath = path.join(cleanupRoot, 'c-runtime', 'installed-packages.json');
+    fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, packages: [
+      { key: 'shared:mikrodap_qt_runtime@6.9.1', name: 'mikrodap_qt_runtime', root: qtRoot },
+      { key: 'shared:debuggers@current', name: 'debuggers', root: debugRoot }
+    ] }));
+    assert.strictEqual(packageManager.cleanupObsoleteMikroCDebugArtifacts(cleanupContext), true);
+    assert.strictEqual(fs.existsSync(path.join(packagesRoot, 'tools', 'mikrodap-qt')), false);
+    assert.strictEqual(fs.existsSync(path.join(packagesRoot, 'shared', 'debuggers')), false);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(registryPath, 'utf8')).packages, []);
+  } finally {
+    fs.rmSync(cleanupRoot, { recursive: true, force: true });
+  }
+
   const setupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
   assert.ok(setupSource.includes('const assembler = resolveTool'));
   assert.ok(setupSource.includes('const cmakeAsm = adapter.cmakeAsmViaCCompiler ? c'));
@@ -1853,7 +1882,7 @@ endfunction()
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.7.53');
+  assert.strictEqual(packageJson.version, '0.7.56');
   assert.strictEqual(packageJson.icon, 'media/mikrobus-module-3d-transparent.png');
   assert.strictEqual(
     packageJson.contributes.viewsContainers.activitybar.find((item) => item.id === 'mikrobusRust')?.icon,
@@ -1863,11 +1892,30 @@ endfunction()
     packageJson.contributes.commands.find((item) => item.command === 'mikrobusC.debug')?.icon,
     '$(debug-alt)'
   );
+  assert.strictEqual(packageJson.activationEvents.includes('onDebug:mikrobus-mikroc-debug'), false);
+  assert.strictEqual(packageJson.contributes.debuggers.some((item) => item.type === 'mikrobus-mikroc-debug'), false);
+  assert.strictEqual(fs.existsSync(path.join(__dirname, '..', 'c_mikroc_debug.js')), false);
+  assert.strictEqual(fs.existsSync(path.join(__dirname, '..', 'resources', 'mikrodap')), false);
+  const disabledMikrocDebugCommand = packageJson.contributes.commands.find((item) => item.command === 'mikrobusC.debugUnavailableMikrocCodegrip');
+  const disabledRenesasDebugCommand = packageJson.contributes.commands.find((item) => item.command === 'mikrobusC.debugUnavailableRenesasE2');
+  assert.strictEqual(disabledMikrocDebugCommand?.enablement, 'false');
+  assert.match(disabledMikrocDebugCommand?.title || '', /NECTO Studio/);
+  assert.strictEqual(disabledRenesasDebugCommand?.enablement, 'false');
+  assert.match(disabledRenesasDebugCommand?.title || '', /E2 and E2 Lite/);
   assert.strictEqual(
     packageJson.contributes.commands.find((item) => item.command === 'mikrobusRust.debugCurrentFile')?.icon,
     '$(debug-alt)'
   );
   assert.strictEqual(packageJson.contributes.commands.some((item) => item.command === 'mikrobusRust.dumpDebugVariables'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.menus, 'view/title'), false);
+  const extensionNavigationUiSource = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
+  assert.strictEqual(extensionNavigationUiSource.includes('<button id="configureMcu"'), false);
+  const rustConfiguratorUiSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
+  assert.strictEqual(rustConfiguratorUiSource.includes('id="showSetups"'), false);
+  assert.strictEqual(rustConfiguratorUiSource.includes('id="showSetupsFromConfig"'), false);
+  const cCompilerManagerHtml = packageManager.cManagerHtml('compiler');
+  assert.ok(cCompilerManagerHtml.includes('aria-label="Go to previous view">←</button>'));
+  assert.strictEqual(cCompilerManagerHtml.includes('>Back</button>'), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.menus, 'debug/toolBar'), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.configuration.properties, 'mikrobusRust.dumpVariablesOnStop'), false);
 
@@ -2050,6 +2098,18 @@ endfunction()
     'https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/database_live.7z');
   assert.strictEqual(catalog.resolveDirect({ kind: 'shared', name: 'cmake', version: 'necto-live' }).downloadUrl,
     'https://software-update.mikroe.com/NECTOStudio7/live/cmake/linux/cmake.7z');
+  assert.strictEqual(catalog.codegripUrlForPlatform('win32'),
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/win/codegrip.7z');
+  assert.strictEqual(catalog.codegripUrlForPlatform('darwin'),
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/mac/codegrip.7z');
+  assert.strictEqual(catalog.codegripUrlForPlatform('linux'),
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/linux/codegrip.7z');
+  assert.strictEqual(catalog.hostPackageSegment('darwin'), 'mac');
+  assert.match(catalog.managedBuildToolAsset('cmake', 'win32', 'x64').url, /cmake-3\.31\.12-windows-x86_64\.zip$/);
+  assert.match(catalog.managedBuildToolAsset('cmake', 'darwin', 'arm64').url, /cmake-3\.31\.12-macos-universal\.tar\.gz$/);
+  assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'x64').url, /ninja-win\.zip$/);
+  assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'arm64').url, /ninja-winarm64\.zip$/);
+  assert.match(catalog.managedBuildToolAsset('ninja', 'darwin', 'arm64').url, /ninja-mac\.zip$/);
   assert.throws(() => catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest' }), /latest release must be resolved/);
   assert.strictEqual(catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest', downloadUrl: 'https://example/mikrosdk.7z' }).downloadUrl,
     'https://example/mikrosdk.7z');
@@ -2091,6 +2151,13 @@ endfunction()
   assert.ok(cPackageManagerSource.includes("environmentViewKind"));
   assert.ok(cPackageManagerSource.includes("Package files are still present after uninstall"));
 
+  const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
+  assert.ok(extensionSource.includes('/development/codegrip/mac/codegrip.7z'));
+  assert.ok(!extensionSource.includes('/development/codegrip/macos/codegrip.7z'));
+  assert.ok(extensionSource.includes("return URLS.codegrip[process.platform]"));
+  assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('cmake')"));
+  assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('ninja')"));
+  assert.ok(cSetupSource.includes('Visual Studio Build Tools commonly ships both CMake and Ninja'));
   const rustConfiguratorSource = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
   const rustMcuUiSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'mcu.js'), 'utf8');
   const setupCssSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'setups.css'), 'utf8');

@@ -358,7 +358,7 @@ function compilerSpecificFlags(adapter, metadata, armFlags = [], compatibilityFl
   }
   if (family === 'clang-arm') {
     return {
-      compile: ['--target=arm-none-eabi', ...armFlags, '-fms-extensions', '-ffunction-sections', '-fdata-sections', '-fno-common'],
+      compile: ['--target=arm-none-eabi', ...armFlags, ...compatibilityFlags, '-fms-extensions', '-ffunction-sections', '-fdata-sections', '-fno-common'],
       link: ['--target=arm-none-eabi', ...armFlags, '-Wl,--gc-sections']
     };
   }

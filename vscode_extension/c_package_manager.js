@@ -8,13 +8,15 @@ const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
 const vscode = require('vscode');
-const { resolvePackage } = require('./c_package_catalog');
+const packageCatalog = require('./c_package_catalog');
+const { resolvePackage } = packageCatalog;
 const compilerSupport = require('./c_compiler_support');
 
 const installLocks = new Map();
 let packagePanel;
 let environmentPanel;
 let environmentViewKind = 'environment';
+let environmentViewHistory = [];
 let clickExamplesPanel;
 let clickExampleSpecsCache = [];
 let clickMetadataCache;
@@ -29,6 +31,21 @@ const MIKROSDK_LATEST_API = 'https://api.github.com/repos/MikroElektronika/mikro
 const RFP_DOWNLOAD_URL = 'https://www.renesas.com/en/software-tool/renesas-flash-programmer-programming-gui';
 const CLICK_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_clicks_c.json';
 const DEMO_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_demos_c.json';
+
+
+function managedBuildToolPackageSpec(name) {
+  const asset = packageCatalog.managedBuildToolAsset(name, process.platform, process.arch);
+  if (!asset?.url) return undefined;
+  const tool = String(name || '').toLowerCase();
+  return {
+    kind: 'shared',
+    name: tool,
+    version: asset.version,
+    displayName: tool === 'cmake' ? 'Managed CMake' : 'Managed Ninja',
+    environment: true,
+    installRelativePath: `tools/${tool}`
+  };
+}
 
 function rfpProgrammerPackageSpec() {
   return {
@@ -668,10 +685,15 @@ async function extractArchive(archivePath, destination, token) {
   }
   if (lower.endsWith('.zip')) {
     const unzip = findOnPath(process.platform === 'win32' ? ['tar.exe', 'tar'] : ['unzip']);
-    if (!unzip) throw new Error('A ZIP extractor was not found.');
-    await runCommand(unzip, path.basename(unzip).toLowerCase().startsWith('tar')
-      ? ['-xf', archivePath, '-C', destination]
-      : ['-o', archivePath, '-d', destination], token);
+    if (unzip) {
+      await runCommand(unzip, path.basename(unzip).toLowerCase().startsWith('tar')
+        ? ['-xf', archivePath, '-C', destination]
+        : ['-o', archivePath, '-d', destination], token);
+      return;
+    }
+    const sevenZip = bundledSevenZip() || findOnPath(['7zz', '7z', '7za']);
+    if (!sevenZip) throw new Error('A ZIP extractor was not found.');
+    await runCommand(sevenZip, ['x', '-y', archivePath, `-o${destination}`], token);
     return;
   }
   if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz') || lower.endsWith('.tar.xz')) {
@@ -1106,9 +1128,12 @@ async function installPackageUnlocked(context, spec, progress, token) {
     }
     await replaceDirectory(source, target);
     makeManagedToolchainExecutables(target, spec);
-    if (process.platform !== 'win32' && String(spec.name || '').toLowerCase() === 'cmake') {
-      for (const toolName of ['cmake', 'ctest', 'cpack']) {
-        const tool = findRecursive(target, (_candidate, name) => name === toolName, 8);
+    if (process.platform !== 'win32' && ['cmake', 'ninja'].includes(String(spec.name || '').toLowerCase())) {
+      const toolNames = String(spec.name || '').toLowerCase() === 'cmake'
+        ? ['cmake', 'ctest', 'cpack', 'ccmake']
+        : ['ninja'];
+      for (const toolName of toolNames) {
+        const tool = findRecursive(target, (_candidate, name) => name === toolName, 10);
         if (tool) { try { fs.chmodSync(tool, 0o755); } catch {} }
       }
     }
@@ -1351,6 +1376,37 @@ function removeMaterializedPackageArtifacts(context, entry, registry) {
   invalidateReferencingSetupArtifacts(context, entry);
 }
 
+
+function cleanupObsoleteMikroCDebugArtifacts(context) {
+  const paths = getPackagePaths(context);
+  const packagesRoot = path.resolve(paths.packages);
+  const registry = readRegistry(context);
+  const obsoleteNames = new Set(['mikrodap_qt_runtime', 'debuggers']);
+  let changed = false;
+  for (const entry of [...registry.packages]) {
+    if (!obsoleteNames.has(String(entry?.name || ''))) continue;
+    const target = entry?.root ? path.resolve(entry.root) : undefined;
+    if (target) {
+      const relative = path.relative(packagesRoot, target);
+      if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+        fs.rmSync(target, { recursive: true, force: true });
+      }
+    }
+    registry.packages = registry.packages.filter((item) => item !== entry);
+    changed = true;
+  }
+  // Remove legacy managed locations from builds that predate registry cleanup.
+  for (const relativePath of [path.join('tools', 'mikrodap-qt'), path.join('shared', 'debuggers')]) {
+    const target = path.resolve(packagesRoot, relativePath);
+    const relative = path.relative(packagesRoot, target);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  }
+  if (changed) writeRegistry(context, registry);
+  return changed;
+}
+
 async function uninstallPackage(context, key) {
   const registry = readRegistry(context);
   const entry = registry.packages.find((item) => item.key === key);
@@ -1448,10 +1504,14 @@ function infrastructureSpecs() {
 }
 
 function environmentSpecs() {
+  const buildTools = ['win32', 'darwin'].includes(process.platform)
+    ? ['cmake', 'ninja'].map(managedBuildToolPackageSpec).filter(Boolean)
+    : [];
   return [
     { kind: 'database', name: 'C_database', version: 'live', displayName: 'NECTO live database', environment: true, alwaysRefresh: true },
     { kind: 'sdk', name: 'mikrosdk', version: 'latest', displayName: 'mikroSDK (latest)', environment: true, dynamic: 'sdk' },
-    ...infrastructureSpecs()
+    ...infrastructureSpecs(),
+    ...buildTools
   ];
 }
 
@@ -1493,12 +1553,15 @@ function cManagerHtml(kind) {
   const descriptor = managerDescriptor(kind);
   const managerButtons = env
     ? '<button data-manager="compiler" class="secondary">Compiler packages</button><button data-manager="programmers" class="secondary">Programmers</button><button data-manager="codegrip" class="secondary">CODEGRIP packages</button><button data-manager="core" class="secondary">Core packages</button><button data-manager="card" class="secondary">MCU card packages</button><button data-manager="board" class="secondary">Board packages</button>'
-    : '<button id="back" class="secondary">Back</button>';
+    : '';
+  const previousNavigation = env
+    ? ''
+    : '<div class="viewNav managerNav"><button id="back" class="secondary navBack" title="Go to previous view" aria-label="Go to previous view">←</button></div>';
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>${descriptor.title}</title><style>
-body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.storageBar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border);border-radius:7px}.storageBar>div{display:grid;gap:5px;min-width:0;flex:1}.storageBar code{padding:6px 8px;background:var(--vscode-textCodeBlock-background);border-radius:3px}
-</style></head><body><header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section>${env ? '<section class="storageBar"><div><span class="muted">Managed installation path</span><code id="managedRoot">Loading…</code></div><button id="changeRoot" class="secondary">Change</button></section>' : ''}<input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.storageBar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border);border-radius:7px}.storageBar>div{display:grid;gap:5px;min-width:0;flex:1}.storageBar code{padding:6px 8px;background:var(--vscode-textCodeBlock-background);border-radius:3px}.viewNav{display:flex;align-items:center;margin:0 0 12px}.navBack{font-size:18px;line-height:1;min-width:34px;padding:6px 10px}
+</style></head><body>${previousNavigation}<header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section>${env ? '<section class="storageBar"><div><span class="muted">Managed installation path</span><code id="managedRoot">Loading…</code></div><button id="changeRoot" class="secondary">Change</button></section>' : ''}<input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
 <script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const installedChip=document.getElementById('installedCount');let all=[];let installedOnly=false;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function isInstalled(p){return p.status==='installed'||p.status==='update';}function render(){const q=document.getElementById('search').value.toLowerCase();const installed=all.filter(isInstalled).length;const items=all.filter(x=>(!installedOnly||isInstalled(x))&&JSON.stringify(x).toLowerCase().includes(q));installedChip.textContent=installedOnly?installed+' installed · showing only':installed+' installed';installedChip.classList.toggle('active',installedOnly);installedChip.setAttribute('aria-pressed',String(installedOnly));document.getElementById('missingCount').textContent=(all.length-installed)+' not installed';if(!items.length){root.innerHTML='<div class="empty">'+(installedOnly?'No installed packages match this filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const refs=p.references||[];const primary=p.unavailable?'<button disabled>Unavailable</button>':(p.external?'<button data-open="'+esc(p.externalUrl||'')+'">Open download page</button>':(p.status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'));const action=(p.externalUrl&&!p.external?'<button class="secondary" data-open="'+esc(p.externalUrl)+'">Download</button>':'')+primary;return '<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'')+'</span><span>'+esc(p.status||'missing')+'</span>'+(p.compilerUid?'<span>'+esc(p.compilerUid)+'</span>':'')+'</div><p><code>'+esc(p.root||p.installRelativePath||'')+'</code></p>'+(p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'')+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+action+'</div></article>';}).join('');}root.onclick=e=>{const u=e.target?.dataset?.uninstall;if(u){vscode.postMessage({type:'uninstall',key:u});return;}const i=e.target?.dataset?.install;if(i){vscode.postMessage({type:'install',key:i});return;}const o=e.target?.dataset?.open;if(o)vscode.postMessage({type:'openExternal',url:o});const m=e.target?.dataset?.manager;if(m)vscode.postMessage({type:'manager',manager:m});};document.getElementById('search').oninput=render;installedChip.onclick=()=>{installedOnly=!installedOnly;render();};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${env ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.getElementById('changeRoot').onclick=()=>vscode.postMessage({type:'changeRoot'});document.querySelectorAll('[data-manager]').forEach(x=>x.onclick=()=>vscode.postMessage({type:'manager',manager:x.dataset.manager}));" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];const managed=document.getElementById('managedRoot');if(managed)managed.textContent=e.data.managedRoot||'';render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
@@ -1610,14 +1673,23 @@ async function installManagerPackage(context, kind, key) {
   });
 }
 
-async function showEnvironmentPackageView(context, kind = 'environment') {
+async function showEnvironmentPackageView(context, kind = 'environment', options = {}) {
   if (!environmentPanel) return;
-  environmentViewKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
+  const nextKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
     ? kind
     : 'environment';
+  if (options.pushHistory && nextKind !== environmentViewKind) {
+    environmentViewHistory.push(environmentViewKind);
+  }
+  environmentViewKind = nextKind;
   const descriptor = managerDescriptor(environmentViewKind);
   environmentPanel.title = `MikroBUS C: ${descriptor.title}`;
   environmentPanel.webview.html = cManagerHtml(environmentViewKind);
+}
+
+async function goBackEnvironmentPackageView(context) {
+  const previous = environmentViewHistory.pop() || 'environment';
+  await showEnvironmentPackageView(context, previous);
 }
 
 async function openPackageManager(context, kind) {
@@ -1642,9 +1714,11 @@ async function openBoardPackages(context){return openPackageManager(context,'boa
 async function openEnvironmentPackages(context, initialKind = 'environment') {
   if (environmentPanel) {
     environmentPanel.reveal(vscode.ViewColumn.Active);
+    environmentViewHistory = initialKind === 'environment' ? [] : ['environment'];
     await showEnvironmentPackageView(context, initialKind);
     return;
   }
+  environmentViewHistory = initialKind === 'environment' ? [] : ['environment'];
   environmentPanel=vscode.window.createWebviewPanel('mikrobusC.environmentPackages','MikroBUS C: Development Environment',vscode.ViewColumn.Active,{enableScripts:true,retainContextWhenHidden:true});
   environmentPanel.webview.onDidReceiveMessage(async(message)=>{try{
     const activeKind = environmentViewKind;
@@ -1661,11 +1735,11 @@ async function openEnvironmentPackages(context, initialKind = 'environment') {
       if(await uninstallPackage(context,message.key))await postManagerState(context,activeKind,environmentPanel);
     }
     if(message?.type==='openExternal'&&message.url)await vscode.env.openExternal(vscode.Uri.parse(message.url));
-    if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager);
-    if(message?.type==='back')await showEnvironmentPackageView(context,'environment');
+    if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager,{pushHistory:true});
+    if(message?.type==='back')await goBackEnvironmentPackageView(context);
     if(message?.type==='changeRoot'){ if(await changeManagedRoot(context)) await postManagerState(context,activeKind,environmentPanel); }
   }catch(error){vscode.window.showErrorMessage(`MikroBUS C ${environmentViewKind} packages: ${error.message||error}`);}},null,context.subscriptions);
-  environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';},null,context.subscriptions);
+  environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';environmentViewHistory=[];},null,context.subscriptions);
   await showEnvironmentPackageView(context, initialKind);
 }
 
@@ -1829,6 +1903,7 @@ async function openDemoExamples(context) {
 }
 
 module.exports = {
+  managedBuildToolPackageSpec,
   getManagedRoot,
   changeManagedRoot,
   getPackagePaths,
@@ -1849,6 +1924,7 @@ module.exports = {
   openCardPackages,
   openBoardPackages,
   uninstallPackage,
+  cleanupObsoleteMikroCDebugArtifacts,
   infrastructureSpecs,
   environmentSpecs,
   environmentPackageState,
@@ -1883,6 +1959,7 @@ module.exports = {
     managedSdkBspRoots,
     removeMaterializedPackageArtifacts,
     invalidateReferencingSetupArtifacts,
+    cleanupObsoleteMikroCDebugArtifacts,
     findRfpCliInRoot,
     remapManagedRootValue,
     clickExampleSpec,

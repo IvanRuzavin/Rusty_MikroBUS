@@ -13,12 +13,10 @@ const codegripCatalog = require('./c_codegrip_catalog');
 const compilerSupport = require('./c_compiler_support');
 const rfp = require('./c_rfp_backend');
 const cmakeVisibility = require('./c_cmake_visibility');
-const mikrocDebug = require('./c_mikroc_debug');
 const { openCConfigurator } = require('./c_configurator');
 const {
   discoverUsbCodegrips,
   normalizeConnectionProfile,
-  nectoDefaultOptionValues,
   programCodegrip,
   eraseCodegrip,
   prepareCodegripDebug,
@@ -38,7 +36,7 @@ function metadataMcuName(metadata = {}) {
 function setupMcuName(setup = {}) {
   return metadataMcuName(setup.metadata || {});
 }
-const C_BUILD_SUPPORT_VERSION = 56;
+const C_BUILD_SUPPORT_VERSION = 58;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
@@ -346,8 +344,12 @@ async function packageSpecs(context, metadata, mode, setup, token) {
       installRelativePath: 'tools/mikroc-cmake'
     });
   }
-  if (process.platform === 'linux' && isMikroCFamily(adapter?.family)) {
-    result.push(mikrocDebug.qtRuntimePackageSpec());
+  const mikroCSetup = isMikroCFamily(adapter?.family);
+  // On Linux mikroC keeps using the NECTO CMake build because that is the
+  // already-tested custom-language path. On Windows/macOS (and for normal C
+  // compilers), install relocatable build tools automatically only when the
+  // user has not configured them and they are not already discoverable.
+  if (process.platform === 'linux' && mikroCSetup) {
     result.push({
       kind: 'shared',
       name: 'cmake',
@@ -356,6 +358,13 @@ async function packageSpecs(context, metadata, mode, setup, token) {
       environment: true,
       installRelativePath: 'tools/necto-cmake'
     });
+  } else if (!resolveBuildTool('cmake', [], context)) {
+    const managedCmake = packages.managedBuildToolPackageSpec('cmake');
+    if (managedCmake) result.push(managedCmake);
+  }
+  if (!resolveBuildTool('ninja', ['ninja-build'], context)) {
+    const managedNinja = packages.managedBuildToolPackageSpec('ninja');
+    if (managedNinja) result.push(managedNinja);
   }
   if (mode === 'full-sdk') {
     result.push(await packages.sdkPackageSpec(token));
@@ -475,10 +484,82 @@ function resolveToolchain(setup, installed) {
   return { c, cxx, asm: cmakeAsm, cmakeAsm, assembler, gdb, objcopy, ar, ranlib, adapter, root: entry?.root || path.dirname(c), packageEntry: entry };
 }
 
-function resolveBuildTool(name, alternatives = []) {
+function buildToolExecutableNames(name, alternatives = []) {
+  const values = [name, ...alternatives].filter(Boolean);
+  if (process.platform !== 'win32') return [...new Set(values)];
+  return [...new Set(values.flatMap((value) => path.extname(value) ? [value] : [`${value}.exe`, value]))];
+}
+
+function resolveExecutableFromPathOrDirectory(value, names) {
+  const configured = String(value || '').trim();
+  if (!configured) return undefined;
+  const expanded = path.resolve(configured.replace(/^~(?=$|[\\/])/, os.homedir()));
+  if (!fs.existsSync(expanded)) return undefined;
+  try {
+    if (fs.statSync(expanded).isFile()) return expanded;
+    if (!fs.statSync(expanded).isDirectory()) return undefined;
+  } catch { return undefined; }
+  for (const name of names) {
+    const direct = path.join(expanded, name);
+    if (fs.existsSync(direct)) return direct;
+  }
+  return findRecursive(expanded, (_candidate, fileName) => names.some((name) =>
+    process.platform === 'win32' ? fileName.toLowerCase() === name.toLowerCase() : fileName === name
+  ), 5);
+}
+
+function commonBuildToolCandidates(name) {
+  const tool = String(name || '').toLowerCase();
+  const result = [];
+  if (process.platform === 'win32') {
+    const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean);
+    const local = process.env.LOCALAPPDATA;
+    const user = process.env.USERPROFILE;
+    if (tool === 'cmake') {
+      for (const root of programFiles) result.push(path.join(root, 'CMake', 'bin', 'cmake.exe'));
+      if (local) result.push(path.join(local, 'Programs', 'CMake', 'bin', 'cmake.exe'));
+    }
+    if (user) {
+      result.push(path.join(user, 'scoop', 'apps', tool, 'current', 'bin', `${tool}.exe`));
+      result.push(path.join(user, 'scoop', 'shims', `${tool}.exe`));
+    }
+    // Visual Studio Build Tools commonly ships both CMake and Ninja even when
+    // neither executable has been added to PATH.
+    for (const root of programFiles) {
+      for (const edition of ['BuildTools', 'Community', 'Professional', 'Enterprise']) {
+        const base = path.join(root, 'Microsoft Visual Studio', '2022', edition, 'Common7', 'IDE', 'CommonExtensions', 'Microsoft', 'CMake');
+        if (tool === 'cmake') result.push(path.join(base, 'CMake', 'bin', 'cmake.exe'));
+        if (tool === 'ninja') result.push(path.join(base, 'Ninja', 'ninja.exe'));
+      }
+    }
+  } else if (process.platform === 'darwin') {
+    if (tool === 'cmake') result.push('/Applications/CMake.app/Contents/bin/cmake');
+    for (const prefix of ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin']) {
+      result.push(path.join(prefix, tool));
+    }
+  }
+  return result.filter((candidate) => candidate && fs.existsSync(candidate));
+}
+
+function resolveInstalledBuildTool(context, name, names) {
+  if (!context) return undefined;
+  const entry = packages.listInstalledPackages(context, true).find((item) =>
+    String(item?.kind || '').toLowerCase() === 'shared' && String(item?.name || '').toLowerCase() === String(name || '').toLowerCase()
+  );
+  if (!entry?.root) return undefined;
+  return resolveExecutableFromPathOrDirectory(entry.root, names);
+}
+
+function resolveBuildTool(name, alternatives = [], context = globalCContext) {
+  const names = buildToolExecutableNames(name, alternatives);
   const configured = String(vscode.workspace.getConfiguration('mikrobusRust').get(`c${name[0].toUpperCase()}${name.slice(1)}Path`, '') || '').trim();
-  if (configured && fs.existsSync(configured)) return configured;
-  return packages.findOnPath([name, ...alternatives]);
+  const configuredExecutable = resolveExecutableFromPathOrDirectory(configured, names);
+  if (configuredExecutable) return configuredExecutable;
+  const fromPath = packages.findOnPath(names);
+  if (fromPath) return fromPath;
+  const common = commonBuildToolCandidates(name)[0];
+  if (common) return common;
+  return resolveInstalledBuildTool(context, name, names);
 }
 
 function packageRoot(installed, kind, name, version) {
@@ -547,12 +628,19 @@ function mikroCSearchPathInfo(_realCompiler, _metadata = {}, options = {}) {
   };
 }
 
-function resolveManagedNectoCmake(installed) {
+function resolveManagedBuildTool(installed, name, alternatives = []) {
   const entries = installed instanceof Map ? [...installed.values()] : Array.isArray(installed) ? installed : [];
-  const entry = entries.find((item) => String(item?.kind || '').toLowerCase() === 'shared' && String(item?.name || '').toLowerCase() === 'cmake');
+  const entry = entries.find((item) => String(item?.kind || '').toLowerCase() === 'shared' && String(item?.name || '').toLowerCase() === String(name || '').toLowerCase());
   if (!entry?.root || !fs.existsSync(entry.root)) return undefined;
-  const names = process.platform === 'win32' ? new Set(['cmake.exe', 'cmake']) : new Set(['cmake']);
-  return findRecursive(entry.root, (_candidate, name) => names.has(String(name).toLowerCase()), 8);
+  return resolveExecutableFromPathOrDirectory(entry.root, buildToolExecutableNames(name, alternatives));
+}
+
+function resolveManagedNectoCmake(installed) {
+  return resolveManagedBuildTool(installed, 'cmake');
+}
+
+function resolveManagedNinja(installed) {
+  return resolveManagedBuildTool(installed, 'ninja', ['ninja-build']);
 }
 
 function resolveManagedMikroCCmakeModules(installed) {
@@ -1001,7 +1089,7 @@ function writeToolchain(filePath, setup, resolved, options) {
   const armFlags = /^(gnu-arm|clang-arm)$/.test(String(resolved.adapter?.family || ''))
     ? armArchitectureFlags(metadata.sdkConfig.CORE_NAME, metadataMcuName(metadata))
     : [];
-  const compatibilityFlags = resolved.adapter?.family === 'gnu-arm'
+  const compatibilityFlags = /^(gnu-arm|clang-arm)$/.test(String(resolved.adapter?.family || ''))
     ? coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c))
     : [];
   const rxDeclaredFlags = family === 'gnu-rx'
@@ -1628,12 +1716,16 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
   }
   const resolved = resolveToolchain(setup, installed);
   const mikroCSetup = isMikroCFamily(resolved.adapter?.family);
-  const managedNectoCmake = mikroCSetup ? resolveManagedNectoCmake(installed) : undefined;
+  const managedNectoCmake = resolveManagedNectoCmake(installed);
+  const managedNinja = resolveManagedNinja(installed);
   const managedMikroCCmakeModules = mikroCSetup ? resolveManagedMikroCCmakeModules(installed) : undefined;
-  const cmake = managedNectoCmake || resolveBuildTool('cmake');
-  const ninja = resolveBuildTool('ninja', ['ninja-build']);
+  const cmake = managedNectoCmake || resolveBuildTool('cmake', [], context);
+  const ninja = managedNinja || resolveBuildTool('ninja', ['ninja-build'], context);
   if (!cmake || !ninja) {
-    throw new Error('CMake and Ninja are required. Install them system-wide or set mikrobusRust.cCmakePath and mikrobusRust.cNinjaPath.');
+    throw new Error(
+      `CMake and Ninja are required. The extension could not resolve or install managed build tools for ${process.platform}/${process.arch}. ` +
+      'You can also set mikrobusRust.cCmakePath and mikrobusRust.cNinjaPath to an executable or containing directory.'
+    );
   }
   if (mikroCSetup && process.platform === 'linux' && !managedNectoCmake) {
     throw new Error('The managed NECTO CMake package required for mikroC was not found after installation. Reinstall the C setup packages.');
@@ -2166,8 +2258,8 @@ async function workspaceBuildEnvironment(context, root) {
       cancellable: true
     }, (progress, token) => ensureAndBuildSetup(context, setup, progress, token));
   }
-  const cmake = setup.tools?.cmake && fs.existsSync(setup.tools.cmake) ? setup.tools.cmake : resolveBuildTool('cmake');
-  const ninja = setup.tools?.ninja && fs.existsSync(setup.tools.ninja) ? setup.tools.ninja : resolveBuildTool('ninja', ['ninja-build']);
+  const cmake = setup.tools?.cmake && fs.existsSync(setup.tools.cmake) ? setup.tools.cmake : resolveBuildTool('cmake', [], context);
+  const ninja = setup.tools?.ninja && fs.existsSync(setup.tools.ninja) ? setup.tools.ninja : resolveBuildTool('ninja', ['ninja-build'], context);
   if (!cmake || !ninja) throw new Error('CMake and Ninja are required for project builds.');
   return { setup, cmake, ninja };
 }
@@ -3025,6 +3117,11 @@ async function debugWorkspace(context, debugOptions = {}) {
   let debugInstanceId;
   try {
     const selectedSetup = getBoundSetup(context, cProjectRoot());
+    const availability = cDebugAvailability(selectedSetup);
+    if (!availability.available) {
+      vscode.window.showInformationMessage(availability.hint);
+      return;
+    }
     if (selectedSetup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID) {
       if (!selectedSetup.rfpProfile) {
         selectedSetup.rfpProfile = await rfp.configureProfile(selectedSetup);
@@ -3104,19 +3201,11 @@ async function debugWorkspace(context, debugOptions = {}) {
         if (!setup.programmerProfile) return;
         writeJsonAtomic(setupFile(context, setup.id), setup);
       }
-      const mikroCAdapterId = mikrocDebug.adapterIdForCompiler(setup.metadata?.compiler?.uid);
-      if (!mikroCAdapterId) {
-        const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
-        if (!cppTools) {
-          throw new Error('CODEGRIP debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
-        }
-        await cppTools.activate();
-      } else {
-        // Validate the managed native runtime before programming the target. If a
-        // host Qt dependency is missing it is better to fail before CODEGRIP is
-        // put into a debug session.
-        mikrocDebug.probeRuntime(context);
+      const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
+      if (!cppTools) {
+        throw new Error('CODEGRIP debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
       }
+      await cppTools.activate();
       const runtime = programmerRuntime(context, setup);
       debugRuntime = await withProgrammerStatus(setup, 'Programming for debug', async (progress) => prepareCodegripDebug({
         ...runtime,
@@ -3129,53 +3218,8 @@ async function debugWorkspace(context, debugOptions = {}) {
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const generation = debugInstanceId;
       activeExternalDebugRuntime = { runtime: debugRuntime, setupId: setup.id, generation };
-      if (mikroCAdapterId) {
-        const dbgFile = mikrocDebug.dbgPathForArtifact(elf);
-        if (!dbgFile || !fs.existsSync(dbgFile)) {
-          throw new Error(`mikroC build completed but ${path.basename(dbgFile || 'application.dbg')} was not found beside ${path.basename(elf)}.`);
-        }
-        const coreSource = setup.paths?.coreSource;
-        if (!coreSource || !fs.existsSync(coreSource)) {
-          throw new Error('This mikroC setup predates managed mikroDap debugging and does not contain its core source path. Rebuild the workspace setup once.');
-        }
-        const compilerPath = setup.tools?.compiler ? path.dirname(setup.tools.compiler) : undefined;
-        if (!compilerPath || !fs.existsSync(compilerPath)) {
-          throw new Error('The installed mikroC compiler directory could not be resolved for debugging. Rebuild the workspace setup.');
-        }
-        output.appendLine(
-          `Starting mikroDap ${mikroCAdapterId} against CODEGRIP RSP at 127.0.0.1:${debugRuntime.debugPort}; ` +
-          `debug database: ${dbgFile}.`
-        );
-        // Use the exact same target-option values that configureControlClient()
-        // has just applied to CodegripGdbServer. The connection profile stores
-        // probe discovery/authentication data; it is not the source of NECTO's
-        // per-MCU debug protocol/speed/reset defaults (PIC32, for example, is
-        // configured as 2-wire EJTAG rather than the profile's generic SWD).
-        const codegripDebugDefaults = nectoDefaultOptionValues(setupMcuName(setup));
-        configuration = mikrocDebug.debugConfiguration({
-          name: `MikroBUS C mikroC CODEGRIP: ${setup.name}`,
-          cwd: projectRoot,
-          generation,
-          adapterID: mikroCAdapterId,
-          mcu: setupMcuName(setup),
-          compilerPath,
-          corePath: coreSource,
-          writeToStd: normalizeApplicationOutput(setup.applicationOutput) === 'debug-terminal',
-          ipAddress: '127.0.0.1',
-          port: debugRuntime.debugPort,
-          remoteCommands: '',
-          resetType: codegripDebugDefaults.get('Reset Type') || 'Hardware reset',
-          connectionType: codegripDebugDefaults.get('Connection') || 'Normal',
-          speed: codegripDebugDefaults.get('Speed') || '',
-          protocol: codegripDebugDefaults.get('Protocol') || '',
-          programmingType: 'debugging',
-          tool: 'codegrip',
-          dbgFile
-        });
-      } else {
-        output.appendLine(`Starting cppdbg against CODEGRIP GDB at 127.0.0.1:${debugRuntime.debugPort}.`);
-        configuration = codegripCppDebugConfiguration(setup, projectRoot, elf, debugRuntime.debugPort, generation);
-      }
+      output.appendLine(`Starting cppdbg against CODEGRIP GDB at 127.0.0.1:${debugRuntime.debugPort}.`);
+      configuration = codegripCppDebugConfiguration(setup, projectRoot, elf, debugRuntime.debugPort, generation);
     } else {
       throw new Error(`Debugging with '${setup.metadata.programmer.uid}' is not implemented.`);
     }
@@ -3300,15 +3344,32 @@ async function removeSetupById(context, setupId) {
   vscode.window.showInformationMessage(`Removed C setup '${setup.name || setupId}'.`);
 }
 
+function cDebugAvailability(setup) {
+  if (!setup) return { available: false, reason: 'no-setup', hint: 'No C setup is selected.' };
+  const programmerUid = String(setup.metadata?.programmer?.uid || '');
+  const compilerFamily = String(compilerSupport.adapterFor(setup.metadata?.compiler?.uid)?.family || '');
+  if (programmerUid === 'codegrip' && isMikroCFamily(compilerFamily)) {
+    return {
+      available: false,
+      reason: 'mikroc-codegrip',
+      hint: 'Debug is not available in VS Code for mikroC setups with CODEGRIP. Use NECTO Studio for that purpose.'
+    };
+  }
+  if (programmerUid === rfp.RFP_PROGRAMMER_UID) {
+    const profile = setup.rfpProfile || rfp.defaultProfile(setup);
+    if (!rfp.renesasDebugTarget(setup, profile)) {
+      return {
+        available: false,
+        reason: 'renesas-e2-required',
+        hint: 'Debug is supported only with Renesas E2 and E2 Lite. Select E2 or E2 Lite as the programmer connection.'
+      };
+    }
+  }
+  return { available: true, reason: '', hint: '' };
+}
+
 function isSetupDebugAvailable(setup) {
-  if (!setup) return false;
-  const rfpSelected = setup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID;
-  if (!rfpSelected) return true;
-  // Make Debug visible for Renesas targets only when the saved/default RFP
-  // profile is a hardware-debug-capable E2/E2 Lite connection. RX uses FINE;
-  // RL78 uses 1-wire UART (uart1). RL78 still defaults to direct UART boot mode.
-  const profile = setup.rfpProfile || rfp.defaultProfile(setup);
-  return Boolean(rfp.renesasDebugTarget(setup, profile));
+  return cDebugAvailability(setup).available;
 }
 
 async function updateWorkspaceContext() {
@@ -3317,20 +3378,29 @@ async function updateWorkspaceContext() {
   const hasCmake = Boolean(root && fs.existsSync(path.join(root, 'CMakeLists.txt')));
   const bound = Boolean(root && fs.existsSync(path.join(root, '.vscode', 'mikrobus-c.json')));
   let debugAvailable = false;
+  let debugUnavailableMikrocCodegrip = false;
+  let debugUnavailableRenesasE2Required = false;
   let rfpSelected = false;
   if (bound && hasCmake && globalCContext) {
     try {
       const setup = getBoundSetup(globalCContext, root);
       rfpSelected = setup.metadata?.programmer?.uid === rfp.RFP_PROGRAMMER_UID;
-      debugAvailable = isSetupDebugAvailable(setup);
+      const availability = cDebugAvailability(setup);
+      debugAvailable = availability.available;
+      debugUnavailableMikrocCodegrip = availability.reason === 'mikroc-codegrip';
+      debugUnavailableRenesasE2Required = availability.reason === 'renesas-e2-required';
     } catch {
       debugAvailable = false;
+      debugUnavailableMikrocCodegrip = false;
+      debugUnavailableRenesasE2Required = false;
       rfpSelected = false;
     }
   }
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cWorkspaceBound', bound);
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cProjectReady', bound && hasCmake);
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cDebugAvailable', debugAvailable);
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.cDebugUnavailableMikrocCodegrip', debugUnavailableMikrocCodegrip);
+  await vscode.commands.executeCommand('setContext', 'mikrobusRust.cDebugUnavailableRenesasE2Required', debugUnavailableRenesasE2Required);
   await vscode.commands.executeCommand('setContext', 'mikrobusRust.cRfpSelected', rfpSelected);
   if (bound) await hideCppToolsActiveFileShortcut(root);
 }
@@ -3490,41 +3560,6 @@ function registerDebugRuntimeLifecycle(context) {
     }
   });
 
-  // mikroC uses the native mikroDap adapter but still owns the same dynamic
-  // CODEGRIP server lifecycle as cppdbg. Keep Stop/Restart cleanup symmetric.
-  const mikrocTrackerFactory = vscode.debug.registerDebugAdapterTrackerFactory(mikrocDebug.DEBUG_TYPE, {
-    createDebugAdapterTracker(session) {
-      if (session.configuration?.__mikrobusCodegripC !== true) return undefined;
-      return {
-        onWillReceiveMessage(message) {
-          if (isCodegripRestartRequest(message)) {
-            output.appendLine('mikroC CODEGRIP Restart requested; waiting for the current debugger session to terminate cleanly...');
-            codegripRestartRequested.set(session.id, Date.now());
-            const timer = codegripStopTimers.get(session.id);
-            if (timer) clearTimeout(timer);
-            codegripStopTimers.delete(session.id);
-            return;
-          }
-          if (!isCodegripFinalStopRequest(message)) return;
-          codegripRestartRequested.delete(session.id);
-          const active = activeExternalDebugRuntime;
-          if (active?.runtime && active.generation === session.configuration?.__mikrobusCodegripGeneration) {
-            scheduleCodegripCleanup(session, active.runtime);
-          }
-        },
-        onExit() {
-          const timer = codegripStopTimers.get(session.id);
-          if (timer) clearTimeout(timer);
-          codegripStopTimers.delete(session.id);
-          const active = activeExternalDebugRuntime;
-          if (!active || active.generation !== session.configuration?.__mikrobusCodegripGeneration) return;
-          activeExternalDebugRuntime = undefined;
-          void stopCodegripServer(active.runtime);
-        }
-      };
-    }
-  });
-
   const codegripTermination = vscode.debug.onDidTerminateDebugSession((session) => {
     if (session.configuration?.__mikrobusCodegripC !== true) return;
     const restartRequested = codegripRestartRequested.has(session.id);
@@ -3556,7 +3591,7 @@ function registerDebugRuntimeLifecycle(context) {
     })();
   });
 
-  context.subscriptions.push(cortexTrackerFactory, cppTrackerFactory, mikrocTrackerFactory, codegripTermination, {
+  context.subscriptions.push(cortexTrackerFactory, cppTrackerFactory, codegripTermination, {
     dispose() {
       for (const timer of codegripStopTimers.values()) clearTimeout(timer);
       codegripStopTimers.clear();
@@ -3572,7 +3607,7 @@ function registerDebugRuntimeLifecycle(context) {
 function registerCSupport(context) {
   globalCContext = context;
   cmakeVisibility.register(context);
-  mikrocDebug.register(context, output);
+  try { packages.cleanupObsoleteMikroCDebugArtifacts(context); } catch (error) { output.appendLine(`Legacy mikroC debug cleanup: ${error.message || error}`); }
   registerDebugRuntimeLifecycle(context);
   guardedCommand(context, 'mikrobusC.createSetup', () => openCConfigurator(context));
   guardedCommand(context, 'mikrobusC.createSetupFromVisual', (selection) => createSetupFromSelection(context, selection));
@@ -3641,6 +3676,7 @@ module.exports = {
     isRl78G24Setup,
     rl78G24ServerArgs,
     renesasRl78DirectCppDebugConfiguration,
+    cDebugAvailability,
     isSetupDebugAvailable,
     isCodegripRestartRequest,
     isCodegripFinalStopRequest,

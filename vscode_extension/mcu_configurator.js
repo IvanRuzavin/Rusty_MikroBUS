@@ -3779,7 +3779,6 @@ function getMcuHtml(webview, extensionUri) {
         <p>Configure a bare MCU or a board with an optional shield, then manage reusable Rust SDK setups.</p>
       </div>
       <div class="topActions">
-        <button id="showSetups" class="secondary">Configured setups <span id="setupCount" class="buttonCount">0</span></button>
         <button id="refresh" class="secondary">Refresh database</button>
       </div>
     </header>
@@ -3901,7 +3900,6 @@ function getMcuHtml(webview, extensionUri) {
       <section id="configView" class="pageView hidden">
         <div class="viewNav">
           <button id="backToMcus" class="secondary">← Selection</button>
-          <button id="showSetupsFromConfig" class="secondary">Configured setups</button>
         </div>
 
         <div id="mcuDeviceHeader" class="deviceHeader">

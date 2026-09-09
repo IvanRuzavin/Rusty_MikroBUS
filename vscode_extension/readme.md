@@ -1,3 +1,27 @@
+## v0.7.56 - Navigation cleanup
+
+- Removed the Rust Configure/Development Environment icons from the sidebar view title.
+- Removed redundant Configured setups actions from Rust Hardware Configuration; configured setups remain in the extension sidebar.
+- Simplified Rust Development Environment actions by removing Configure MCU or Board and Refresh.
+- C Development Environment package subviews now use an arrow-only previous-view navigation control instead of a textual Back button.
+
+## v0.7.54
+
+### C debug availability and Clang compatibility
+
+- mikroC + CODEGRIP setups keep the Debug toolbar action visible but disabled. VS Code directs users to NECTO Studio for mikroC CODEGRIP debugging.
+- Renesas RFP UART/non-E2 connections keep Debug visible but disabled; hardware debugging is enabled only for E2/E2 Lite profiles.
+- The abandoned mikroC/mikroDap VS Code debug runtime, private Qt runtime integration, and obsolete debugger download metadata were removed.
+- ARM Clang setup toolchains now consume the same core compatibility suppression flags used by the core-package integration, including legacy integer/function-pointer conversion suppressions.
+
+## v0.7.55 - Windows/macOS CODEGRIP and managed C build tools
+
+- CODEGRIP host package selection is now platform-aware everywhere: `linux` on Linux, `win` on Windows, and `mac` on macOS. Rust Development Environment also allows automatic CODEGRIP installation on Windows/macOS instead of restricting it to Linux x64.
+- Windows/macOS C setups no longer require CMake and Ninja to be preinstalled system-wide. If configured/PATH/common host locations do not provide them, the extension installs managed relocatable CMake and Ninja packages under `c-runtime/packages/tools` and stores their exact executable paths in the setup.
+- CMake/Ninja discovery accepts either an executable path or a containing directory. Windows discovery also checks normal CMake installs, Scoop, and Visual Studio 2022 CMake/Ninja locations; macOS checks CMake.app, Homebrew, `/usr/local`, and MacPorts locations.
+- Managed CMake is pinned to 3.31.12 for Windows/macOS and managed Ninja to 1.12.1. Windows ARM64 selects native ARM64 archives; macOS uses universal CMake and the macOS Ninja release.
+- ZIP extraction now falls back to the extension-bundled 7-Zip binary when `tar`/`unzip` is unavailable.
+
 ## v0.7.52
 
 ### Rust universal probe-rs programming and stable GDB stepping
@@ -33,12 +57,8 @@
 ### Debug fixes in 0.7.45
 
 - RL78/G24 E2/E2 Lite debugging now uses the native Renesas Debug adapter instead of routing RL78 GDB through `cppdbg`. This removes the incorrect x86_64 architecture fallback and the pause/step `Cannot find bounds of current function` failure seen with the direct MI path.
-- mikroC + CODEGRIP now sends the complete mikroDap debugger settings (`resetType`, `connectionType`, `speed`, `protocol`, and `Programming Type`) during DAP initialization, using the same per-MCU NECTO defaults already applied to CodegripGdbServer (for example PIC32 uses 2-wire EJTAG), and logs the effective initialization values.
 
 
-- mikroC/mikroDap now installs a private matching Qt 6.9.1 Linux x64 runtime while rebuilding a mikroC setup. This prevents Ubuntu/system Qt modules such as Qt6DBus/Gui/Widgets/Network/Sql from being mixed with NECTO's Qt 6.9.1 Core and eliminates private-ABI symbol lookup failures.
-- The private Qt runtime is downloaded from Qt's official 6.9.1 online repository and is used only for mikroDap through `LD_LIBRARY_PATH`/Qt plugin paths.
-- C build-support revision is 56, so existing mikroC setups are restored/rebuilt once and receive the managed debugger runtime automatically.
 
 ## Changes in v0.7.43
 
@@ -112,7 +132,7 @@ Package installation is transactional:
 
 All managed C packages are visible on the installed-packages page. If a removed package is referenced by a setup, the next setup/project build restores it automatically.
 
-Ninja is resolved from PATH (or `mikrobusRust.cNinjaPath`). Non-mikroC setups use the configured/host CMake. mikroC setups install the managed NECTO CMake package plus the dedicated `mikroc_cmake` language-module package into `c-runtime/packages/tools`, so they do not depend on a host CMake implementation of the custom `MikroC` language.
+CMake and Ninja are resolved from explicit settings, PATH/common host locations, or extension-managed build-tool packages. Non-mikroC setups use the configured/host/managed CMake. mikroC setups install the managed NECTO CMake package plus the dedicated `mikroc_cmake` language-module package into `c-runtime/packages/tools`, so they do not depend on a host CMake implementation of the custom `MikroC` language.
 
 
 ## mikroC AI CMake and JCFG support
@@ -441,13 +461,6 @@ This means a dedicated one-MCU alias card is no longer required. For example, af
 - restores compiler-native PIC/PIC32/dsPIC aliases such as `P32MZ2048EFH144` instead of passing the database `PIC32...` UID directly
 - keeps `Defs` and family/core-specific `Uses` directories on mikroC `SEARCH_PATHS`
 
-
-### v0.7.42 standalone mikroC CODEGRIP debugging
-
-- mikroC AI projects no longer use Microsoft `cppdbg`/ordinary GDB for CODEGRIP debug. The extension now launches the same native `mikroDap` architecture used by NECTO and selects the family backend from the compiler UID: `mikroe:arm:gdb_rsp`, `mikroe:pic:gdb_rsp`, `mikroe:pic32:gdb_rsp`, `mikroe:dspic:gdb_rsp`, or `mikroe:avr:gdb_rsp`.
-- The managed Linux runtime contains `mikroDap`, its NECTO-specific shared-library dependencies, ICU 73, and all five `mikroe_*_gdb_rsp.so` backends. Ordinary Qt6 Gui/Widgets/Network/Sql libraries are resolved from the Linux host. No installed NECTO Studio filesystem is used.
-- A VS Code inline DAP proxy injects NECTO-compatible `projectParameters` and `debuggerSettings`, points launch at the compiler-generated `.dbg` database, and preserves NECTO's initialize → `.dbg` launch → breakpoint ordering. CODEGRIP remains responsible for programming the generated HEX and providing the dynamic RSP port.
-- GCC/LLVM CODEGRIP debugging stays on the existing `cppdbg` path; only mikroC compilers use `mikroDap`. Build-support revision is 55 so existing mikroC setups are regenerated once to persist the exact selected core source path required by mikroDap.
 
 ### v0.7.41
 

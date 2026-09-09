@@ -40,7 +40,7 @@ const URLS = {
   jlink: 'https://www.segger.com/downloads/jlink/',
   codegrip: {
     win32: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/win/codegrip.7z',
-    darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/macos/codegrip.7z',
+    darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/mac/codegrip.7z',
     linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/linux/codegrip.7z'
   },
   bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
@@ -847,7 +847,7 @@ function getInstallAction(id, context) {
   }
 
   if (id === 'codegrip') {
-    return process.platform === 'linux' && os.arch() === 'x64'
+    return URLS.codegrip[process.platform]
       ? managedAction('Install automatically')
       : undefined;
   }
@@ -2013,7 +2013,7 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
         <h1>Development environment setup</h1>
         <p class="subtitle">The extension detects the current host platform and checks the packages required by the Rust MikroBUS workflow.</p>
       </div>
-      <div class="heroActions"><button id="configureMcu" class="secondary">Configure MCU or Board</button><button id="updateManaged" class="secondary">Update managed</button><button id="refresh" class="secondary">Refresh</button></div>
+      <div class="heroActions"><button id="updateManaged" class="secondary">Update managed</button></div>
     </header>
 
     <section class="summary" aria-live="polite">
