@@ -1,3 +1,17 @@
+## v0.7.58 - Clang ARM debug client fix
+
+- Clang ARM C setups no longer pass the plain `lldb` executable to MI-based VS Code debuggers. `lldb --interpreter=mi` is invalid because modern LLDB does not provide GDB/MI.
+- Embedded Clang ARM debugging now decouples compiler and debug client: Clang still builds the ELF, while J-Link/CODEGRIP sessions use a real GDB/MI client (`arm-none-eabi-gdb` preferred, `gdb-multiarch` accepted).
+- The extension first reuses an existing/system/managed ARM GDB. If none is available, the managed xPack GNU Arm toolchain is installed lazily when Debug is first requested, solely to provide the GDB client.
+- Plain `lldb` was removed from the Clang compiler adapter's MI debugger candidates; an actual `lldb-mi` is still accepted when a package provides it.
+- Added the existing xPack GNU Arm package mapping for macOS x64/arm64 as well, so the Clang debug fallback is cross-platform on Linux, Windows and macOS.
+
+## v0.7.57 - Clang core-package compatibility flags
+
+- C ARM setup generation now reads `-Wno-*` compatibility switches directly from the installed core package `cmake/coreUtils.cmake::set_flags()` branch for the selected `CORE_NAME`.
+- Clang/GCC compatibility switches are also seeded through `CMAKE_C_FLAGS_INIT`, ensuring they reach mikroSDK/core compilation commands even when target-level CMake options are rewritten.
+- Existing C setups rebuild automatically through build-support revision 59.
+
 ## v0.7.56 - Navigation cleanup
 
 - Removed the Rust Configure/Development Environment icons from the sidebar view title.

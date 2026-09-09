@@ -1035,6 +1035,9 @@ try {
     assert.strictEqual(compilerSupport.preferredCompiler(compilerChoices)?.uid, 'gcc_arm_none_eabi');
     assert.strictEqual(compilerSupport.preferredCompiler(compilerChoices, 'clang-llvm')?.uid, 'clang-llvm');
     assert.strictEqual(compilerSupport.preferredCompiler([{ uid: 'clang-llvm' }, { uid: 'mikrocarm' }])?.uid, 'clang-llvm');
+    assert.deepStrictEqual(compilerSupport.adapterFor('clang-llvm').executableNames.gdb, ['lldb-mi']);
+    assert.strictEqual(setup.isPlainLldbExecutable('/toolchain/bin/lldb'), true);
+    assert.strictEqual(setup.isPlainLldbExecutable('/toolchain/bin/lldb-mi'), false);
     if (process.platform === 'linux') {
       assert.strictEqual(compilerSupport.compilerAsset('gcc_riscv_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/gcc/riscv/linux/riscv32-unknown-elf-gcc.7z');
       assert.strictEqual(compilerSupport.compilerAsset('microchip_xc8_compiler').url, 'https://software-update.mikroe.com/NECTOStudio7/live/compilers/xc8/linux/xc8.7z');
@@ -1153,7 +1156,44 @@ try {
   ]);
   assert.deepStrictEqual(setup.coreCompatibilityFlags('M0+', {
     name: 'arm-none-eabi-gcc', version: '14.2.1'
-  }), []);
+  }), ['-Wno-incompatible-pointer-types']);
+
+  // ARM compatibility diagnostics must come from the installed core package,
+  // not from a duplicated table in the extension. Preserve an explicitly empty
+  // core branch (M0+) and import the M7 warning suppressions used by Clang.
+  const declaredArmCoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-arm-core-flags-'));
+  try {
+    const cmakeRoot = path.join(declaredArmCoreRoot, 'cmake');
+    fs.mkdirSync(cmakeRoot, { recursive: true });
+    fs.writeFileSync(path.join(cmakeRoot, 'coreUtils.cmake'), [
+      'function(set_flags flags)',
+      '    if (${CORE_NAME} STREQUAL "M0+")',
+      '        set(${flags} -std=gnu99 -mcpu=cortex-m0plus -mthumb ${POINTER_TYPE_ERROR} PARENT_SCOPE)',
+      '    elseif (${CORE_NAME} STREQUAL "M7")',
+      '        set(M7_FPU_FLAG -mfpu=fpv5-d16)',
+      '        if(${MCU_NAME} MATCHES "^STM32.+$")',
+      '            if(NOT ${MCU_NAME} MATCHES "^STM32(F7[67]|H7[2-5]).+$")',
+      '                set(M7_FPU_FLAG -mfpu=fpv5-sp-d16)',
+      '            endif()',
+      '        endif()',
+      '        set(${flags} -std=gnu99 -mcpu=cortex-m7 -mthumb ${POINTER_TYPE_ERROR} -mfloat-abi=hard ${M7_FPU_FLAG} -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Wno-int-conversion -Wno-incompatible-function-pointer-types PARENT_SCOPE)',
+      '    endif()',
+      'endfunction()',
+      ''
+    ].join('\n'), 'utf8');
+    assert.deepStrictEqual(setup.coreDeclaredCompatibilityFlags(declaredArmCoreRoot, 'M7'), {
+      found: true,
+      flags: ['-Wno-int-conversion', '-Wno-incompatible-function-pointer-types']
+    });
+    assert.deepStrictEqual(setup.coreCompatibilityFlags('M7', { name: 'clang', version: '18.0.0' }, declaredArmCoreRoot), [
+      '-Wno-int-conversion',
+      '-Wno-incompatible-function-pointer-types'
+    ]);
+    assert.deepStrictEqual(setup.coreDeclaredCompatibilityFlags(declaredArmCoreRoot, 'M0+'), { found: true, flags: [] });
+    assert.deepStrictEqual(setup.coreCompatibilityFlags('M0+', { name: 'clang', version: '18.0.0' }, declaredArmCoreRoot), []);
+  } finally {
+    fs.rmSync(declaredArmCoreRoot, { recursive: true, force: true });
+  }
   assert.strictEqual(setup.normalizeApplicationOutput('UART'), 'uart');
   assert.strictEqual(setup.normalizeApplicationOutput('Debug Terminal'), 'debug-terminal');
   assert.strictEqual(setup.normalizeApplicationOutput('LOG_INTERFACE_STDOUT'), 'debug-terminal');
@@ -1742,7 +1782,19 @@ endfunction()
     }
   }
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 58);
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 60);
+
+  const armGdbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-arm-gdb-'));
+  try {
+    const gdbName = process.platform === 'win32' ? 'arm-none-eabi-gdb.exe' : 'arm-none-eabi-gdb';
+    const gdbPath = path.join(armGdbRoot, 'bin', gdbName);
+    fs.mkdirSync(path.dirname(gdbPath), { recursive: true });
+    fs.writeFileSync(gdbPath, 'gdb');
+    assert.strictEqual(setup.findArmGdbInRoot(armGdbRoot), gdbPath);
+  } finally {
+    fs.rmSync(armGdbRoot, { recursive: true, force: true });
+  }
+
 
   const mikrocCodegripAvailability = setup.cDebugAvailability({
     metadata: {
@@ -1767,6 +1819,16 @@ endfunction()
 
   const clangToolchainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-clang-compat-'));
   try {
+    const clangCoreCmakeRoot = path.join(clangToolchainRoot, 'core', 'cmake');
+    fs.mkdirSync(clangCoreCmakeRoot, { recursive: true });
+    fs.writeFileSync(path.join(clangCoreCmakeRoot, 'coreUtils.cmake'), [
+      'function(set_flags flags)',
+      '    if (${CORE_NAME} STREQUAL "M4")',
+      '        set(${flags} -std=gnu99 -mcpu=cortex-m4 -mthumb ${POINTER_TYPE_ERROR} -Wno-int-conversion -Wno-incompatible-function-pointer-types PARENT_SCOPE)',
+      '    endif()',
+      'endfunction()',
+      ''
+    ].join('\n'), 'utf8');
     const clangToolchain = path.join(clangToolchainRoot, 'toolchain.cmake');
     setup.writeToolchain(clangToolchain, {
       clockMHz: '168', applicationOutput: 'none', mode: 'full-sdk',
@@ -1778,10 +1840,16 @@ endfunction()
     }, {
       c: '/toolchain/bin/clang', cxx: '/toolchain/bin/clang++', asm: '/toolchain/bin/clang', cmakeAsm: '/toolchain/bin/clang',
       adapter: compilerSupport.adapterFor('clang-llvm')
-    }, { compatibilityModuleRoot: clangToolchainRoot, infrastructureRoot: clangToolchainRoot, installPrefix: clangToolchainRoot });
+    }, {
+      coreSource: path.join(clangToolchainRoot, 'core'),
+      compatibilityModuleRoot: clangToolchainRoot,
+      infrastructureRoot: clangToolchainRoot,
+      installPrefix: clangToolchainRoot
+    });
     const clangText = fs.readFileSync(clangToolchain, 'utf8');
     assert.ok(clangText.includes('"-Wno-int-conversion"'));
     assert.ok(clangText.includes('"-Wno-incompatible-function-pointer-types"'));
+    assert.ok(clangText.includes('set(CMAKE_C_FLAGS_INIT "-Wno-int-conversion -Wno-incompatible-function-pointer-types ${CMAKE_C_FLAGS_INIT}")'));
   } finally {
     fs.rmSync(clangToolchainRoot, { recursive: true, force: true });
   }
@@ -1882,7 +1950,7 @@ endfunction()
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.7.56');
+  assert.strictEqual(packageJson.version, '0.7.58');
   assert.strictEqual(packageJson.icon, 'media/mikrobus-module-3d-transparent.png');
   assert.strictEqual(
     packageJson.contributes.viewsContainers.activitybar.find((item) => item.id === 'mikrobusRust')?.icon,

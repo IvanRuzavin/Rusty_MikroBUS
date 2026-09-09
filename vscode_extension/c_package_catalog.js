@@ -111,6 +111,10 @@ function armGccAsset() {
     const file = `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}-linux-${arch}.tar.gz`;
     return `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${VERSIONS.armGcc}/${file}`;
   }
+  if (process.platform === 'darwin') {
+    const file = `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}-darwin-${arch}.tar.gz`;
+    return `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${VERSIONS.armGcc}/${file}`;
+  }
   return undefined;
 }
 

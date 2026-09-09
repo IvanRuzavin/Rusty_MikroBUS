@@ -36,7 +36,7 @@ function metadataMcuName(metadata = {}) {
 function setupMcuName(setup = {}) {
   return metadataMcuName(setup.metadata || {});
 }
-const C_BUILD_SUPPORT_VERSION = 58;
+const C_BUILD_SUPPORT_VERSION = 60;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
@@ -449,6 +449,80 @@ function mikroCPlatformBinDirectory(root) {
   const platformDirectory = process.platform === 'win32' ? 'win64' : (process.platform === 'darwin' ? 'macos' : 'linux');
   const candidate = path.join(root, 'bin', platformDirectory);
   return fs.existsSync(candidate) ? candidate : undefined;
+}
+
+function debuggerFileNames(names) {
+  if (process.platform !== 'win32') return names;
+  return names.flatMap((name) => path.extname(name) ? [name] : [`${name}.exe`, name]);
+}
+
+function isPlainLldbExecutable(candidate) {
+  const base = path.basename(String(candidate || '')).toLowerCase();
+  return base === 'lldb' || base === 'lldb.exe';
+}
+
+function isUsableMiDebugger(candidate) {
+  if (!candidate || !fs.existsSync(candidate)) return false;
+  return !isPlainLldbExecutable(candidate);
+}
+
+function findArmGdbInRoot(root) {
+  if (!root || !fs.existsSync(root)) return undefined;
+  const names = new Set(debuggerFileNames(['arm-none-eabi-gdb']).map((name) => name.toLowerCase()));
+  return findRecursive(root, (_candidate, name) => names.has(String(name || '').toLowerCase()), 10);
+}
+
+function findExistingArmGdb(context) {
+  const onPath = packages.findOnPath(debuggerFileNames(['arm-none-eabi-gdb', 'gdb-multiarch']));
+  if (onPath) return onPath;
+  const installed = packages.listInstalledPackages(context, true);
+  for (const entry of installed) {
+    const found = findArmGdbInRoot(entry?.root);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function ensureClangArmMiDebugger(context, setup) {
+  const family = String(compilerSupport.adapterFor(setup?.metadata?.compiler?.uid)?.family || '');
+  if (family !== 'clang-arm') return setup?.tools?.gdb;
+
+  if (isUsableMiDebugger(setup?.tools?.gdb)) return setup.tools.gdb;
+
+  let gdb = findExistingArmGdb(context);
+  if (!gdb) {
+    const compilerDescriptor = {
+      uid: 'gcc_arm_none_eabi',
+      name: 'GNU Arm Embedded GDB',
+      displayName: 'GNU Arm Embedded GDB (Clang debug support)',
+      installerPackage: 'gcc_arm_compiler',
+      cCompiler: 'bin/arm-none-eabi-gcc',
+      cxxCompiler: 'bin/arm-none-eabi-g++',
+      asmCompiler: 'bin/arm-none-eabi-as',
+      gdbPath: 'bin/arm-none-eabi-gdb'
+    };
+    const entry = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Installing GNU Arm GDB for Clang debugging',
+      cancellable: true
+    }, async (progress, token) => {
+      const spec = await packages.compilerPackageSpec(context, compilerDescriptor, token);
+      return packages.ensurePackage(context, spec, progress, token);
+    });
+    gdb = findArmGdbInRoot(entry?.root);
+  }
+
+  if (!gdb) {
+    throw new Error(
+      'Clang ARM debugging requires a GDB/MI client. Plain lldb cannot be launched with --interpreter=mi. ' +
+      'Install arm-none-eabi-gdb (or gdb-multiarch), or reinstall the managed GNU Arm debugger support package.'
+    );
+  }
+
+  setup.tools = { ...(setup.tools || {}), gdb };
+  try { writeJsonAtomic(setupFile(context, setup.id), setup); } catch {}
+  output.appendLine(`Clang debug client: ${gdb} (compiler remains ${setup.metadata?.compiler?.name || 'Clang'}).`);
+  return gdb;
 }
 
 function resolveToolchain(setup, installed) {
@@ -978,19 +1052,72 @@ function compilerIdentity(executable) {
   }
 }
 
-function coreCompatibilityFlags(coreName, identity = {}) {
-  const core = String(coreName || '').toUpperCase();
-  const flags = [];
-  // Mirror the compatibility portion of C_core/cmake/coreUtils.cmake::set_flags().
-  // These are required by legacy mikroSDK sources when building with GCC 14.
-  const coresWithLegacyConversionSuppressions = new Set(['M0', 'M23', 'M3', 'M33EF', 'M4', 'M4EF', 'M4DSP', 'M7', 'M85']);
-  if (coresWithLegacyConversionSuppressions.has(core)) {
-    if (/arm-none-eabi-gcc/i.test(String(identity.name || '')) && versionAtLeast(identity.version, '14.2.1')) {
-      flags.push('-Wno-incompatible-pointer-types');
+function coreSetFlagsBranch(coreSource, coreName) {
+  // The installed core package is the source of truth for compatibility
+  // diagnostics. Extract the selected CORE_NAME branch from
+  // cmake/coreUtils.cmake::set_flags(flags) without duplicating it here.
+  const core = String(coreName || '').trim();
+  if (!coreSource || !core) return { found: false, text: '' };
+  const utilityFile = path.join(coreSource, 'cmake', 'coreUtils.cmake');
+  if (!fs.existsSync(utilityFile)) return { found: false, text: '' };
+  let text;
+  try { text = fs.readFileSync(utilityFile, 'utf8'); } catch { return { found: false, text: '' }; }
+  const functionMatch = text.match(/function\s*\(\s*set_flags\b[^)]*\)([\s\S]*?)endfunction(?:\s*\([^)]*\))?/i);
+  if (!functionMatch) return { found: false, text: '' };
+
+  const escapedCore = core.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const coreCondition = new RegExp(`\\$\\{CORE_NAME\\}\\s+STREQUAL\\s+["']?${escapedCore}["']?`, 'i');
+  const lines = functionMatch[1].split(/\r?\n/);
+  let depth = 0;
+  let capturing = false;
+  let chainDepth = -1;
+  const branch = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const keywordMatch = trimmed.match(/^(if|elseif|else|endif)\s*\(/i);
+    const keyword = keywordMatch ? keywordMatch[1].toLowerCase() : '';
+    if (capturing && depth === chainDepth && (keyword === 'elseif' || keyword === 'else' || keyword === 'endif')) break;
+    if (!capturing && (keyword === 'if' || keyword === 'elseif') && coreCondition.test(trimmed)) {
+      capturing = true;
+      chainDepth = keyword === 'if' ? depth + 1 : depth;
+    } else if (capturing) {
+      branch.push(line);
     }
-    flags.push('-Wno-int-conversion', '-Wno-incompatible-function-pointer-types');
+    if (keyword === 'if') depth += 1;
+    else if (keyword === 'endif') depth = Math.max(0, depth - 1);
   }
-  return flags;
+  return { found: capturing, text: branch.join('\n') };
+}
+
+function coreDeclaredCompatibilityFlags(coreSource, coreName) {
+  const branch = coreSetFlagsBranch(coreSource, coreName);
+  if (!branch.found) return { found: false, flags: [] };
+  const flags = [];
+  // Import diagnostic compatibility switches directly from the package. Other
+  // flags can contain nested MCU/FPU/linker logic and remain handled by the
+  // architecture/compiler adapter.
+  for (const match of branch.text.matchAll(/(?:^|[\s;])(-Wno-[A-Za-z0-9_.=+-]+)/g)) {
+    if (!flags.includes(match[1])) flags.push(match[1]);
+  }
+  return { found: true, flags };
+}
+
+function coreCompatibilityFlags(coreName, identity = {}, coreSource = '') {
+  const core = String(coreName || '').toUpperCase();
+  const declared = coreDeclaredCompatibilityFlags(coreSource, core);
+  const flags = declared.found ? [...declared.flags] : [];
+  // Fallback only for old packages with no matching set_flags() branch. If a
+  // branch exists, the installed package is authoritative, even when empty.
+  if (!declared.found) {
+    const legacyCores = new Set(['M0', 'M23', 'M3', 'M33EF', 'M4', 'M4EF', 'M4DSP', 'M7', 'M85']);
+    if (legacyCores.has(core)) flags.push('-Wno-int-conversion', '-Wno-incompatible-function-pointer-types');
+  }
+  // Mirrors the package's POINTER_TYPE_ERROR compatibility for GCC 14.x.
+  if (/arm-none-eabi-gcc/i.test(String(identity.name || '')) && versionAtLeast(identity.version, '14.2.1')) {
+    if (!flags.includes('-Wno-incompatible-pointer-types')) flags.unshift('-Wno-incompatible-pointer-types');
+  }
+  return [...new Set(flags)];
 }
 
 function sdkMemoryVariables(metadata = {}) {
@@ -1090,7 +1217,7 @@ function writeToolchain(filePath, setup, resolved, options) {
     ? armArchitectureFlags(metadata.sdkConfig.CORE_NAME, metadataMcuName(metadata))
     : [];
   const compatibilityFlags = /^(gnu-arm|clang-arm)$/.test(String(resolved.adapter?.family || ''))
-    ? coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c))
+    ? coreCompatibilityFlags(metadata.sdkConfig.CORE_NAME, compilerIdentity(resolved.c), options.coreSource)
     : [];
   const rxDeclaredFlags = family === 'gnu-rx'
     ? rxCoreDeclaredFlags(options.coreSource, metadata.sdkConfig.CORE_NAME)
@@ -1100,6 +1227,12 @@ function writeToolchain(filePath, setup, resolved, options) {
   const linkFlags = mikroC ? [] : [...adapterFlags.link, ...deviceLinkerFlags].filter(Boolean);
   const compileLine = compileFlags.length ? `add_compile_options(${compileFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
   const linkLine = linkFlags.length ? `add_link_options(${linkFlags.map((flag) => `"${quoteCmake(flag)}"`).join(' ')})` : '';
+  // Also seed the base C flags. This guarantees the core-declared diagnostic
+  // compatibility switches survive target-level option manipulation and reach
+  // every actual GCC/Clang C compile command.
+  const compatibilityInitLine = compatibilityFlags.length
+    ? `if(NOT DEFINED MIKROBUS_CORE_COMPAT_FLAGS_INIT_APPLIED)\nset(CMAKE_C_FLAGS_INIT "${quoteCmake(compatibilityFlags.join(' '))} \${CMAKE_C_FLAGS_INIT}")\nset(MIKROBUS_CORE_COMPAT_FLAGS_INIT_APPLIED TRUE CACHE INTERNAL "MikroBUS core compatibility flags initialized")\nendif()`
+    : '';
   const acceptsGnuLinkerScript = /^(gnu-|clang-|xc32|llvm-rl78)/.test(family);
   const linker = options.linkerScript && acceptsGnuLinkerScript ? `add_link_options("-T${quoteCmake(options.linkerScript)}")` : '';
   const startup = options.startupFile ? `set(MIKROBUS_STARTUP_FILE "${quoteCmake(options.startupFile)}" CACHE FILEPATH "" FORCE)` : '';
@@ -1131,7 +1264,7 @@ function writeToolchain(filePath, setup, resolved, options) {
   ]).filter(Boolean).join('\n');
   const mikroCCompileOptions = ''; // Official NECTO CMake consumes COMPILER_FLAGS/SEARCH_PATHS.
 
-  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n${compilerLines}\n${xc8Rules}message(STATUS "MikroBUS compiler: ${quoteCmake(metadata.compiler.uid)} -> ${quoteCmake(resolved.c)}")\n${mikroC ? `message(STATUS "MikroBUS CMake language: MikroC")\nmessage(STATUS "MikroBUS mikroC core def: ${quoteCmake(mikroCPathInfo.coreDefinitionDirectory || '')}")\nmessage(STATUS "MikroBUS mikroC device: ${quoteCmake(mikroCDeviceName)}")\nmessage(STATUS "MikroBUS mikroC search paths: ${quoteCmake(mikroCPaths.join(';'))}")\nmessage(STATUS "MikroBUS mikroC JCFG: ${quoteCmake(options.jcfgFile || '')}")\nmessage(STATUS "MikroBUS mikroC core library: ${quoteCmake(options.coreLib || '')}")\n` : `message(STATUS "MikroBUS CMake ASM driver: ${quoteCmake(cmakeAsmCompiler)}")\n`}${cacheSettings}\n${mikroC ? `set(CMAKE_MikroC_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\nset(CMAKE_EXE_LINKER_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\n` : ''}set(TOOLCHAIN_LANGUAGE "${quoteCmake(resolved.adapter.language)}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nif(DEFINED MIKROBUS_WORKSPACE_PREFIX_PATH)\n  set(CMAKE_PREFIX_PATH "\${MIKROBUS_WORKSPACE_PREFIX_PATH}" CACHE STRING "" FORCE)\nelse()\n  set(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\nendif()\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\n${/^(xc8|xc16|xc32)$/.test(family) ? 'add_compile_definitions("$<$<CONFIG:Debug>:__DEBUG>")' : ''}\n${mikroCCompileOptions ? `add_compile_options(${mikroCCompileOptions})` : ''}\n${compileLine}\n${linkLine}\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
+  const text = `# Generated by MikroBUS Embedded Tools.\nset(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_VERSION 1)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n${compilerLines}\n${xc8Rules}message(STATUS "MikroBUS compiler: ${quoteCmake(metadata.compiler.uid)} -> ${quoteCmake(resolved.c)}")\n${mikroC ? `message(STATUS "MikroBUS CMake language: MikroC")\nmessage(STATUS "MikroBUS mikroC core def: ${quoteCmake(mikroCPathInfo.coreDefinitionDirectory || '')}")\nmessage(STATUS "MikroBUS mikroC device: ${quoteCmake(mikroCDeviceName)}")\nmessage(STATUS "MikroBUS mikroC search paths: ${quoteCmake(mikroCPaths.join(';'))}")\nmessage(STATUS "MikroBUS mikroC JCFG: ${quoteCmake(options.jcfgFile || '')}")\nmessage(STATUS "MikroBUS mikroC core library: ${quoteCmake(options.coreLib || '')}")\n` : `message(STATUS "MikroBUS CMake ASM driver: ${quoteCmake(cmakeAsmCompiler)}")\nmessage(STATUS "MikroBUS core compatibility flags: ${quoteCmake(compatibilityFlags.join(' '))}")\n`}\n${compatibilityInitLine}\n${cacheSettings}\n${mikroC ? `set(CMAKE_MikroC_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\nset(CMAKE_EXE_LINKER_FLAGS "${quoteCmake(mikroCAllFlags.join(' '))}" CACHE STRING "" FORCE)\n` : ''}set(TOOLCHAIN_LANGUAGE "${quoteCmake(resolved.adapter.language)}" CACHE STRING "" FORCE)\nset(CMAKE_MODULE_PATH "${modulePaths}" CACHE STRING "" FORCE)\nif(DEFINED MIKROBUS_WORKSPACE_PREFIX_PATH)\n  set(CMAKE_PREFIX_PATH "\${MIKROBUS_WORKSPACE_PREFIX_PATH}" CACHE STRING "" FORCE)\nelse()\n  set(CMAKE_PREFIX_PATH "${quoteCmake(options.installPrefix)}" CACHE STRING "" FORCE)\nendif()\n${options.sdkSetupBuild ? 'set(SDK_SETUP_BUILD TRUE)' : ''}\n${startup}\nadd_compile_definitions(PREINIT_SUPPORTED)\n${/^(xc8|xc16|xc32)$/.test(family) ? 'add_compile_definitions("$<$<CONFIG:Debug>:__DEBUG>")' : ''}\n${mikroCCompileOptions ? `add_compile_options(${mikroCCompileOptions})` : ''}\n${compileLine}\n${linkLine}\n${linker}\nset(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n`;
   fs.writeFileSync(filePath, text, 'utf8');
 }
 
@@ -3143,6 +3276,9 @@ async function debugWorkspace(context, debugOptions = {}) {
     const built = await buildWorkspace(context);
     if (!built) return;
     const { setup, elf, hex } = built;
+    if (String(compilerSupport.adapterFor(setup.metadata?.compiler?.uid)?.family || '') === 'clang-arm') {
+      await ensureClangArmMiDebugger(context, setup);
+    }
     const projectRoot = cProjectRoot();
     entryBreakpoint = ensureCMainEntryBreakpoint(projectRoot);
     let configuration;
@@ -3656,6 +3792,8 @@ module.exports = {
     registerFieldId,
     splitFlags,
     rxCoreDeclaredFlags,
+    coreSetFlagsBranch,
+    coreDeclaredCompatibilityFlags,
     armArchitectureFlags,
     generatedProjectCmake,
     starterMain,
@@ -3726,6 +3864,9 @@ module.exports = {
     validateSdkDriverPackages,
     metadataMcuName,
     setupMcuName,
+    isPlainLldbExecutable,
+    isUsableMiDebugger,
+    findArmGdbInRoot,
     C_BUILD_SUPPORT_VERSION
   }
 };

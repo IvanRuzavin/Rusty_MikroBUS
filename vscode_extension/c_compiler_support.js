@@ -120,6 +120,10 @@ function armGccAsset() {
     const file = `xpack-arm-none-eabi-gcc-${ARM_GCC_VERSION}-linux-${arch}.tar.gz`;
     return { version: ARM_GCC_VERSION, installRelativePath: 'compilers/gcc/arm', url: `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${ARM_GCC_VERSION}/${file}` };
   }
+  if (process.platform === 'darwin') {
+    const file = `xpack-arm-none-eabi-gcc-${ARM_GCC_VERSION}-darwin-${arch}.tar.gz`;
+    return { version: ARM_GCC_VERSION, installRelativePath: 'compilers/gcc/arm', url: `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${ARM_GCC_VERSION}/${file}` };
+  }
   return undefined;
 }
 
@@ -148,11 +152,11 @@ const COMPILER_ADAPTERS = Object.freeze({
   },
   'clang-llvm': {
     family: 'clang-arm', language: 'CLANG', cmakeAsmViaCCompiler: true,
-    executableNames: { c:['clang'], cxx:['clang++','clang'], asm:['llvm-as'], gdb:['lldb-mi','lldb'], objcopy:['llvm-objcopy'] }
+    executableNames: { c:['clang'], cxx:['clang++','clang'], asm:['llvm-as'], gdb:['lldb-mi'], objcopy:['llvm-objcopy'] }
   },
   'clang-llvm-riscv': {
     family: 'clang-riscv', language: 'CLANG', cmakeAsmViaCCompiler: true,
-    executableNames: { c:['clang'], cxx:['clang++','clang'], asm:['llvm-as'], gdb:['lldb-mi','lldb'], objcopy:['llvm-objcopy'] }
+    executableNames: { c:['clang'], cxx:['clang++','clang'], asm:['llvm-as'], gdb:['lldb-mi'], objcopy:['llvm-objcopy'] }
   },
   mchp_xc8: {
     family: 'xc8', language: 'XC8', cmakeAsmViaCCompiler: true,
