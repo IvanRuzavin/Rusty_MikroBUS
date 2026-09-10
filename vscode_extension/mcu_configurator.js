@@ -3633,6 +3633,19 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
         .replaceAll('{family}', familyLower);
     }
 
+    // Family Cargo templates are supersets. The selected MCU definition lists
+    // only the peripheral instances that physically exist on that MCU. Any
+    // remaining *_features token therefore represents an optional peripheral
+    // instance that is absent and must become an empty feature list.
+    familyTemplate = familyTemplate.replace(/\{[A-Za-z0-9_]+_features\}/g, '');
+
+    // The HAL template follows the same model for optional peripheral modules.
+    // Known modules were populated above; any remaining simple token is an
+    // optional module that is not present on this MCU.
+    halLlTemplate = halLlTemplate
+      .replaceAll('{family}', familyLower)
+      .replace(/\{[A-Za-z0-9_]+\}/g, '');
+
     fs.writeFileSync(path.join(sdkSetup, 'Cargo.toml'), familyTemplate, 'utf8');
     fs.mkdirSync(sdkTargetRoot, { recursive: true });
     fs.writeFileSync(path.join(sdkTargetRoot, 'Cargo.toml'), halLlTemplate, 'utf8');
