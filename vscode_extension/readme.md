@@ -13,7 +13,7 @@ It is designed around the MIKROE/NECTO package ecosystem and mikroBUS hardware m
 - Separate **Rust Environment** and **C Environment** workflows.
 - Automatically manage databases, compiler packages, MCU core packages, BSP packages and programmer tools.
 - Build, clean, flash, erase and debug directly from VS Code.
-- Use **CODEGRIP**, **SEGGER J-Link**, **probe-rs** and **Renesas Flash Programmer** where applicable.
+- Use **CODEGRIP**, **SEGGER J-Link**, **probe-rs**, **Microchip PICkit/ICD/EDBG-class tools** and **Renesas Flash Programmer** where applicable.
 - Browse and install **Click Board examples** and **Demo examples** for C.
 - Shared managed installation root for Rust and C packages.
 - Host support for **Linux, Windows and macOS**, with platform-aware package/tool discovery.
@@ -61,6 +61,8 @@ C setups follow the same package-oriented model used by NECTO: select a device, 
 
 The current NECTO-compatible database is the compatibility authority: the extension only offers compiler/device combinations that are mapped for the selected MCU.
 
+For **Microchip XC8/XC16/XC32**, MCU JSON files that expose symbolic `config_words` are handled natively. For XC32, the compiler-encoded `.config_<address>` sections are read directly from the generated configuration object and merged into the final Intel HEX, so custom mikroSDK linker scripts cannot discard the configuration words. Numeric `config_registers` definitions remain supported for older package formats.
+
 ## C compilers
 
 | Compiler family | Architectures / MCU families | Build | Debug notes |
@@ -69,9 +71,9 @@ The current NECTO-compatible database is the compatibility authority: the extens
 | **GNU RISC-V** | RISC-V | ✅ | GDB-based flow where the selected device/programmer supports it. |
 | **LLVM/Clang ARM** | ARM Cortex-M | ✅ | Uses Clang for build and an ARM GDB client for embedded debug sessions. |
 | **LLVM/Clang RISC-V** | RISC-V | ✅ | Clang build flow with compatible debug backend. |
-| **Microchip XC8** | PIC 8-bit / supported XC8 targets | ✅ | Debug availability depends on programmer/debug support. |
-| **Microchip XC16** | dsPIC / PIC24 | ✅ | Debug availability depends on programmer/debug support. |
-| **Microchip XC32** | PIC32 and supported 32-bit Microchip targets | ✅ | Debug availability depends on programmer/debug support. |
+| **Microchip XC8** | PIC 8-bit / supported XC8 targets | ✅ | Debugging is supported through compatible Microchip hardware programmers. CODEGRIP remains available for programming but its Debug button is intentionally disabled for XC setups. |
+| **Microchip XC16** | dsPIC / PIC24 | ✅ | Debugging is supported through compatible Microchip hardware programmers. CODEGRIP remains available for programming but its Debug button is intentionally disabled for XC setups. |
+| **Microchip XC32** | PIC32 and supported 32-bit Microchip targets | ✅ | Debugging is supported through compatible Microchip hardware programmers. CODEGRIP remains available for programming but its Debug button is intentionally disabled for XC setups. |
 | **mikroC AI for ARM** | ARM | ✅ | CODEGRIP programming supported; VS Code CODEGRIP debugging is intentionally disabled — use NECTO Studio for mikroC debugging. |
 | **mikroC AI for PIC** | PIC | ✅ | Programming support follows the selected programmer mapping. |
 | **mikroC AI for PIC32** | PIC32 | ✅ | Programming support follows the selected programmer mapping. |
@@ -84,7 +86,10 @@ The current NECTO-compatible database is the compatibility authority: the extens
 
 | Programmer / debugger | Programming | Debugging | Notes |
 |---|:---:|:---:|---|
-| **MIKROE CODEGRIP** | ✅ | ✅* | Database-driven MCU support. *VS Code debug is disabled for mikroC + CODEGRIP setups; use NECTO Studio for that combination. |
+| **MIKROE CODEGRIP** | ✅ | Conditional | Database-driven MCU support. VS Code debug is disabled for **XC8/XC16/XC32 + CODEGRIP** (use a Microchip programmer for XC debugging) and for **mikroC + CODEGRIP** (use NECTO Studio). |
+| **Microchip PICkit 4 / PICkit 5** | ✅ | ✅ | Uses the official **Debug Adapter for MPLAB** and its connected-tool picker. On Linux the extension checks USB access and can install the required udev rule when permissions are missing. |
+| **Microchip ICD 4** | ✅ | ✅ | Uses the official **Debug Adapter for MPLAB** and automatic connected-tool discovery. |
+| **Microchip PKOB4 / Power Debugger / EDBG / PICkit Basic mappings** | ✅ | ✅ | Exposed when the selected database row maps the tool-support package to the MCU/compiler; programming/erase/debug use the MPLAB adapter backend and connected-tool discovery. |
 | **SEGGER J-Link** | ✅ | ✅ | Uses J-Link Commander / J-Link GDB Server where supported. |
 | **Renesas Flash Programmer (RFP)** | ✅ | Conditional | UART programming is supported. Hardware debugging is enabled only for **E2** and **E2 Lite** profiles. |
 | **Renesas E2 / E2 Lite** | ✅ | ✅ | RL78/RX debug integration uses the Renesas tooling/support files. |
@@ -126,7 +131,7 @@ The extension can manage the packages needed by a setup rather than requiring ev
 ### C Environment
 
 - Compiler packages
-- Programmer packages
+- Programmer packages, including Microchip PICkit/ICD/EDBG tool-support packs
 - CODEGRIP device/server packages
 - MCU core packages
 - Board and MCU-card BSP packages

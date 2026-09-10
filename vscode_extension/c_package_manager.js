@@ -13,6 +13,8 @@ const { resolvePackage } = packageCatalog;
 const compilerSupport = require('./c_compiler_support');
 
 const installLocks = new Map();
+const xclmPrivilegeLocks = new Map();
+const XC_COMPILER_UIDS = new Set(['mchp_xc8', 'mchp_xc16', 'mchp_xc32']);
 let packagePanel;
 let environmentPanel;
 let environmentViewKind = 'environment';
@@ -32,6 +34,20 @@ const RFP_DOWNLOAD_URL = 'https://www.renesas.com/en/software-tool/renesas-flash
 const CLICK_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_clicks_c.json';
 const DEMO_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/metadata_demos_c.json';
 
+
+
+function codegripServerPackageSpec(options = {}) {
+  const asset = packageCatalog.codegripServerAsset(process.platform);
+  if (!asset?.url || !asset?.version) return undefined;
+  return {
+    kind: 'programmer',
+    name: 'codegrip_gdb_server',
+    version: asset.version,
+    displayName: 'CODEGRIP GDB Server',
+    environment: Boolean(options.environment),
+    downloadUrl: asset.url
+  };
+}
 
 function managedBuildToolPackageSpec(name) {
   const asset = packageCatalog.managedBuildToolAsset(name, process.platform, process.arch);
@@ -683,6 +699,17 @@ async function extractArchive(archivePath, destination, token) {
     await runCommand(sevenZip, ['x', '-y', archivePath, `-o${destination}`], token);
     return;
   }
+  if (lower.endsWith('.atpack')) {
+    // Microchip .atpack files are ZIP-compatible package archives. Use 7-Zip
+    // explicitly so extraction works consistently on Linux, Windows and macOS
+    // regardless of whether the host unzip/tar tool recognizes the extension.
+    const sevenZip = bundledSevenZip() || findOnPath(['7zz', '7z', '7za']) || (process.platform === 'win32'
+      ? ['C:\\Program Files\\7-Zip\\7z.exe', 'C:\\Program Files (x86)\\7-Zip\\7z.exe'].find(fs.existsSync)
+      : undefined);
+    if (!sevenZip) throw new Error('The bundled 7-Zip extractor is unavailable and no system 7-Zip was found for the .atpack programmer package.');
+    await runCommand(sevenZip, ['x', '-y', archivePath, `-o${destination}`], token);
+    return;
+  }
   if (lower.endsWith('.zip')) {
     const unzip = findOnPath(process.platform === 'win32' ? ['tar.exe', 'tar'] : ['unzip']);
     if (unzip) {
@@ -941,7 +968,7 @@ async function replaceDirectory(source, target) {
 function archiveNameFromUrl(url, spec) {
   try {
     const name = path.basename(new URL(url).pathname);
-    if (/\.(7z|zip|tar\.gz|tgz|tar\.xz)$/i.test(name)) return name;
+    if (/\.(7z|zip|atpack|tar\.gz|tgz|tar\.xz)$/i.test(name)) return name;
   } catch {
     // Use the fallback below.
   }
@@ -979,6 +1006,141 @@ function makeManagedToolchainExecutables(root, spec) {
       if (fs.statSync(candidate).isFile()) fs.chmodSync(candidate, 0o755);
     } catch {}
   }
+}
+
+
+function isXcCompilerUid(uid) {
+  return XC_COMPILER_UIDS.has(String(uid || '').trim());
+}
+
+function isXcToolchainSpec(spec) {
+  if (String(spec?.kind || '').toLowerCase() !== 'toolchain') return false;
+  const uids = Array.isArray(spec?.compilerUids)
+    ? spec.compilerUids
+    : String(spec?.compilerUid || '').split(',').map((value) => value.trim()).filter(Boolean);
+  return uids.some(isXcCompilerUid);
+}
+
+function findXclmExecutables(root, maximumDepth = 10) {
+  if (!root || !fs.existsSync(root)) return [];
+  const result = [];
+  const queue = [{ directory: root, depth: 0 }];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries;
+    try { entries = fs.readdirSync(current.directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const candidate = path.join(current.directory, entry.name);
+      const lower = String(entry.name || '').toLowerCase();
+      if ((entry.isFile() || entry.isSymbolicLink()) && (lower === 'xclm' || lower === 'xclm.exe')) {
+        result.push(candidate);
+      } else if (entry.isDirectory() && current.depth < maximumDepth) {
+        queue.push({ directory: candidate, depth: current.depth + 1 });
+      }
+    }
+  }
+  return [...new Set(result.map((candidate) => path.resolve(candidate)))];
+}
+
+function xclmSetuidRootFromStat(stat) {
+  if (!stat) return false;
+  // XCLM explicitly requires an effective UID of root on Linux. Microchip's
+  // packaged binary is therefore made root-owned and setuid once, after the
+  // managed compiler archive is installed. Normal builds then run as the user.
+  return Number(stat.uid) === 0 &&
+    Number(stat.gid) === 0 &&
+    (Number(stat.mode) & 0o4000) !== 0 &&
+    (Number(stat.mode) & 0o111) !== 0;
+}
+
+function xclmIsSetuidRoot(filePath) {
+  try { return xclmSetuidRootFromStat(fs.statSync(filePath)); } catch { return false; }
+}
+
+function xclmManualSetupCommand(filePath) {
+  const escaped = String(filePath || '').replace(/'/g, `'\\''`);
+  return `sudo chown root:root '${escaped}' && sudo chmod 4755 '${escaped}'`;
+}
+
+async function elevateXclm(filePath, progress, token) {
+  if (process.platform !== 'linux') return;
+  if (xclmIsSetuidRoot(filePath)) return;
+
+  try { fs.chmodSync(filePath, 0o755); } catch {}
+  progress?.report({ message: `Configuring XCLM privilege helper: ${path.basename(path.dirname(filePath))}/${path.basename(filePath)}...` });
+
+  const pkexec = findOnPath(['pkexec']);
+  const chown = findOnPath(['chown']) || '/usr/bin/chown';
+  const chmod = findOnPath(['chmod']) || '/usr/bin/chmod';
+  let firstError;
+
+  if (pkexec) {
+    try {
+      // pkexec uses the desktop PolicyKit agent, so VS Code never handles or
+      // stores the user's administrator password.
+      await runCommand(pkexec, [chown, 'root:root', filePath], token);
+      await runCommand(pkexec, [chmod, '4755', filePath], token);
+    } catch (error) {
+      firstError = error;
+    }
+  }
+
+  if (!xclmIsSetuidRoot(filePath)) {
+    const sudo = findOnPath(['sudo']);
+    if (sudo) {
+      try {
+        // This succeeds without interaction on machines that already grant the
+        // exact operation through sudoers. -n deliberately never hangs waiting
+        // for a password in the extension host.
+        await runCommand(sudo, ['-n', chown, 'root:root', filePath], token);
+        await runCommand(sudo, ['-n', chmod, '4755', filePath], token);
+      } catch (error) {
+        firstError = firstError || error;
+      }
+    }
+  }
+
+  if (!xclmIsSetuidRoot(filePath)) {
+    const command = xclmManualSetupCommand(filePath);
+    throw new Error(
+      `Microchip XCLM requires setuid-root on Linux. Automatic privilege setup was not completed${firstError ? ` (${firstError.message || firstError})` : ''}. ` +
+      `Run this command once, then retry the build: ${command}`
+    );
+  }
+}
+
+async function ensureXclmPrivilegesAtRoot(root, progress, token) {
+  if (process.platform !== 'linux') return [];
+  const xclmFiles = findXclmExecutables(root);
+  if (!xclmFiles.length) {
+    throw new Error(`The installed Microchip XC compiler does not contain the XCLM executable below ${root}. Reinstall the compiler package.`);
+  }
+  const configured = [];
+  for (const xclm of xclmFiles) {
+    ensureNotCancelled(token);
+    const key = path.resolve(xclm);
+    let operation = xclmPrivilegeLocks.get(key);
+    if (!operation) {
+      operation = elevateXclm(xclm, progress, token).finally(() => xclmPrivilegeLocks.delete(key));
+      xclmPrivilegeLocks.set(key, operation);
+    }
+    await operation;
+    configured.push(xclm);
+  }
+  return configured;
+}
+
+async function ensureXcCompilerReady(context, compiler, progress, token) {
+  const uid = String(compiler?.uid || '').trim();
+  if (process.platform !== 'linux' || !isXcCompilerUid(uid)) return [];
+  const packageName = String(compiler?.packageName || compiler?.installerPackage || '').trim();
+  const entry = listInstalledPackages(context, true).find((item) =>
+    item.kind === 'toolchain' && (!packageName || item.name === packageName)
+  );
+  if (!entry?.root || !fs.existsSync(entry.root)) {
+    throw new Error(`The managed ${compilerSupport.adapterFor(uid)?.language || 'XC'} compiler package is not installed.`);
+  }
+  return ensureXclmPrivilegesAtRoot(entry.root, progress, token);
 }
 
 async function installRfpPackageUnlocked(context, spec, progress, token) {
@@ -1056,6 +1218,9 @@ async function installRfpPackageUnlocked(context, spec, progress, token) {
     if (index >= 0) registry.packages[index] = entry;
     else registry.packages.push(entry);
     writeRegistry(context, registry);
+    if (isXcToolchainSpec(spec)) {
+      await ensureXclmPrivilegesAtRoot(target, progress, token);
+    }
     return entry;
   } finally {
     fs.rmSync(operationRoot, { recursive: true, force: true });
@@ -1173,6 +1338,11 @@ async function installPackageUnlocked(context, spec, progress, token) {
     if (index >= 0) registry.packages[index] = entry;
     else registry.packages.push(entry);
     writeRegistry(context, registry);
+    // A freshly installed XC package must have XCLM configured before the
+    // setup builder can invoke the compiler. Previously this happened only on
+    // subsequent package-resolution passes, so first-time setup creation still
+    // emitted "XCLM: Failed to elevate privilege" throughout core/SDK builds.
+    if (isXcToolchainSpec(spec)) await ensureXclmPrivilegesAtRoot(target, progress, token);
     return entry;
   } finally {
     fs.rmSync(operationRoot, { recursive: true, force: true });
@@ -1205,9 +1375,15 @@ async function ensurePackage(context, spec, progress, token) {
       // and live CODEGRIP catalog entries can redirect a package name/version to
       // a new asset URL. Track source URLs for both cases.
       const sourceSensitive = ['sdk','core','bsp-card','bsp-board'].includes(String(spec.kind || '').toLowerCase()) || Boolean(spec.downloadUrl);
-      if (!sourceSensitive) return installed;
+      if (!sourceSensitive) {
+        if (isXcToolchainSpec(spec)) await ensureXclmPrivilegesAtRoot(installed.root, progress, token);
+        return installed;
+      }
       const resolved = await resolvePackage(context, spec);
-      if (installed.sourceUrl === resolved.downloadUrl) return installed;
+      if (installed.sourceUrl === resolved.downloadUrl) {
+        if (isXcToolchainSpec(spec)) await ensureXclmPrivilegesAtRoot(installed.root, progress, token);
+        return installed;
+      }
     }
   }
   const key = packageKey(spec);
@@ -1263,7 +1439,8 @@ function setupReferences(context, packageEntry) {
       for (const setup of Array.isArray(registry.setups) ? registry.setups : []) {
         const keys = [];
         if (/codegrip/i.test(`${setup.programmerUid || ''} ${setup.programmerName || ''}`)) {
-          keys.push('programmer:codegrip_gdb_server@1.7.0');
+          const serverSpec = codegripServerPackageSpec();
+          if (serverSpec) keys.push(packageKey(serverSpec));
           for (const pkg of setup.codegripCatalog?.packages || []) {
             keys.push(`programmer-pack:${pkg.packageName}@${pkg.packageVersion || 'current'}`);
           }
@@ -1504,7 +1681,7 @@ function infrastructureSpecs() {
 }
 
 function environmentSpecs() {
-  const buildTools = ['win32', 'darwin'].includes(process.platform)
+  const buildTools = ['win32', 'darwin', 'linux'].includes(process.platform)
     ? ['cmake', 'ninja'].map(managedBuildToolPackageSpec).filter(Boolean)
     : [];
   return [
@@ -1586,6 +1763,44 @@ function packageStateFromSpecs(context, specs) {
   });
 }
 
+
+function programmerPackageSpec(item) {
+  const uid = String(item?.uid || '').trim();
+  const packageName = String(item?.packageName || item?.installerPackage || item?.installer_package || '').trim();
+  if (uid.toLowerCase() === 'codegrip') {
+    return codegripServerPackageSpec({ environment: false }) || undefined;
+  }
+
+  // Programmer Packages is intentionally a downloadable-package view. Do not
+  // manufacture a URL from installer_package and do not show external/manual
+  // rows here. This keeps GDB General, Debugger Simulation, mikroProg variants,
+  // J-Link/RFP manual installs and any future database-only programmer out of
+  // this package manager unless a real package asset is known.
+  const asset = packageCatalog.programmerToolAsset(packageName, uid, item?.name);
+  if (!asset?.url) return undefined;
+  return {
+    kind: 'programmer',
+    name: asset.name,
+    version: asset.version,
+    displayName: item?.name || asset.displayName,
+    environment: false,
+    downloadUrl: asset.url,
+    installRelativePath: asset.installRelativePath,
+    detail: item?.description || `${asset.displayName} package.`
+  };
+}
+
+function programmerSpecsFromRows(rows) {
+  const unique = new Map();
+  for (const item of Array.isArray(rows) ? rows : []) {
+    const spec = programmerPackageSpec(item);
+    if (!spec) continue;
+    const key = packageKey(spec);
+    if (!unique.has(key)) unique.set(key, spec);
+  }
+  return [...unique.values()];
+}
+
 async function availableManagerSpecs(context, kind, token) {
   const db = require('./c_database');
   if (kind === 'environment') {
@@ -1643,15 +1858,7 @@ async function availableManagerSpecs(context, kind, token) {
         detail: entry.kind === 'programmer-pack' ? 'MCU-specific CODEGRIP device pack installed on demand.' : 'CODEGRIP GDB server.'
       }));
   }
-  const result = db.listProgrammerInstallerPackages(context).map((item) => {
-    const packageName = String(item.installerPackage || '').trim();
-    if (item.uid === 'segger_jlink' && !packageName) return { kind:'programmer', name:'segger_jlink', version:'external', displayName:item.name, external:true, externalUrl:'https://www.segger.com/downloads/jlink/', detail:item.description };
-    if (!packageName) return { kind:'programmer', name:item.uid, version:'external', displayName:item.name, external:true, detail:item.description || 'No installer package is defined in the database.' };
-    if (item.uid === 'codegrip') return { kind:'programmer', name:'codegrip_gdb_server', version:'1.7.0', displayName:item.name, environment:false };
-    return { kind:'programmer', name:packageName, version:'general_packages_assets', displayName:item.name, environment:false, downloadUrl:`https://github.com/MikroElektronika/general_packages/releases/download/general_packages_assets/${encodeURIComponent(packageName)}.7z`, detail:item.description };
-  });
-  result.push(rfpProgrammerPackageSpec());
-  return result;
+  return programmerSpecsFromRows(db.listProgrammerInstallerPackages(context));
 }
 
 async function postManagerState(context, kind, panel) {
@@ -1904,6 +2111,7 @@ async function openDemoExamples(context) {
 
 module.exports = {
   managedBuildToolPackageSpec,
+  codegripServerPackageSpec,
   getManagedRoot,
   changeManagedRoot,
   getPackagePaths,
@@ -1929,12 +2137,14 @@ module.exports = {
   environmentSpecs,
   environmentPackageState,
   installedProgrammerPackages,
+  programmerPackageSpec,
   installAllEnvironmentPackages,
   findOnPath,
   loadCoreMetadata,
   latestMikroSdkRelease,
   corePackageSpec,
   compilerPackageSpec,
+  ensureXcCompilerReady,
   sdkPackageSpec,
   bspPackageSpec,
   rfpProgrammerPackageSpec,
@@ -1955,6 +2165,12 @@ module.exports = {
     jsonAcceptHeader,
     findRecursive,
     makeManagedToolchainExecutables,
+    isXcCompilerUid,
+    isXcToolchainSpec,
+    findXclmExecutables,
+    xclmSetuidRootFromStat,
+    xclmIsSetuidRoot,
+    xclmManualSetupCommand,
     resolvedBspMetadata,
     managedSdkBspRoots,
     removeMaterializedPackageArtifacts,
@@ -1965,6 +2181,8 @@ module.exports = {
     clickExampleSpec,
     demoExampleSpec,
     resolveExampleProjectRoot,
+    programmerPackageSpec,
+    programmerSpecsFromRows,
     resolveClickExampleProjectRoot,
     clickExamplesHtml,
     demoExamplesHtml,

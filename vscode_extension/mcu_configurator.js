@@ -1216,7 +1216,8 @@ function copyDirectoryContents(source, target) {
 async function prepareRustCodegripRuntime(context, mcuName, runtimeRoot, progress, token) {
   progress?.report({ message: `Reading live CODEGRIP device-pack catalog for ${mcuName}...` });
   const catalog = await codegripCatalog.resolveDevice(mcuName, token);
-  const serverSpec = { kind: 'programmer', name: 'codegrip_gdb_server', version: '1.7.0', displayName: 'CODEGRIP Suite', environment: false };
+  const serverSpec = sharedProgrammerPackages.codegripServerPackageSpec({ environment: false });
+  if (!serverSpec) throw new Error(`CODEGRIP GDB Server package is not available for ${process.platform}.`);
   const specs = [serverSpec, ...catalog.packages.map(rustCodegripPackSpec)];
   progress?.report({ message: `Installing CODEGRIP programmer packages for ${mcuName}...` });
   const installed = await sharedProgrammerPackages.ensurePackages(context, specs, progress, token);

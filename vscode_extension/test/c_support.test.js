@@ -41,6 +41,9 @@ try {
   const cConfigurator = require('../c_configurator')._test;
   const rfp = require('../c_rfp_backend')._test;
   const cmakeVisibility = require('../c_cmake_visibility')._test;
+  const microchip = require('../c_microchip_backend')._test;
+  const tiXds110Module = require('../c_ti_xds110_backend');
+  const tiXds110 = tiXds110Module._test;
 
   // config_registers settings_array fields must be materialized into real
   // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
@@ -806,6 +809,39 @@ try {
   assert.strictEqual(codegripDebugConfig.__mikrobusCodegripGeneration, 'generation-test');
   assert.strictEqual(codegripDebugConfig.__mikrobusCDebugInstance, 'generation-test');
   assert.deepStrictEqual(codegripDebugConfig.presentation, { hidden: true });
+
+  const xc32CodegripDebugConfig = setup.codegripCppDebugConfiguration({
+    name: 'PIC32MZ CODEGRIP',
+    tools: { gdb: '/toolchain/bin/pic32-gdb' },
+    metadata: { compiler: { uid: 'mchp_xc32' }, device: { uid: 'PIC32MZ2048EFH144' } }
+  }, '/project', '/project/.mikrobus/c-build/app', 24567, 'xc32-generation-test');
+  assert.strictEqual(xc32CodegripDebugConfig.miDebuggerPath, '/toolchain/bin/pic32-gdb');
+  assert.strictEqual(xc32CodegripDebugConfig.miDebuggerArgs, undefined);
+  assert.strictEqual(xc32CodegripDebugConfig.setupCommands.some((item) => /architecture|endian/i.test(item.text)), false);
+  assert.ok(xc32CodegripDebugConfig.setupCommands.some((item) => item.text === '-gdb-set mem inaccessible-by-default off'));
+  const xc32ArchitectureConfig = setup.codegripCppDebugConfiguration({
+    name: 'PIC32MZ CODEGRIP probed architecture',
+    tools: { gdb: '/toolchain/bin/pic32-gdb' },
+    metadata: { compiler: { uid: 'mchp_xc32' }, device: { uid: 'PIC32MZ2048EFH144' } }
+  }, '/project', '/project/.mikrobus/c-build/app', 24570, 'xc32-architecture-test', { gdbArchitecture: 'mips:isa32r2' });
+  assert.ok(String(xc32ArchitectureConfig.miDebuggerArgs || '').includes('set architecture mips:isa32r2'));
+  assert.strictEqual(xc32ArchitectureConfig.setupCommands.some((item) => /architecture/i.test(item.text)), false);
+
+  const xc16CodegripDebugConfig = setup.codegripCppDebugConfiguration({
+    name: 'dsPIC CODEGRIP',
+    tools: { gdb: '/toolchain/bin/pic16-gdb' },
+    metadata: { compiler: { uid: 'mchp_xc16' }, device: { uid: 'dsPIC33EP512MU810' } }
+  }, '/project', '/project/.mikrobus/c-build/app', 24568, 'xc16-generation-test');
+  assert.strictEqual(xc16CodegripDebugConfig.miDebuggerPath, '/toolchain/bin/pic16-gdb');
+  assert.strictEqual(xc16CodegripDebugConfig.miDebuggerArgs, undefined);
+
+  const xc8CodegripDebugConfig = setup.codegripCppDebugConfiguration({
+    name: 'PIC18 CODEGRIP',
+    tools: { gdb: '/toolchain/bin/pic8-gdb' },
+    metadata: { compiler: { uid: 'mchp_xc8' }, device: { uid: 'PIC18F47K42' } }
+  }, '/project', '/project/.mikrobus/c-build/app', 24569, 'xc8-generation-test');
+  assert.strictEqual(xc8CodegripDebugConfig.miDebuggerPath, '/toolchain/bin/pic8-gdb');
+  assert.strictEqual(xc8CodegripDebugConfig.miDebuggerArgs, undefined);
   assert.strictEqual(setup.isCodegripRestartRequest({ type: 'request', command: 'restart' }), true);
   assert.strictEqual(setup.isCodegripRestartRequest({ type: 'request', command: 'disconnect', arguments: { restart: true } }), true);
   assert.strictEqual(setup.isCodegripRestartRequest({ type: 'request', command: 'disconnect', arguments: {} }), false);
@@ -1090,7 +1126,7 @@ try {
       codegripCatalog: resolvedCodegrip
     };
     const installed = new Map([
-      ['programmer:codegrip_gdb_server@1.7.0', { root: serverRoot }],
+      [`programmer:codegrip_gdb_server@${catalog.codegripVersionForPlatform(process.platform)}`, { root: serverRoot }],
       [`programmer-pack:${pkg.packageName}@${pkg.packageVersion}`, { root: packRoot }]
     ]);
     const runtime = setup.materializeCodegripRuntime(context, setupObject, installed);
@@ -1225,7 +1261,184 @@ try {
     assert.deepStrictEqual(xc32.args, ['/tmp/app.elf']);
     const xc32Objcopy = setup.microchipHexConversion('/opt/xc32/bin/xc32-objcopy', 'xc32', '/tmp/app.elf', '/tmp/app.hex');
     assert.deepStrictEqual(xc32Objcopy.args, ['-O', 'ihex', '/tmp/app.elf', '/tmp/app.hex']);
+    assert.strictEqual(setup.microchipBin2hexNeedsElfAlias('xc32', '/opt/xc32/bin/xc32-bin2hex', '/tmp/app'), true);
+    assert.strictEqual(setup.microchipBin2hexNeedsElfAlias('xc32', '/opt/xc32/bin/xc32-bin2hex', '/tmp/app.elf'), false);
+    assert.strictEqual(setup.microchipBin2hexNeedsElfAlias('xc16', '/opt/xc16/bin/xc16-bin2hex', '/tmp/app.out'), true);
+    assert.strictEqual(setup.microchipBin2hexNeedsElfAlias('xc32', '/opt/xc32/bin/xc32-objcopy', '/tmp/app'), false);
   }
+  // Microchip XC definitions use symbolic config_words. They must remain
+  // symbolic all the way to the XC compiler so #pragma config can encode the
+  // device-specific DEVCFG/DEVCP bits without the extension guessing masks.
+  {
+    const xcDefinition = {
+      config_words: [
+        {
+          init: 'OFF', key: 'FMIIEN', label: 'Ethernet RMII/MII Enable', label_group: 'DEVCFG3',
+          settings: [
+            { label: 'RMII Enabled', value: 'OFF' },
+            { label: 'MII Enabled', value: 'ON' }
+          ]
+        },
+        {
+          init: 'DIV_3', key: 'FPLLIDIV', label: 'System PLL Input Divider', label_group: 'DEVCFG2',
+          settings: [
+            { label: '2x Divider', value: 'DIV_2' },
+            { label: '3x Divider', value: 'DIV_3' }
+          ]
+        },
+        {
+          init: 'SPLL', key: 'FNOSC', label: 'Oscillator Selection Bits', label_group: 'DEVCFG1',
+          settings: [
+            { label: 'System PLL', value: 'SPLL' },
+            { label: 'Primary Oscillator', value: 'POSC' }
+          ]
+        }
+      ],
+      mcu: 'PIC32MZ2048EFH144',
+      clock: 200
+    };
+    const serialized = cConfigurator.serializeDefinition(xcDefinition);
+    assert.deepStrictEqual(serialized.map((item) => item.key), ['DEVCFG3', 'DEVCFG2', 'DEVCFG1']);
+    assert.strictEqual(serialized[0].fields[0].id, 'DEVCFG3.FMIIEN');
+    assert.strictEqual(serialized[1].fields[0].init, 'DIV_3');
+    assert.deepStrictEqual(serialized[1].fields[0].settings.map((item) => item.value), ['DIV_2', 'DIV_3']);
+
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xc-config-words-'));
+    try {
+      const core = path.join(temp, 'core');
+      const generatedRoot = path.join(temp, 'generated');
+      fs.mkdirSync(path.join(core, 'def'), { recursive: true });
+      fs.writeFileSync(path.join(core, 'def', 'PIC32MZ2048EFH144.json'), JSON.stringify(xcDefinition));
+      const xcSetup = {
+        metadata: {
+          compiler: { uid:'mchp_xc32' },
+          coreMcuName:'PIC32MZ2048EFH144',
+          sdkConfig:{ MCU_NAME:'PIC32MZ2048EFH144' },
+          device:{ defFile:'PIC32MZ2048EFH144.json', compilerFlags:'' }
+        },
+        registerValues: { 'DEVCFG2.FPLLIDIV':'DIV_2' }
+      };
+      const selections = setup.xcConfigurationSelections(xcSetup, core);
+      assert.deepStrictEqual(selections.map(({ key, value, source }) => ({ key, value, source })), [
+        { key:'FMIIEN', value:'OFF', source:'init' },
+        { key:'FPLLIDIV', value:'DIV_2', source:'setup' },
+        { key:'FNOSC', value:'SPLL', source:'init' }
+      ]);
+      const generated = setup.generateXcConfigurationSource(xcSetup, core, generatedRoot);
+      const source = fs.readFileSync(generated.sourcePath, 'utf8');
+      assert.ok(source.includes('#pragma config FMIIEN = OFF'));
+      assert.ok(source.includes('#pragma config FPLLIDIV = DIV_2'));
+      assert.ok(source.includes('#pragma config FNOSC = SPLL'));
+      assert.ok(source.indexOf('#pragma config FNOSC = SPLL') < source.indexOf('#include <xc.h>'));
+
+      const makeElf32WithConfigSections = (filePath) => {
+        const names = Buffer.from('\0.shstrtab\0.config_BFC0FFC0\0.config_BFC0FFDC\0', 'ascii');
+        const nameShstr = 1;
+        const nameCfg3 = names.indexOf(Buffer.from('.config_BFC0FFC0'));
+        const nameDevcp = names.indexOf(Buffer.from('.config_BFC0FFDC'));
+        const shoff = 0x100;
+        const shentsize = 40;
+        const shnum = 4;
+        const buffer = Buffer.alloc(shoff + shentsize * shnum, 0);
+        buffer[0] = 0x7F; buffer[1] = 0x45; buffer[2] = 0x4C; buffer[3] = 0x46;
+        buffer[4] = 1; // ELF32
+        buffer[5] = 1; // little endian
+        buffer[6] = 1;
+        buffer.writeUInt16LE(1, 16); // ET_REL
+        buffer.writeUInt16LE(8, 18); // EM_MIPS
+        buffer.writeUInt32LE(1, 20);
+        buffer.writeUInt32LE(shoff, 32);
+        buffer.writeUInt16LE(52, 40);
+        buffer.writeUInt16LE(shentsize, 46);
+        buffer.writeUInt16LE(shnum, 48);
+        buffer.writeUInt16LE(1, 50);
+        names.copy(buffer, 0x80);
+        Buffer.from('fffffffcc6'.slice(0, 8), 'hex');
+        Buffer.from('ffffffc6', 'hex').copy(buffer, 0xC0);
+        Buffer.from('ffffffff', 'hex').copy(buffer, 0xC4);
+        const writeSection = (index, nameOffset, type, address, offset, size) => {
+          const base = shoff + index * shentsize;
+          buffer.writeUInt32LE(nameOffset, base + 0);
+          buffer.writeUInt32LE(type, base + 4);
+          buffer.writeUInt32LE(address >>> 0, base + 12);
+          buffer.writeUInt32LE(offset, base + 16);
+          buffer.writeUInt32LE(size, base + 20);
+          buffer.writeUInt32LE(1, base + 32);
+        };
+        writeSection(1, nameShstr, 3, 0, 0x80, names.length);
+        writeSection(2, nameCfg3, 1, 0, 0xC0, 4);
+        writeSection(3, nameDevcp, 1, 0, 0xC4, 4);
+        fs.writeFileSync(filePath, buffer);
+      };
+
+      const configObject = path.join(generatedRoot, 'xc_config_words.o');
+      makeElf32WithConfigSections(configObject);
+      const sections = setup.xc32ConfigurationObjectSections({ ...xcSetup, paths:{ coreSource:core, xcConfigObject:configObject } });
+      assert.deepStrictEqual(sections.map((item) => [item.key, item.address, item.data.toString('hex')]), [
+        ['.config_BFC0FFC0', 0x1FC0FFC0, 'ffffffc6'],
+        ['.config_BFC0FFDC', 0x1FC0FFDC, 'ffffffff']
+      ]);
+      assert.strictEqual(setup.xc32PhysicalConfigurationAddress(0xBFC0FFC0), 0x1FC0FFC0);
+
+      const toolchainFile = path.join(generatedRoot, 'toolchain.cmake');
+      setup.writeToolchain(toolchainFile, {
+        ...xcSetup,
+        mode: 'full-sdk', clockMHz: '200', applicationOutput: 'debug-terminal',
+        metadata: {
+          ...xcSetup.metadata,
+          device: { ...xcSetup.metadata.device, uid:'PIC32MZ2048EFH144', flash:2097152, ram:524288, linkerFlags:'' },
+          sdkConfig: { ...xcSetup.metadata.sdkConfig, CORE_NAME:'MICROAPTIV_FP' }
+        }
+      }, {
+        c:'/opt/xc32/bin/xc32-gcc',
+        adapter:compilerSupport.adapterFor('mchp_xc32')
+      }, { installPrefix:temp, xcConfigObject:configObject });
+      const toolchainText = fs.readFileSync(toolchainFile, 'utf8');
+      assert.ok(!toolchainText.includes('MIKROBUS_XC_CONFIG_OBJECT_LINKED'));
+      // Symbolic config_words must not be guessed into raw values by the old
+      // numeric register path. Instead, merge XC32's own encoded .config bytes.
+      xcSetup.paths = { coreSource: core, xcConfigObject: configObject };
+      assert.deepStrictEqual(setup.xc32ConfigurationWords(xcSetup), []);
+      const symbolicHex = path.join(temp, 'symbolic.hex');
+      fs.writeFileSync(symbolicHex, ':020000041D00DD\n:0400000001020304F2\n:00000001FF\n');
+      setup.applyXc32ConfigurationWords(xcSetup, symbolicHex);
+      const merged = setup.parseIntelHex(fs.readFileSync(symbolicHex, 'utf8'));
+      assert.strictEqual(Buffer.from([0,1,2,3].map((i) => merged.memory.get(0x1FC0FFC0 + i))).toString('hex'), 'ffffffc6');
+      assert.strictEqual(Buffer.from([0,1,2,3].map((i) => merged.memory.get(0x1FC0FFDC + i))).toString('hex'), 'ffffffff');
+    } finally {
+      fs.rmSync(temp, { recursive:true, force:true });
+    }
+  }
+
+  // Older numeric config_registers remain supported for XC32 packages that
+  // explicitly provide address/default/mask metadata.
+  {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xc32-numeric-config-'));
+    try {
+      const core = path.join(temp, 'core');
+      fs.mkdirSync(path.join(core, 'def'), { recursive: true });
+      fs.writeFileSync(path.join(core, 'def', 'PIC32LEGACY.json'), JSON.stringify({
+        config_registers: [
+          { key:'DEVCFG0', address:'$1FC0FFCC', default:'FFFFF7D3', unused:'00000000', fields:[] }
+        ]
+      }));
+      const hex = path.join(temp, 'app.hex');
+      fs.writeFileSync(hex, ':020000041D00DD\n:0400000001020304F2\n:00000001FF\n');
+      const xcSetup = {
+        metadata: { compiler:{ uid:'mchp_xc32' }, coreMcuName:'PIC32LEGACY', sdkConfig:{ MCU_NAME:'PIC32LEGACY' }, device:{} },
+        paths: { coreSource: core }, registerValues: {}
+      };
+      setup.applyXc32ConfigurationWords(xcSetup, hex);
+      const parsed = setup.parseIntelHex(fs.readFileSync(hex, 'utf8'));
+      assert.deepStrictEqual(
+        Buffer.from([0,1,2,3].map((index) => parsed.memory.get(0x1FC0FFCC + index))),
+        Buffer.from('d3f7ffff', 'hex')
+      );
+    } finally {
+      fs.rmSync(temp, { recursive:true, force:true });
+    }
+  }
+
   assert.strictEqual(setup.hexPathForExecutable('/tmp/example_ipsdisplay2'), '/tmp/example_ipsdisplay2.hex');
   assert.strictEqual(setup.normalizeJlinkDeviceName('R7FA6M4AF3CFB'), 'R7FA6M4AF');
   assert.strictEqual(setup.normalizeJlinkDeviceName('STM32F446RE'), 'STM32F446RE');
@@ -1774,6 +1987,11 @@ endfunction()
       assert.ok(text.includes(`set(CMAKE_AR "/toolchain/bin/${arName}"`));
       assert.ok(text.includes(`set(CMAKE_RANLIB "/toolchain/bin/${ranlibName}"`));
       assert.ok(text.includes(`"${processorFlag}"`));
+      if (family === 'xc32') {
+        assert.ok(text.includes('if(MIKROBUS_HARDWARE_DEBUG)'));
+        assert.ok(text.includes('add_compile_options("-mdebugger")'));
+        assert.ok(text.includes('add_link_options("-mdebugger")'));
+      }
       assert.ok(text.includes('if(DEFINED MIKROBUS_WORKSPACE_PREFIX_PATH)'));
       assert.deepStrictEqual(compilerSupport.adapterFor(uid).executableNames.ar, [arName]);
       assert.deepStrictEqual(compilerSupport.adapterFor(uid).executableNames.ranlib, [ranlibName]);
@@ -1782,7 +2000,46 @@ endfunction()
     }
   }
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 60);
+  // Managed Microchip XC toolchains require XCLM to be root-owned + setuid on Linux.
+  assert.strictEqual(packageManager.isXcCompilerUid('mchp_xc8'), true);
+  assert.strictEqual(packageManager.isXcCompilerUid('mchp_xc16'), true);
+  assert.strictEqual(packageManager.isXcCompilerUid('mchp_xc32'), true);
+  assert.strictEqual(packageManager.isXcCompilerUid('gcc_arm_none_eabi'), false);
+  assert.strictEqual(packageManager.isXcToolchainSpec({ kind:'toolchain', compilerUids:['mchp_xc32'] }), true);
+  assert.strictEqual(packageManager.isXcToolchainSpec({ kind:'toolchain', compilerUids:['gcc_arm_none_eabi'] }), false);
+  assert.strictEqual(packageManager.xclmSetuidRootFromStat({ uid:0, gid:0, mode:0o104755 }), true);
+  assert.strictEqual(packageManager.xclmSetuidRootFromStat({ uid:1000, gid:1000, mode:0o100755 }), false);
+  assert.strictEqual(packageManager.xclmSetuidRootFromStat({ uid:0, gid:0, mode:0o100755 }), false);
+  const xclmRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xclm-find-'));
+  try {
+    const xclmPath = path.join(xclmRoot, 'XC32', 'bin', process.platform === 'win32' ? 'xclm.exe' : 'xclm');
+    fs.mkdirSync(path.dirname(xclmPath), { recursive:true });
+    fs.writeFileSync(xclmPath, 'xclm');
+    assert.deepStrictEqual(packageManager.findXclmExecutables(xclmRoot), [path.resolve(xclmPath)]);
+    assert.match(packageManager.xclmManualSetupCommand(xclmPath), /chmod 4755/);
+  } finally {
+    fs.rmSync(xclmRoot, { recursive:true, force:true });
+  }
+  const cSetupSourceForXclm = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
+  assert.ok(cSetupSourceForXclm.includes('ensureXcCompilerReady'));
+  const cPackageManagerSourceForXclm = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
+  assert.ok(cPackageManagerSourceForXclm.includes('if (isXcToolchainSpec(spec)) await ensureXclmPrivilegesAtRoot(target, progress, token);'));
+
+  const privilegeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-xclm-fingerprint-'));
+  try {
+    const privilegeFile = path.join(privilegeRoot, 'xclm');
+    fs.writeFileSync(privilegeFile, 'x');
+    fs.chmodSync(privilegeFile, 0o755);
+    const privilegeA = setup.xcPrivilegeFingerprint([privilegeFile]);
+    fs.chmodSync(privilegeFile, 0o700);
+    const privilegeB = setup.xcPrivilegeFingerprint([privilegeFile]);
+    assert.notStrictEqual(privilegeA, privilegeB);
+  } finally {
+    fs.rmSync(privilegeRoot, { recursive:true, force:true });
+  }
+  assert.ok(cSetupSourceForXclm.includes('rebuilding ${setup.name} before Apply'));
+
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 65);
 
   const armGdbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-arm-gdb-'));
   try {
@@ -1805,6 +2062,17 @@ endfunction()
   assert.strictEqual(mikrocCodegripAvailability.available, false);
   assert.strictEqual(mikrocCodegripAvailability.reason, 'mikroc-codegrip');
   assert.match(mikrocCodegripAvailability.hint, /NECTO Studio/);
+  for (const compilerUid of ['mchp_xc8', 'mchp_xc16', 'mchp_xc32']) {
+    const xcCodegripAvailability = setup.cDebugAvailability({
+      metadata: {
+        compiler: { uid: compilerUid },
+        programmer: { uid: 'codegrip' }
+      }
+    });
+    assert.strictEqual(xcCodegripAvailability.available, false);
+    assert.strictEqual(xcCodegripAvailability.reason, 'xc-codegrip');
+    assert.match(xcCodegripAvailability.hint, /Microchip programmers/);
+  }
   const renesasUartAvailability = setup.cDebugAvailability({
     metadata: {
       compiler: { uid: 'llvm-rl78-elf' },
@@ -1950,10 +2218,24 @@ endfunction()
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.0');
+  assert.strictEqual(packageJson.version, '0.8.12');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');
+  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-core-da'));
+  assert.ok(packageJson.extensionDependencies.includes('ti-development-tools.ti-embedded-debug'));
+  assert.strictEqual(tiXds110Module.isMspm0Device({ uid: 'MSPM0G3507' }), true);
+  assert.strictEqual(tiXds110Module.isMspm0Device({ familyUid: 'MSPM0L13XX' }), true);
+  assert.strictEqual(tiXds110Module.isMspm0Device({ uid: 'STM32F756ZG' }), false);
+  assert.strictEqual(tiXds110.tclQuote('/tmp/a b/app.elf'), '{/tmp/a b/app.elf}');
+  const tiBackendSource = fs.readFileSync(path.join(__dirname, '..', 'c_ti_xds110_backend.js'), 'utf8');
+  assert.match(tiBackendSource, /flash erase_sector 0 0 last/);
+  assert.doesNotMatch(tiBackendSource, /['"]mspm0_mass_erase['"]/);
+  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-extensions-core'));
+  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-extensions-platforms'));
+  assert.ok(packageJson.contributes.commands.some((item) =>
+    item.command === 'mikrobusC.debugUnavailableXcCodegrip' &&
+    item.enablement === 'false' && /Microchip programmers/.test(item.title)));
   assert.match(packageJson.description || '', /Embedded Rust and C development/i);
   const publicReadme = fs.readFileSync(path.join(__dirname, '..', 'readme.md'), 'utf8');
   assert.match(publicReadme, /# MikroBUS Embedded Tools/);
@@ -2179,14 +2461,124 @@ endfunction()
   assert.strictEqual(catalog.resolveDirect({ kind: 'shared', name: 'cmake', version: 'necto-live' }).downloadUrl,
     'https://software-update.mikroe.com/NECTOStudio7/live/cmake/linux/cmake.7z');
   assert.strictEqual(catalog.codegripUrlForPlatform('win32'),
-    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/win/codegrip.7z');
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/win/codegrip_gdb_server.7z');
   assert.strictEqual(catalog.codegripUrlForPlatform('darwin'),
-    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/mac/codegrip.7z');
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z');
   assert.strictEqual(catalog.codegripUrlForPlatform('linux'),
-    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/linux/codegrip.7z');
+    'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/linux/codegrip_gdb_server.7z');
+  assert.strictEqual(catalog.codegripVersionForPlatform('linux'), '1.1.12');
+  assert.strictEqual(catalog.codegripVersionForPlatform('win32'), '1.1.12');
+  assert.strictEqual(catalog.codegripVersionForPlatform('darwin'), '1.1.9');
+  assert.strictEqual(catalog.programmerToolAsset('pickitbasic_tool_support').url,
+    'https://packs.download.microchip.com/Microchip.PICkitBasic_TP.2.0.469.atpack');
+  assert.strictEqual(catalog.programmerToolAsset('PICkit 4').version, '3.0.2732');
+  assert.strictEqual(catalog.programmerToolAsset('PICkit 5').version, '3.0.1208');
+  assert.strictEqual(catalog.programmerToolAsset('PKOB4').version, '2.0.1881');
+  assert.strictEqual(catalog.programmerToolAsset('PowerDebugger').version, '1.9.1199');
+  assert.strictEqual(catalog.programmerToolAsset('EDBG').version, '1.7.1191');
+  assert.strictEqual(catalog.programmerToolAsset('ICD4').version, '3.0.2524');
+  assert.strictEqual(catalog.programmerToolAsset('Debugger Simulation'), undefined);
+  assert.strictEqual(catalog.programmerToolAsset('mikroProg for ARM'), undefined);
+  assert.strictEqual(catalog.resolveDirect({ kind: 'programmer', name: 'pickit4_tool_support' }).downloadUrl,
+    'https://packs.download.microchip.com/Microchip.PICkit4_TP.3.0.2732.atpack');
+
+  assert.strictEqual(microchip.isMicrochipProgrammer({ uid: 'pickit4', name: 'PICkit 4', installerPackage: 'pickit4_tool_support' }), true);
+  assert.strictEqual(microchip.isMicrochipProgrammer({ uid: 'gdb_general', name: 'GDB General' }), false);
+  assert.strictEqual(microchip.isMicrochipProgrammer({ uid: 'mikroprog_arm', name: 'mikroProg for ARM', installerPackage: 'mikroprog_arm' }), false);
+  assert.strictEqual(microchip.toolName({ name: 'PICkit4 Tool Support', installerPackage: 'pickit4_tool_support' }), 'PICkit 4');
+  assert.strictEqual(microchip.toolName({ name: 'ICD4', installerPackage: 'icd4_tool_support' }), 'ICD 4');
+  assert.strictEqual(microchip.toolName({ name: 'PowerDebugger', installerPackage: 'powerdebugger_tool_support' }), 'Power Debugger');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'PIC32MZ2048EFH144' } }), 'ICSP');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'dsPIC33EP512MU810' } }), 'ICSP');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'PIC18F47K42' } }), 'ICSP');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'ATSAMD51J20A' } }), 'SWD');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'ATxmega128A1U' } }), 'PDI');
+  assert.strictEqual(microchip.recommendedInterface({ device: { mcuName: 'AVR128DA48' } }), 'UPDI');
+  const mplabProgram = microchip.programConfiguration({
+    name: 'PIC32MZ PICkit 5',
+    metadata: { device: { mcuName: 'PIC32MZ2048EFH144' }, programmer: { name: 'PICkit 5', packageName: 'pickit5_tool_support' } }
+  }, '/tmp/app.hex', 'mplab-program-test');
+  assert.strictEqual(mplabProgram.type, 'mplab-core-da');
+  assert.strictEqual(mplabProgram.request, 'launch');
+  assert.strictEqual(mplabProgram.program, '/tmp/app.hex');
+  assert.strictEqual(mplabProgram.noDebug, true);
+  assert.strictEqual(mplabProgram.device, 'PIC32MZ2048EFH144');
+  assert.strictEqual(mplabProgram.tool, '${command:pickTool}');
+  assert.strictEqual(mplabProgram.__mikrobusExpectedMicrochipTool, 'PICkit 5');
+  assert.strictEqual(mplabProgram.interface, 'ICSP');
+  const mplabAttach = microchip.attachConfiguration({
+    name: 'PIC32MZ ICD4',
+    metadata: { device: { mcuName: 'PIC32MZ2048EFH144' }, programmer: { name: 'ICD4', packageName: 'icd4_tool_support' } }
+  }, '/tmp/app.elf', 'mplab-debug-test');
+  assert.strictEqual(mplabAttach.request, 'attach');
+  assert.strictEqual(mplabAttach.program, '/tmp/app.elf');
+  assert.strictEqual(mplabAttach.stopAtConnect, true);
+  assert.strictEqual(mplabAttach.tool, '${command:pickTool}');
+  assert.strictEqual(mplabAttach.__mikrobusExpectedMicrochipTool, 'ICD 4');
+  const mplabPinned = microchip.programConfiguration({
+    name: 'Pinned PICkit 5',
+    microchipProfile: { serial: 'ABC123', tool: 'PICkit 5', interface: 'ICSP' },
+    metadata: { device: { mcuName: 'PIC32MZ2048EFH144' }, programmer: { name: 'PICkit 5', packageName: 'pickit5_tool_support' } }
+  }, '/tmp/app.hex', 'mplab-pinned-test');
+  assert.strictEqual(mplabPinned.tool, 'PICkit 5');
+  assert.strictEqual(mplabPinned.serial, 'ABC123');
+  const mplabDebug = microchip.debugConfiguration({
+    name: 'PIC32MZ PICkit 5 Debug',
+    metadata: { device: { mcuName: 'PIC32MZ2048EFH144' }, programmer: { name: 'PICkit 5', packageName: 'pickit5_tool_support' } }
+  }, '/tmp/app.elf', 'mplab-debug-launch-test');
+  assert.strictEqual(mplabDebug.request, 'launch');
+  assert.strictEqual(mplabDebug.noDebug, false);
+  assert.strictEqual(mplabDebug.stopOnEntry, true);
+  const usbFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-mplab-usb-'));
+  try {
+    const sysRoot = path.join(usbFixture, 'sys');
+    const devRoot = path.join(usbFixture, 'dev');
+    const sysDevice = path.join(sysRoot, '1-1');
+    const devNode = path.join(devRoot, '001', '002');
+    fs.mkdirSync(sysDevice, { recursive: true });
+    fs.mkdirSync(path.dirname(devNode), { recursive: true });
+    fs.writeFileSync(path.join(sysDevice, 'idVendor'), '04d8\n');
+    fs.writeFileSync(path.join(sysDevice, 'idProduct'), '1234\n');
+    fs.writeFileSync(path.join(sysDevice, 'busnum'), '1\n');
+    fs.writeFileSync(path.join(sysDevice, 'devnum'), '2\n');
+    fs.writeFileSync(path.join(sysDevice, 'manufacturer'), 'Microchip Technology Inc.\n');
+    fs.writeFileSync(path.join(sysDevice, 'product'), 'MPLAB PICkit 5\n');
+    fs.writeFileSync(path.join(sysDevice, 'serial'), 'TEST123\n');
+    fs.writeFileSync(devNode, 'usb');
+    const usbStatus = microchip.linuxUsbStatus('PICkit 5', sysRoot, devRoot);
+    assert.strictEqual(usbStatus.present, true);
+    assert.strictEqual(usbStatus.accessible, true);
+    assert.strictEqual(usbStatus.matching[0].serial, 'TEST123');
+    assert.strictEqual(usbStatus.matching[0].node, devNode);
+  } finally {
+    fs.rmSync(usbFixture, { recursive: true, force: true });
+  }
+  assert.strictEqual(setup.isSupportedProgrammer({ uid: 'pickit5', name: 'PICkit 5', installerPackage: 'pickit5_tool_support' }), true);
+  assert.strictEqual(setup.isSupportedProgrammer({ uid: 'debugger_simulation', name: 'Debugger Simulation' }), false);
+  assert.strictEqual(cConfigurator.isSupportedProgrammer({ uid: 'pickit4', name: 'PICkit 4', installerPackage: 'pickit4_tool_support' }), true);
+
+  const downloadableProgrammers = packageManager.programmerSpecsFromRows([
+    { uid: 'codegrip', name: 'CODEGRIP', installerPackage: 'codegrip_gdb_server' },
+    { uid: 'pickit4', name: 'PICkit 4', installerPackage: 'pickit4_tool_support' },
+    { uid: 'gdb_general', name: 'GDB General', installerPackage: '' },
+    { uid: 'debugger_simulation', name: 'Debugger Simulation', installerPackage: '' },
+    { uid: 'mikroprog_arm', name: 'mikroProg for ARM', installerPackage: 'mikroprog_arm' },
+    { uid: 'segger_jlink', name: 'SEGGER J-Link', installerPackage: '' }
+  ]);
+  assert.strictEqual(downloadableProgrammers.length, 2);
+  assert.strictEqual(typeof packageManagerModule.programmerPackageSpec, 'function');
+  assert.strictEqual(packageManagerModule.programmerPackageSpec({ uid: 'pickit5-db-row', name: 'PICkit 5', packageName: 'pickit5_tool_support' }).name, 'pickit5_tool_support');
+  assert.ok(downloadableProgrammers.some((item) => item.name === 'codegrip_gdb_server'));
+  assert.ok(downloadableProgrammers.some((item) => item.name === 'pickit4_tool_support'));
+  assert.strictEqual(packageManager.archiveNameFromUrl(
+    'https://packs.download.microchip.com/Microchip.PICkit4_TP.3.0.2732.atpack',
+    { name: 'pickit4_tool_support' }
+  ), 'Microchip.PICkit4_TP.3.0.2732.atpack');
   assert.strictEqual(catalog.hostPackageSegment('darwin'), 'mac');
   assert.match(catalog.managedBuildToolAsset('cmake', 'win32', 'x64').url, /cmake-3\.31\.12-windows-x86_64\.zip$/);
   assert.match(catalog.managedBuildToolAsset('cmake', 'darwin', 'arm64').url, /cmake-3\.31\.12-macos-universal\.tar\.gz$/);
+  assert.match(catalog.managedBuildToolAsset('ninja', 'linux', 'x64').url, /ninja-linux\.zip$/);
+  assert.match(catalog.managedBuildToolAsset('ninja', 'linux', 'arm64').url, /ninja-linux-aarch64\.zip$/);
   assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'x64').url, /ninja-win\.zip$/);
   assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'arm64').url, /ninja-winarm64\.zip$/);
   assert.match(catalog.managedBuildToolAsset('ninja', 'darwin', 'arm64').url, /ninja-mac\.zip$/);
@@ -2212,13 +2604,19 @@ endfunction()
   assert.strictEqual(codegrip.responseStatusIsSuccess(0), true);
   assert.strictEqual(codegrip.responseStatusIsSuccess('1'), false);
 
+  const tiXds110Source = fs.readFileSync(path.join(__dirname, '..', 'c_ti_xds110_backend.js'), 'utf8');
+  assert.ok(tiXds110Source.includes("'mspm0_board_reset'"));
+  assert.ok(tiXds110Source.includes("'shutdown'"));
+  assert.ok(!tiXds110Source.includes('verify reset exit'));
   const cSetupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
+  assert.ok(cSetupSource.includes('microchip.debugConfiguration(setup, debugElf, debugInstanceId)'));
+  assert.ok(cSetupSource.includes('Programming configuration for debug'));
   const cDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'c_database.js'), 'utf8');
   const cMcuUiSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'c_mcu.js'), 'utf8');
   const cPackageManagerSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_manager.js'), 'utf8');
   assert.ok(cSetupSource.includes('codegripCatalog.resolveDevice(setupMcuName(setup), token)'));
   assert.ok(cSetupSource.includes('mcu: setupMcuName(setup)'));
-  assert.ok(cSetupSource.includes('if (looksLikeIntelHex(elf)) return path.resolve(elf);'));
+  assert.ok(cSetupSource.includes("if (looksLikeIntelHex(elf)) return finalize(path.resolve(elf));"));
   assert.ok(cSetupSource.includes('defines.push(`#define ${mcuName}`)'));
   assert.ok(!cSetupSource.includes('codegripCatalog.resolveDevice(setup.metadata.device.uid, token)'));
   assert.ok(cDatabaseSource.includes('sdkConfig.MCU_NAME = mcuName'));
@@ -2230,10 +2628,13 @@ endfunction()
   assert.ok(cPackageManagerSource.includes("return openEnvironmentPackages(context, kind)"));
   assert.ok(cPackageManagerSource.includes("environmentViewKind"));
   assert.ok(cPackageManagerSource.includes("Package files are still present after uninstall"));
+  assert.ok(cPackageManagerSource.includes("lower.endsWith('.atpack')"));
+  assert.ok(cPackageManagerSource.includes('programmerSpecsFromRows(db.listProgrammerInstallerPackages(context))'));
+  assert.ok(!cPackageManagerSource.includes('general_packages_assets/${encodeURIComponent(packageName)}.7z'));
 
   const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
-  assert.ok(extensionSource.includes('/development/codegrip/mac/codegrip.7z'));
-  assert.ok(!extensionSource.includes('/development/codegrip/macos/codegrip.7z'));
+  assert.ok(extensionSource.includes('/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z'));
+  assert.ok(!extensionSource.includes('/NECTOStudio7/development/codegrip/'));
   assert.ok(extensionSource.includes("return URLS.codegrip[process.platform]"));
   assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('cmake')"));
   assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('ninja')"));

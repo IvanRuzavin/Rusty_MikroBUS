@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 const rfp = require('./c_rfp_backend');
+const tiXds110 = require('./c_ti_xds110_backend');
 
 function expandHome(value) {
   const text = String(value || '').trim();
@@ -442,6 +443,12 @@ function listProgrammers(context, deviceUid, compilerUid) {
     if (device && rfp.isRenesasDevice(device) && !result.some((item) => item.uid === rfp.RFP_PROGRAMMER_UID)) {
       result.push(rfp.syntheticProgrammer());
     }
+    // TI MSPM0 LaunchPads expose an onboard XDS110. Keep this vendor-owned
+    // programmer path independent from NECTO ProgrammerToDevice rows, just as
+    // RFP is synthesized for Renesas targets.
+    if (device && tiXds110.isMspm0Device(device) && !result.some((item) => item.uid === tiXds110.TI_XDS110_PROGRAMMER_UID)) {
+      result.push(tiXds110.syntheticProgrammer());
+    }
     return result;
   });
 }
@@ -709,13 +716,15 @@ function getSetupMetadata(context, selection) {
       : undefined;
     const programmer = selection.programmerUid === rfp.RFP_PROGRAMMER_UID
       ? (rfp.isRenesasDevice(device || {}) ? rfp.syntheticProgrammer() : undefined)
-      : normalizeRow(db.prepare(`
-          SELECT p.*, ptd.device_support_package AS device_support_package
-          FROM Programmers p
-          JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
-          WHERE p.uid = ? AND ptd.device_uid = ?
-          LIMIT 1
-        `).get(selection.programmerUid, selection.deviceUid));
+      : selection.programmerUid === tiXds110.TI_XDS110_PROGRAMMER_UID
+        ? (tiXds110.isMspm0Device(device || {}) ? tiXds110.syntheticProgrammer() : undefined)
+        : normalizeRow(db.prepare(`
+            SELECT p.*, ptd.device_support_package AS device_support_package
+            FROM Programmers p
+            JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
+            WHERE p.uid = ? AND ptd.device_uid = ?
+            LIMIT 1
+          `).get(selection.programmerUid, selection.deviceUid));
 
     if (!device || !compiler || (!bareMetal && !sdk) || !programmer || !compilerMapping) {
       throw new Error('The selected C setup is no longer complete or compiler-compatible in the NECTO database. Recreate it.');
@@ -837,7 +846,11 @@ function getSetupMetadata(context, selection) {
         uid: programmer.uid,
         name: programmer.name,
         description: programmer.description || '',
-        packageName: programmer.uid === rfp.RFP_PROGRAMMER_UID ? 'renesas_rfp' : String(programmer.installer_package || programmer.installerPackage || '').trim(),
+        packageName: programmer.uid === rfp.RFP_PROGRAMMER_UID
+          ? 'renesas_rfp'
+          : programmer.uid === tiXds110.TI_XDS110_PROGRAMMER_UID
+            ? ''
+            : String(programmer.installer_package || programmer.installerPackage || '').trim(),
         supportPackages: supportPackageNames(programmer.device_support_package || programmer.deviceSupportPackage),
         flashOnly: programmer.uid === rfp.RFP_PROGRAMMER_UID
       },

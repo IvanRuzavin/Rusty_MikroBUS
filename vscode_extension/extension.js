@@ -16,20 +16,22 @@ const { cLanguageSupport } = require('./feature_flags');
 const { registerCSupport, getCSetupDashboardState, rebuildSetupById, reconfigureSetupById, removeSetupById } = require('./c_setup');
 const sharedProgrammerPackages = require('./c_package_manager');
 
+const CODEGRIP_SERVER_SPEC = Object.freeze(
+  sharedProgrammerPackages.codegripServerPackageSpec({ environment: false }) || {
+    kind: 'programmer',
+    name: 'codegrip_gdb_server',
+    version: 'unavailable',
+    displayName: 'CODEGRIP GDB Server',
+    environment: false
+  }
+);
+
 const VERSIONS = {
   probeRs: '0.32.0',
   openocd: '0.12.0-7',
   armGcc: '14.2.1-1.1',
-  codegrip: '1.7.0'
+  codegrip: CODEGRIP_SERVER_SPEC.version
 };
-
-const CODEGRIP_SERVER_SPEC = Object.freeze({
-  kind: 'programmer',
-  name: 'codegrip_gdb_server',
-  version: VERSIONS.codegrip,
-  displayName: 'CODEGRIP Suite',
-  environment: false
-});
 
 const URLS = {
   windows: {
@@ -39,9 +41,9 @@ const URLS = {
   },
   jlink: 'https://www.segger.com/downloads/jlink/',
   codegrip: {
-    win32: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/win/codegrip.7z',
-    darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/mac/codegrip.7z',
-    linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/NECTOStudio7/development/codegrip/linux/codegrip.7z'
+    win32: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/win/codegrip_gdb_server.7z',
+    darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z',
+    linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/linux/codegrip_gdb_server.7z'
   },
   bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
   rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
@@ -394,7 +396,7 @@ function getPackageDefinitions() {
     {
       id: 'codegrip',
       name: 'MIKROE CODEGRIP',
-      description: `CODEGRIP GDB server v${VERSIONS.codegrip}. MCU-specific device packs are resolved from the live Codegrip-Prog-Debug.csv catalog per setup.`,
+      description: `CODEGRIP GDB Server v${VERSIONS.codegrip}. MCU-specific device packs are resolved separately from the live Codegrip-Prog-Debug.csv catalog per setup.`,
       kind: 'managed'
     },
     {
@@ -1296,12 +1298,12 @@ async function installCodegripPackage(expected, tempRoot, progress, token) {
   const codegripUrl = URLS.codegrip[process.platform];
   if (!codegripUrl) throw new Error(`No managed CODEGRIP package is defined for ${getPlatformLabel()}.`);
 
-  const assetName = 'codegrip.7z';
+  const assetName = 'codegrip_gdb_server.7z';
   const archivePath = path.join(tempRoot, assetName);
   const extractRoot = path.join(tempRoot, 'payload');
   await fs.promises.mkdir(extractRoot, { recursive: true });
 
-  progress.report({ message: `Downloading CODEGRIP v${VERSIONS.codegrip}...` });
+  progress.report({ message: `Downloading CODEGRIP GDB Server v${VERSIONS.codegrip}...` });
   await downloadFile(codegripUrl, archivePath, progress, token);
   ensureNotCancelled(token);
 

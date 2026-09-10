@@ -8,9 +8,14 @@ const database = require('./c_database');
 const packages = require('./c_package_manager');
 const compilerSupport = require('./c_compiler_support');
 const rfp = require('./c_rfp_backend');
+const tiXds110 = require('./c_ti_xds110_backend');
+const microchip = require('./c_microchip_backend');
 
 const SUPPORTED_COMPILERS = compilerSupport.supportedCompilerUids();
-const SUPPORTED_PROGRAMMERS = new Set(['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID]);
+function isSupportedProgrammer(programmer = {}) {
+  return ['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID, tiXds110.TI_XDS110_PROGRAMMER_UID].includes(String(programmer.uid || '')) ||
+    microchip.isMicrochipProgrammer(programmer);
+}
 let cPanel;
 let pendingSetupId;
 
@@ -106,7 +111,7 @@ function settingsArrayOptions(field) {
 }
 
 function serializeDefinition(definition) {
-  return (Array.isArray(definition.config_registers) ? definition.config_registers : []).map((register) => ({
+  const configRegisters = (Array.isArray(definition.config_registers) ? definition.config_registers : []).map((register) => ({
     key: register.key,
     label: register.label || register.key,
     address: register.address,
@@ -122,6 +127,36 @@ function serializeDefinition(definition) {
           ? field.settings.map((setting) => ({ label: setting.label, value: setting.value }))
           : settingsArrayOptions(field))
       }))
+  })).filter((register) => register.fields.length > 0);
+  if (configRegisters.length) return configRegisters;
+
+  // Microchip XC core definitions use symbolic `config_words` instead of the
+  // numeric address/mask based `config_registers` representation. Group those
+  // fields by DEVCFG/DEVCP label_group so the existing register UI can edit
+  // them without converting the symbolic XC pragma values into guessed bits.
+  const groups = new Map();
+  for (const word of Array.isArray(definition.config_words) ? definition.config_words : []) {
+    if (word?.hidden) continue;
+    const key = String(word?.key || '').trim();
+    if (!key) continue;
+    const group = String(word?.label_group || 'Configuration').trim() || 'Configuration';
+    if (!groups.has(group)) groups.set(group, []);
+    const settings = (Array.isArray(word.settings) ? word.settings : [])
+      .filter((setting) => String(setting?.value ?? '').trim() !== '')
+      .map((setting) => ({ label: setting.label || setting.value, value: String(setting.value) }));
+    groups.get(group).push({
+      id: `${group}.${key}`,
+      key,
+      label: word.label || key,
+      init: String(word.init ?? ''),
+      settings
+    });
+  }
+  return [...groups.entries()].map(([group, fields]) => ({
+    key: group,
+    label: group,
+    address: '',
+    fields
   })).filter((register) => register.fields.length > 0);
 }
 
@@ -191,7 +226,7 @@ async function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
   const bareMetalRecommended = Number(info.sdkSupport || 0) === 0;
   const devicePackages = database.listDevicePackages(context, deviceUid);
   const programmers = database.listProgrammers(context, deviceUid, compiler.uid)
-    .filter((programmer) => SUPPORTED_PROGRAMMERS.has(programmer.uid));
+    .filter((programmer) => isSupportedProgrammer(programmer));
   if (!programmers.length) throw new Error(`No supported programmer is available for ${deviceUid}.`);
   const board = boardUid
     ? database.getBoard(context, boardUid)
@@ -330,7 +365,7 @@ function html(webview, extensionUri) {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${token}';">
 <link rel="stylesheet" href="${style}"><title>MikroBUS C Hardware Configuration</title></head>
 <body><div id="app" class="app">
-<header class="topbar"><div><div class="eyebrow">MIKROBUS C</div><h1>Hardware Configuration</h1><p>Select a board or MCU, configure its clock registers from the core JSON, then build a reusable C setup.</p></div>
+<header class="topbar"><div><div class="eyebrow">MIKROBUS C</div><h1>Hardware Configuration</h1><p>Select a board or MCU, configure its clock and MCU configuration options from the core JSON, then build a reusable C setup.</p></div>
 <div class="topActions"><button id="refresh" class="secondary">Refresh</button></div></header>
 <div id="missingState" class="missing hidden"></div>
 <main id="workspace" class="workspace hidden">
@@ -350,7 +385,7 @@ function html(webview, extensionUri) {
 <section id="selectedBoardCard" class="clockSection card hidden"><div><h3 id="selectedBoardName"></h3><p id="selectedBoardInfo"></p></div></section>
 <section class="clockSection card"><div><h3>Setup</h3><p>Choose how this reusable C environment will be built.</p><p id="bareMetalHint" class="hidden"></p></div><div class="cSetupOptions"><label class="clockInput">Setup name<input id="setupName" type="text"></label><label class="clockInput">Mode<select id="setupMode"><option value="full-sdk">Latest mikroSDK + selected MCU core</option><option value="bare-metal">Bare metal core</option></select></label><label class="clockInput">Application output<select id="applicationOutput"><option value="debug-terminal">Debug Terminal (printf_me)</option><option value="uart">UART</option></select></label><label class="clockInput">MCU package<select id="packageSelect"></select></label><label class="clockInput">Programmer<select id="programmerSelect"></select></label></div></section>
 <section class="clockSection card"><div><h3>System clock</h3><p>The default comes from <code>def/&lt;MCU_NAME&gt;.json</code>. The value is written to <code>FOSC_KHZ_VALUE</code>.</p></div><label class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="0.001"></label></section>
-<section><div class="sectionHeading"><div><h3>Clock / configuration registers</h3><p>Visible options come directly from <code>config_registers</code> in the MCU JSON. Hidden fields preserve their JSON <code>init</code> value.</p></div></div><div id="registerGrid" class="registerGrid"></div></section>
+<section><div class="sectionHeading"><div><h3>Clock / configuration registers</h3><p>Visible options come directly from <code>config_registers</code> or Microchip XC <code>config_words</code> in the MCU JSON. Hidden/default fields preserve their JSON <code>init</code> value.</p></div></div><div id="registerGrid" class="registerGrid"></div></section>
 <div class="definitionPath"><span>Definition</span><code id="definitionPath"></code></div>
 <div class="generateBar"><div id="generationStatus" class="generationStatus"></div><button id="generate" class="primary">Build C Configuration</button></div></section>
 </main></div><script nonce="${token}" src="${script}"></script></body></html>`;
@@ -388,5 +423,5 @@ async function openCConfigurator(context, setupId) {
 
 module.exports = {
   openCConfigurator,
-  _test: { fieldId, serializeDefinition, settingsArrayOptions, maskShift, findDefinitionFile }
+  _test: { fieldId, serializeDefinition, settingsArrayOptions, maskShift, findDefinitionFile, isSupportedProgrammer }
 };
