@@ -15,6 +15,8 @@ const {
 const { cLanguageSupport } = require('./feature_flags');
 const { registerCSupport, getCSetupDashboardState, rebuildSetupById, reconfigureSetupById, removeSetupById } = require('./c_setup');
 const sharedProgrammerPackages = require('./c_package_manager');
+const rustCorePackages = require('./rust_core_packages');
+const rustBspPackages = require('./rust_bsp_packages');
 
 const CODEGRIP_SERVER_SPEC = Object.freeze(
   sharedProgrammerPackages.codegripServerPackageSpec({ environment: false }) || {
@@ -45,7 +47,6 @@ const URLS = {
     darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z',
     linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/linux/codegrip_gdb_server.7z'
   },
-  bsp: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.0.1/bsp.7z',
   rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
   probeRsShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.sh`,
   probeRsPowerShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.ps1`,
@@ -342,6 +343,29 @@ async function handleSetupMessage(message, view, context) {
     return;
   }
 
+  if (message.type === 'installAllGeneral') {
+    await installAllRustGeneralPackages(context);
+    if (environmentPanel) postStatus(environmentPanel, scanPackages(context), context);
+    return;
+  }
+
+  if (message.type === 'manager' && ['core', 'codegrip', 'bsp'].includes(message.manager)) {
+    await postRustManagerState(view, context, message.manager);
+    return;
+  }
+
+  if (message.type === 'managerInstall' && ['core', 'bsp'].includes(message.manager) && typeof message.key === 'string') {
+    await installRustManagerPackage(context, message.manager, message.key);
+    await postRustManagerState(view, context, message.manager);
+    return;
+  }
+
+  if (message.type === 'managerUninstall' && ['core', 'codegrip', 'bsp'].includes(message.manager) && typeof message.key === 'string') {
+    await uninstallRustManagerPackage(context, message.manager, message.key);
+    await postRustManagerState(view, context, message.manager);
+    return;
+  }
+
   if (message.type === 'openSettings') {
     const changed = await sharedProgrammerPackages.changeManagedRoot(context);
     if (changed && environmentPanel) postStatus(environmentPanel, scanPackages(context), context);
@@ -415,12 +439,6 @@ function getPackageDefinitions() {
       id: 'database',
       name: 'MikroBUS Rust Database',
       description: 'database_mikro_sdk_rust.db used to enumerate MCUs and family metadata.',
-      kind: 'managed'
-    },
-    {
-      id: 'bsp',
-      name: 'Board Support Package',
-      description: 'Independent board and shield configuration package used to generate project mikrobus.rs files.',
       kind: 'managed'
     },
     {
@@ -546,7 +564,6 @@ function getExpectedPaths(context) {
     openocd: path.join(managedRoot, 'runner', `xpack-openocd-${VERSIONS.openocd}`),
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
     database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
-    bsp: path.join(managedRoot, 'bsp'),
     sdk: path.join(managedRoot, 'sdk')
   };
 }
@@ -776,18 +793,6 @@ function detectManaged(id, expected) {
     return fileStatus(expected.database, expected.database, 'Application database found.');
   }
 
-  if (id === 'bsp') {
-    const boards = path.join(expected.bsp, 'boards');
-    const shields = path.join(expected.bsp, 'shields');
-    const present = directoryHasContent(boards) && directoryHasContent(shields);
-    return {
-      status: present ? 'installed' : 'missing',
-      detail: present ? 'Board and shield BSP directories found.' : 'BSP boards or shields directory is missing or empty.',
-      expectedPath: expected.bsp,
-      version: ''
-    };
-  }
-
   if (id === 'sdk') {
     const present = directoryHasContent(expected.sdk);
     return {
@@ -867,7 +872,7 @@ function getInstallAction(id, context) {
     return asset ? managedAction('Install automatically') : undefined;
   }
 
-  if (['database', 'bsp', 'sdk'].includes(id)) {
+  if (['database', 'sdk'].includes(id)) {
     return managedAction('Install automatically');
   }
 
@@ -875,7 +880,7 @@ function getInstallAction(id, context) {
 }
 
 function getUpdateAction(id, context) {
-  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'sdk'].includes(id)) {
     return managedAction(id === 'openocd' || id === 'armGcc' ? 'Update / reinstall' : 'Update');
   }
 
@@ -921,7 +926,7 @@ function getUpdateAction(id, context) {
 }
 
 function getUninstallAction(id, context) {
-  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'sdk'].includes(id)) {
     return { type: 'managed-uninstall', label: 'Uninstall' };
   }
 
@@ -1177,7 +1182,6 @@ async function uninstallManagedPackage(id, context) {
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
-    bsp: expected.bsp,
     sdk: expected.sdk,
   };
   const target = targets[id];
@@ -1189,6 +1193,94 @@ async function uninstallManagedPackage(id, context) {
     throw new Error(`Refusing to remove a path outside the extension-managed root: ${resolvedTarget}`);
   }
   await fs.promises.rm(resolvedTarget, { recursive: true, force: true });
+}
+
+async function installAllRustGeneralPackages(context) {
+  const packages = scanPackages(context).filter((item) => item.status !== 'installed' && item.installSupported);
+  if (packages.length === 0) {
+    vscode.window.showInformationMessage('All automatically installable Rust environment packages are already installed.');
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `Install all ${packages.length} missing Rust environment package(s)?\n\n${packages.map((item) => `• ${item.name}`).join('\n')}`,
+    { modal: true },
+    'Install all'
+  );
+  if (choice !== 'Install all') return;
+
+  const managed = packages.filter((item) => getInstallAction(item.id, context)?.type === 'managed');
+  const nonManaged = packages.filter((item) => getInstallAction(item.id, context)?.type !== 'managed');
+  const failures = [];
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing MikroBUS Rust environment', cancellable: true }, async (progress, token) => {
+    for (let index = 0; index < managed.length; index += 1) {
+      if (token.isCancellationRequested) break;
+      const item = managed[index];
+      progress.report({ message: `${index + 1}/${managed.length}: ${item.name}` });
+      try { await installManagedPackage(item.id, context, progress, token); }
+      catch (error) { failures.push(`${item.name}: ${error?.message || error}`); }
+    }
+  });
+
+  // System/external prerequisites are intentionally launched after the managed
+  // batch because they can require elevation or vendor interaction.
+  for (const item of nonManaged) {
+    const action = getInstallAction(item.id, context);
+    if (!action) continue;
+    try {
+      if (action.type === 'external') await vscode.env.openExternal(vscode.Uri.parse(action.url));
+      else if (action.type === 'terminal') {
+        const options = { name: action.terminalName || `MikroBUS Rust - ${item.name}` };
+        if (action.shellPath) options.shellPath = action.shellPath;
+        const terminal = vscode.window.createTerminal(options);
+        terminal.show(true);
+        terminal.sendText(action.command, true);
+      }
+    } catch (error) { failures.push(`${item.name}: ${error?.message || error}`); }
+  }
+  if (failures.length) vscode.window.showWarningMessage(`Rust environment installation finished with ${failures.length} failure(s).`);
+  else vscode.window.showInformationMessage('Rust environment installation started/completed for all supported general packages.');
+}
+
+async function rustManagerItems(context, manager) {
+  if (manager === 'core') return rustCorePackages.packageState(context);
+  if (manager === 'bsp') return rustBspPackages.packageState(context);
+  return sharedProgrammerPackages.installedProgrammerPackages(context)
+    .filter((entry) => /codegrip/i.test(`${entry.name || ''} ${entry.displayName || ''}`))
+    .map((entry) => ({
+      key: entry.key || sharedProgrammerPackages.packageKey(entry),
+      name: entry.name,
+      displayName: entry.displayName || entry.name,
+      kind: entry.kind || 'programmer-pack',
+      version: entry.version || '',
+      status: 'installed',
+      root: entry.root || '',
+      detail: (entry.references || []).length ? `Used by setup: ${entry.references.join(', ')}` : 'Installed CODEGRIP package.'
+    }));
+}
+
+async function postRustManagerState(view, context, manager) {
+  if (!view) return;
+  try {
+    const items = await rustManagerItems(context, manager);
+    void view.webview.postMessage({ type: 'managerState', manager, items });
+  } catch (error) {
+    void view.webview.postMessage({ type: 'managerState', manager, items: [], error: error?.message || String(error) });
+  }
+}
+
+async function installRustManagerPackage(context, manager, key) {
+  const api = manager === 'core' ? rustCorePackages : rustBspPackages;
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing Rust ${manager} package ${key}`, cancellable: true }, async (progress, token) => {
+    await api.installNamedPackage(context, key, progress, token);
+  });
+}
+
+async function uninstallRustManagerPackage(context, manager, key) {
+  const choice = await vscode.window.showWarningMessage(`Uninstall ${key}?`, { modal: true }, 'Uninstall');
+  if (choice !== 'Uninstall') return;
+  if (manager === 'core') await rustCorePackages.uninstallPackage(context, key);
+  else if (manager === 'bsp') await rustBspPackages.uninstallPackage(context, key);
+  else await sharedProgrammerPackages.uninstallPackage(context, key);
 }
 
 async function updateAllManagedPackages(context) {
@@ -1252,7 +1344,7 @@ async function installManagedPackage(id, context, progress, token) {
       await installXpackPackage(id, expected, tempRoot, progress, token);
     } else if (id === 'database') {
       await installDatabase(expected, tempRoot, progress, token);
-    } else if (id === 'sdk' || id === 'bsp') {
+    } else if (id === 'sdk') {
       await installRustyArchive(id, expected, tempRoot, progress, token);
     } else {
       throw new Error(`No managed installer is defined for ${id}.`);
@@ -1387,18 +1479,12 @@ async function installDatabase(expected, tempRoot, progress, token) {
 }
 
 async function installRustyArchive(id, expected, tempRoot, progress, token) {
-  const targets = { sdk: expected.sdk, bsp: expected.bsp };
+  const targets = { sdk: expected.sdk };
   const target = targets[id];
   const assetName = `${id}.7z`;
 
-  const assetUrl = id === 'bsp'
-    ? URLS.bsp
-    : await resolveLatestRustyAsset(assetName, token);
-  progress.report({
-    message: id === 'bsp'
-      ? `Using Rusty_MikroBUS v0.0.1 asset ${assetName}...`
-      : `Resolved latest Rusty_MikroBUS release asset ${assetName}...`
-  });
+  const assetUrl = await resolveLatestRustyAsset(assetName, token);
+  progress.report({ message: `Resolved latest Rusty_MikroBUS release asset ${assetName}...` });
   const archivePath = path.join(tempRoot, assetName);
   const extractRoot = path.join(tempRoot, 'payload');
   await fs.promises.mkdir(extractRoot, { recursive: true });
@@ -1780,7 +1866,6 @@ function expectedPathFor(id, expected) {
     openocd: expected.openocd,
     armGcc: expected.armGcc,
     database: expected.database,
-    bsp: expected.bsp,
     sdk: expected.sdk
   };
   return map[id] || '';
@@ -2016,7 +2101,7 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
         <h1>Development environment setup</h1>
         <p class="subtitle">The extension detects the current host platform and checks the packages required by the Rust MikroBUS workflow.</p>
       </div>
-      <div class="heroActions"><button id="updateManaged" class="secondary">Update managed</button></div>
+      <div class="heroActions"><button id="installAll">Install all</button><button id="updateManaged" class="secondary">Update managed</button></div>
     </header>
 
     <section class="summary" aria-live="polite">
@@ -2027,10 +2112,17 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
     </section>
 
     <div id="platformNotice" class="notice hidden"></div>
+    <nav class="packageTabs" aria-label="Rust package views">
+      <button class="tabButton active" data-tab="general">General packages</button>
+      <button class="tabButton" data-tab="core">Core packages</button>
+      <button class="tabButton" data-tab="codegrip">CODEGRIP packages</button>
+      <button class="tabButton" data-tab="bsp">BSP packages</button>
+    </nav>
+    <div id="managerNotice" class="notice hidden"></div>
     <section id="packageGrid" class="grid" aria-label="Package status"></section>
 
     <footer>
-      <p>Installed packages now expose update and uninstall actions. CODEGRIP, OpenOCD, ARM GCC, database, BSP, SDK and core are fully extension-managed; system packages use their host installer, terminal command, or safe uninstall guidance.</p>
+      <p>General packages can be installed together. Core and BSP packages are downloaded on demand per MCU SYSTEM_LIB; the Core, CODEGRIP and BSP tabs show their local package state and allow removal.</p>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

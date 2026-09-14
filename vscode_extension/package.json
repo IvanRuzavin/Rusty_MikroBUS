@@ -2,7 +2,7 @@
   "name": "mikrobus-rust-tools",
   "displayName": "MikroBUS Embedded Tools",
   "description": "Embedded Rust and C development for mikroBUS hardware in VS Code: configure MCU/board setups, manage toolchains and packages, build, flash and debug across multiple MCU families.",
-  "version": "0.8.13",
+  "version": "0.8.14",
   "publisher": "IvanRuzavin",
   "engines": {
     "vscode": "^1.101.0"
@@ -223,6 +223,11 @@
           "type": "string",
           "default": "IvanRuzavin/Rusty_MikroBUS",
           "description": "GitHub repository that owns the fixed rust-core-packages release and rust_core_packages.json catalog. Core archives are installed on demand from this release based on MCU.SYSTEM_LIB."
+        },
+        "mikrobusRust.rustBspPackagesRepository": {
+          "type": "string",
+          "default": "IvanRuzavin/Rusty_MikroBUS",
+          "description": "GitHub repository that owns the fixed rust-bsp-packages release and rust_bsp_packages.json catalog. BSP archives are installed on demand based on MCU.SYSTEM_LIB."
         },
         "mikrobusRust.cargoPath": {
           "type": "string",
@@ -518,7 +523,7 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check rust_core_packages.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check c_microchip_backend.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js && node --check c_rfp_backend.js && node --check c_cmake_visibility.js && node --check c_ti_xds110_backend.js",
+    "check": "node --check extension.js && node --check rust_core_packages.js && node --check rust_bsp_packages.js && node --check mcu_configurator.js && node --check codegrip_backend.js && node --check c_setup.js && node --check c_compiler_support.js && node --check c_configurator.js && node --check c_database.js && node --check c_package_catalog.js && node --check c_codegrip_catalog.js && node --check c_package_manager.js && node --check c_microchip_backend.js && node --check feature_flags.js && node --check media/setup.js && node --check media/mcu.js && node --check media/c_mcu.js && node --check media/setups.js && node --check c_rfp_backend.js && node --check c_cmake_visibility.js && node --check c_ti_xds110_backend.js",
     "test": "node test/c_support.test.js",
     "build": "npx @vscode/vsce package"
   },

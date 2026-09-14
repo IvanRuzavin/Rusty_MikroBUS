@@ -323,3 +323,5 @@ footer {
   color: var(--vscode-errorForeground);
   background: var(--vscode-button-secondaryHoverBackground);
 }
+
+.heroActions,.packageTabs{display:flex;gap:8px;flex-wrap:wrap}.heroActions button:not(.secondary),.tabButton.active{color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.packageTabs{margin:0 0 14px}.tabButton{border:1px solid var(--vscode-button-border,transparent);border-radius:3px;padding:7px 11px;cursor:pointer;color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}.empty{padding:28px;border:1px dashed var(--vscode-panel-border);border-radius:5px;text-align:center;color:var(--vscode-descriptionForeground)}.status-update{border-left:3px solid var(--vscode-editorWarning-foreground)}

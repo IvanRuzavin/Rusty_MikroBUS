@@ -2232,7 +2232,7 @@ endfunction()
   assert.ok(rustCorePackages.releaseAssetUrl('owner/repo', 'arm_stm32f_2xx.7z').includes('/rust-core-packages/arm_stm32f_2xx.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.13');
+  assert.strictEqual(packageJson.version, '0.8.14');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');

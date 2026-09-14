@@ -16,6 +16,7 @@ const {
 const codegripCatalog = require('./c_codegrip_catalog');
 const sharedProgrammerPackages = require('./c_package_manager');
 const { ensureRustCorePackage } = require('./rust_core_packages');
+const { ensureRustBspPackage } = require('./rust_bsp_packages');
 
 let mcuPanel;
 let outputChannel;
@@ -45,7 +46,6 @@ function getManagedPaths(context) {
   return {
     root,
     database: path.join(root, 'database', 'database_mikro_sdk_rust.db'),
-    bsp: path.join(root, 'bsp'),
     sdk: path.join(root, 'sdk'),
     core: path.join(root, 'core')
   };
@@ -870,7 +870,7 @@ function resolveManagedBspFile(paths, configuredPath) {
     throw new Error(`Refusing to read a BSP file outside the managed BSP package: ${configuredPath}`);
   }
   if (!fs.existsSync(resolved)) {
-    throw new Error(`Required BSP file was not found: ${resolved}. Update the Board Support Package in Development Environment.`);
+    throw new Error(`Required BSP file was not found: ${resolved}. Update the corresponding Rust BSP package in Development Environment → BSP Packages.`);
   }
   return resolved;
 }
@@ -2576,7 +2576,6 @@ async function sendInitialState(panel, context) {
   const paths = getManagedPaths(context);
   const missing = [];
   if (!fs.existsSync(paths.database)) missing.push('database');
-  if (!fs.existsSync(paths.bsp)) missing.push('bsp');
   if (!fs.existsSync(paths.sdk)) missing.push('sdk');
 
   if (missing.length > 0) {
@@ -3490,7 +3489,7 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   if (!mcuName) throw new Error('Select an MCU before generating the configuration.');
   if (!Number.isInteger(clockMhz) || clockMhz <= 0) throw new Error('Clock must be a positive integer in MHz.');
 
-  for (const required of [paths.database, paths.bsp, paths.sdk]) {
+  for (const required of [paths.database, paths.sdk]) {
     if (!fs.existsSync(required)) throw new Error(`Required managed package is missing: ${required}`);
   }
 
@@ -3498,8 +3497,11 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   const metadata = readMcuMetadata(paths.database, mcuName);
   progress.report({ message: `Resolving Rust core package for ${metadata.systemLib}...` });
   paths.core = await ensureRustCorePackage(context, metadata, progress, options.token);
+  progress.report({ message: `Resolving Rust BSP package for ${metadata.systemLib}...` });
+  paths.bsp = await ensureRustBspPackage(context, metadata, progress, options.token);
 
-  progress.report({ message: 'Installing managed board, MCU-card and shield BSP configuration files...' });
+  // Keep sdk/bsp as a disposable compatibility overlay for existing SDK code.
+  progress.report({ message: 'Installing selected board, MCU-card and shield BSP configuration files...' });
   copyDirectoryRequired(paths.bsp, path.join(paths.sdk, 'bsp'));
 
   let boardSelection;

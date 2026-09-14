@@ -438,6 +438,58 @@ async function ensureRustCorePackage(context, metadata, progress, token, options
   }
 }
 
+
+function installedEntries(context) {
+  const root = packagesRoot(context);
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const marker = readJsonIfPresent(path.join(root, entry.name, INSTALL_MARKER));
+    if (marker) out.push({ ...marker, root: path.join(root, entry.name) });
+  }
+  return out;
+}
+
+async function packageState(context, token) {
+  let catalog;
+  try { catalog = await loadCatalog(context, token); } catch { catalog = { packages: [] }; }
+  const installed = installedEntries(context);
+  const installedMap = new Map(installed.map((item) => [String(item.packageName).toLowerCase(), item]));
+  const items = catalog.packages.map((spec) => {
+    const local = installedMap.get(spec.name.toLowerCase());
+    return {
+      key: spec.name, name: spec.name, displayName: spec.name, kind: 'rust-core',
+      version: spec.sha256.slice(0, 12), systemLib: spec.systemLib,
+      status: local ? (String(local.sha256).toLowerCase() === String(spec.sha256).toLowerCase() ? 'installed' : 'update') : 'missing',
+      root: local?.root || packageInstallRoot(context, spec.name),
+      detail: `${spec.mcuCount || 0} MCU(s) · ${Array.isArray(spec.families) ? spec.families.join(', ') : ''}`
+    };
+  });
+  for (const local of installed) {
+    if (!items.some((item) => item.key.toLowerCase() === String(local.packageName).toLowerCase())) {
+      items.push({ key: local.packageName, name: local.packageName, displayName: local.packageName, kind: 'rust-core', version: String(local.sha256 || '').slice(0, 12), systemLib: local.systemLib, status: 'installed', root: local.root, detail: 'Installed package is not present in the current catalog.' });
+    }
+  }
+  return items.sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+async function installNamedPackage(context, name, progress, token) {
+  const catalog = await loadCatalog(context, token);
+  const spec = catalog.packages.find((item) => String(item.name).toLowerCase() === String(name).toLowerCase());
+  if (!spec) throw new Error(`Rust core package '${name}' is not in the catalog.`);
+  return ensureRustCorePackage(context, { name: spec.mcus?.[0] || spec.name, systemLib: spec.systemLib }, progress, token, { forceInstall: true });
+}
+
+async function uninstallPackage(context, name) {
+  const target = packageInstallRoot(context, name);
+  const root = path.resolve(packagesRoot(context));
+  const resolved = path.resolve(target);
+  if (!resolved.startsWith(root + path.sep)) throw new Error(`Refusing to remove path outside Rust core package root: ${resolved}`);
+  await fs.promises.rm(resolved, { recursive: true, force: true });
+  return true;
+}
+
 function installedPackageSummary(context) {
   const root = packagesRoot(context);
   if (!fs.existsSync(root)) return { count: 0, root };
@@ -456,6 +508,9 @@ module.exports = {
   packagesRoot,
   packageInstallRoot,
   installedPackageSummary,
+  packageState,
+  installNamedPackage,
+  uninstallPackage,
   RELEASE_TAG,
   CATALOG_ASSET,
   _test: {
