@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.1.2"
 BLANK_BIN_NAME = "mikrobus_validation_blank"
 SETUP_STAGING_NAME = ".setup.__mikrobus_staging"
 
@@ -1074,11 +1074,20 @@ def generate_setup(
             )
             hal_template = re.sub(r"\{[A-Za-z0-9_]+\}", "", hal_template)
 
-        # Anything template-like left at this point is not one of the supported
-        # optional feature/module placeholders and should fail early with a
-        # useful diagnostic instead of reaching Cargo as malformed TOML.
-        unresolved_family = sorted(set(re.findall(r"\{[^{}]+\}", family_template)))
-        unresolved_hal = sorted(set(re.findall(r"\{[^{}]+\}", hal_template)))
+        # Only identifier-only braces are template placeholders. TOML inline
+        # tables are also written with braces, for example:
+        #
+        #     mcu_definition = { path = "../../targets/arm/stm32/hal_ll_target_names" }
+        #
+        # A broad ``\{[^{}]+\}`` check incorrectly classifies those perfectly
+        # valid TOML inline tables as unresolved template placeholders.
+        placeholder_pattern = r"\{([A-Za-z_][A-Za-z0-9_]*)\}"
+        unresolved_family = sorted(set(
+            re.findall(placeholder_pattern, family_template)
+        ))
+        unresolved_hal = sorted(set(
+            re.findall(placeholder_pattern, hal_template)
+        ))
         if unresolved_family or unresolved_hal:
             details = []
             if unresolved_family:
@@ -1322,9 +1331,63 @@ def rust_edition(cargo_toml: Path) -> str:
         return "2015"
 
 
+def find_panic_dependency(cargo_toml: Path) -> str | None:
+    """
+    Return the Rust crate name of a direct panic-handler dependency.
+
+    A dependency being present in Cargo.toml is not enough to make its
+    #[panic_handler] available to a binary: the binary must reference the
+    crate so rustc links it.  Only the package's direct [dependencies] table
+    is considered here; mentions in metadata/workspace/dev-dependencies must
+    not suppress the validator's fallback panic handler.
+    """
+    try:
+        data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    dependencies = data.get("dependencies")
+    if not isinstance(dependencies, dict):
+        return None
+
+    panic_packages = {
+        "panic-halt",
+        "panic-abort",
+        "panic-semihosting",
+    }
+
+    for alias, spec in dependencies.items():
+        alias_text = str(alias).strip()
+        package_name = alias_text
+        if isinstance(spec, dict):
+            package_name = str(spec.get("package", alias_text)).strip()
+
+        normalized_alias = alias_text.replace("_", "-").casefold()
+        normalized_package = package_name.replace("_", "-").casefold()
+        if (
+            normalized_alias not in panic_packages
+            and normalized_package not in panic_packages
+        ):
+            continue
+
+        crate = alias_text.replace("-", "_")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", crate):
+            return crate
+
+    return None
+
+
+def crate_link_statement(crate: str, edition: str) -> str:
+    """Force a dependency crate into the final validation binary."""
+    if edition == "2015":
+        return f"extern crate {crate};"
+    return f"use {crate} as _;"
+
+
 def blank_source(cargo_toml: Path, include_mikrobus: bool = False) -> str:
     dependencies = collect_local_setup_dependencies(cargo_toml)
     edition = rust_edition(cargo_toml)
+    panic_dependency = find_panic_dependency(cargo_toml)
 
     lines = [
         "#![no_std]",
@@ -1332,10 +1395,19 @@ def blank_source(cargo_toml: Path, include_mikrobus: bool = False) -> str:
         "",
     ]
 
+    linked_crates: set[str] = set()
     for dependency in dependencies:
-        lines.append(f"use {dependency} as _;")
+        lines.append(crate_link_statement(dependency, edition))
+        linked_crates.add(dependency)
 
-    if dependencies:
+    # panic-halt/panic-abort/panic-semihosting only contribute their
+    # #[panic_handler] when the binary actually references the crate. Cargo
+    # compiling the dependency is not sufficient to link that handler.
+    if panic_dependency and panic_dependency not in linked_crates:
+        lines.append(crate_link_statement(panic_dependency, edition))
+        linked_crates.add(panic_dependency)
+
+    if linked_crates:
         lines.append("")
 
     if include_mikrobus:
@@ -1362,26 +1434,9 @@ def blank_source(cargo_toml: Path, include_mikrobus: bool = False) -> str:
         ]
     )
 
-    # If the SDK manifest already carries a panic crate, let it provide the
-    # handler. Otherwise add the canonical minimal handler to make this a real
-    # standalone blank embedded application.
-    try:
-        data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
-        manifest_text = json.dumps(data).lower()
-    except Exception:
-        manifest_text = ""
-    has_panic_dependency = any(
-        token in manifest_text
-        for token in (
-            "panic-halt",
-            "panic_halt",
-            "panic-abort",
-            "panic_abort",
-            "panic-semihosting",
-            "panic_semihosting",
-        )
-    )
-    if not has_panic_dependency:
+    # If the project has no direct panic-handler crate, provide a deterministic
+    # minimal handler so the synthetic blank application can be linked.
+    if not panic_dependency:
         lines.extend(
             [
                 "#[panic_handler]",

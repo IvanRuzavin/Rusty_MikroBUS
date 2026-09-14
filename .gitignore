@@ -12,3 +12,4 @@ sdk/Cargo.lock
 sdk/src/main.rs
 .venv/*
 .vscode/*
+rust_mcu_validation_*
