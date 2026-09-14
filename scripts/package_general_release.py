@@ -138,8 +138,7 @@ def safe_asset_stem(value: str) -> str:
 
 
 def display_name(folder_name: str, suffix: str) -> str:
-    # Requirement: replace every underscore with a space and append Click/Demo.
-    return f"{folder_name.replace('_', ' ')} {suffix}"
+    return f"{folder_name.replace('_', ' ').title()} {suffix}"
 
 
 def release_download_url(repository: str, tag: str, asset: str) -> str:
