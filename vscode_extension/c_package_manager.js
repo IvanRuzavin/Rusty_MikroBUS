@@ -18,7 +18,6 @@ const XC_COMPILER_UIDS = new Set(['mchp_xc8', 'mchp_xc16', 'mchp_xc32']);
 let packagePanel;
 let environmentPanel;
 let environmentViewKind = 'environment';
-let environmentViewHistory = [];
 let clickExamplesPanel;
 let clickExampleSpecsCache = [];
 let clickMetadataCache;
@@ -1630,11 +1629,11 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px}.m
 .meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px}code{font-family:var(--vscode-editor-font-family);word-break:break-all}
 button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}
 .danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}
-</style></head><body><header><div><h1>Installed C packages</h1><p class="muted">SDK, MCU core and device-support packages installed automatically by C setups.</p></div><button id="refresh">Refresh</button></header><main id="packages"></main>
+</style></head><body><header><div><h1>Installed C packages</h1><p class="muted">SDK, MCU core and device-support packages installed automatically by C setups.</p></div></header><main id="packages"></main>
 <script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function render(items){if(!items.length){root.innerHTML='<div class="empty">No C packages are installed.</div>';return;}root.innerHTML=items.map(function(p){return '<article class="card"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'version not reported')+'</span></div><p><code>'+esc(p.root)+'</code></p></div><button class="danger" data-key="'+esc(p.key)+'">Uninstall</button></article>';}).join('');}
-document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});root.onclick=e=>{const key=e.target?.dataset?.key;if(key)vscode.postMessage({type:'uninstall',key});};
+root.onclick=e=>{const key=e.target?.dataset?.key;if(key)vscode.postMessage({type:'uninstall',key});};
 window.addEventListener('message',e=>{if(e.data?.type==='packages')render(e.data.items||[]);});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
@@ -1661,7 +1660,7 @@ async function openInstalledPackages(context) {
   packagePanel.webview.html = packagePanelHtml();
   packagePanel.webview.onDidReceiveMessage(async (message) => {
     try {
-      if (message?.type === 'ready' || message?.type === 'refresh') postPackageState(context);
+      if (message?.type === 'ready') postPackageState(context);
       if (message?.type === 'uninstall' && typeof message.key === 'string') {
         if (await uninstallPackage(context, message.key)) postPackageState(context);
       }
@@ -1726,22 +1725,62 @@ function managerDescriptor(kind) {
 
 function cManagerHtml(kind) {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const env = kind === 'environment';
-  const descriptor = managerDescriptor(kind);
-  const managerButtons = env
-    ? '<button data-manager="compiler" class="secondary">Compiler packages</button><button data-manager="programmers" class="secondary">Programmers</button><button data-manager="codegrip" class="secondary">CODEGRIP packages</button><button data-manager="core" class="secondary">Core packages</button><button data-manager="card" class="secondary">MCU card packages</button><button data-manager="board" class="secondary">Board packages</button>'
-    : '';
-  const previousNavigation = env
-    ? ''
-    : '<div class="viewNav managerNav"><button id="back" class="secondary navBack" title="Go to previous view" aria-label="Go to previous view">←</button></div>';
+  const initialKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
+    ? kind
+    : 'environment';
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<title>${descriptor.title}</title><style>
-body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}button:disabled{opacity:.5;cursor:default}.summary{display:flex;gap:14px;margin-top:20px;align-items:center}.summary span,.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.summary .filterChip{color:var(--vscode-foreground);background:transparent}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}h1,h3{margin:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.storageBar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border);border-radius:7px}.storageBar>div{display:grid;gap:5px;min-width:0;flex:1}.storageBar code{padding:6px 8px;background:var(--vscode-textCodeBlock-background);border-radius:3px}.viewNav{display:flex;align-items:center;margin:0 0 12px}.navBack{font-size:18px;line-height:1;min-width:34px;padding:6px 10px}
-</style></head><body>${previousNavigation}<header><div><h1>${descriptor.title}</h1><p class="muted">${descriptor.subtitle}</p></div><div class="actions">${env ? '<button id="installAll">Install shared environment</button>' : ''}${managerButtons}<button id="refresh" class="secondary">Refresh</button></div></header><section class="summary"><button id="installedCount" class="filterChip" title="Show only packages already installed locally">0 installed</button><span id="missingCount">0 missing</span></section>${env ? '<section class="storageBar"><div><span class="muted">Managed installation path</span><code id="managedRoot">Loading…</code></div><button id="changeRoot" class="secondary">Change</button></section>' : ''}<input id="search" class="search" placeholder="Filter packages…"><main id="packages" class="grid"></main>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const installedChip=document.getElementById('installedCount');let all=[];let installedOnly=false;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function isInstalled(p){return p.status==='installed'||p.status==='update';}function render(){const q=document.getElementById('search').value.toLowerCase();const installed=all.filter(isInstalled).length;const items=all.filter(x=>(!installedOnly||isInstalled(x))&&JSON.stringify(x).toLowerCase().includes(q));installedChip.textContent=installedOnly?installed+' installed · showing only':installed+' installed';installedChip.classList.toggle('active',installedOnly);installedChip.setAttribute('aria-pressed',String(installedOnly));document.getElementById('missingCount').textContent=(all.length-installed)+' not installed';if(!items.length){root.innerHTML='<div class="empty">'+(installedOnly?'No installed packages match this filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const refs=p.references||[];const primary=p.unavailable?'<button disabled>Unavailable</button>':(p.external?'<button data-open="'+esc(p.externalUrl||'')+'">Open download page</button>':(p.status==='installed'?'<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'));const action=(p.externalUrl&&!p.external?'<button class="secondary" data-open="'+esc(p.externalUrl)+'">Download</button>':'')+primary;return '<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind)+'</span><span>'+esc(p.version||'')+'</span><span>'+esc(p.status||'missing')+'</span>'+(p.compilerUid?'<span>'+esc(p.compilerUid)+'</span>':'')+'</div><p><code>'+esc(p.root||p.installRelativePath||'')+'</code></p>'+(p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'')+(refs.length?'<div class="refs">Used by setup: '+esc(refs.join(', '))+'</div>':'')+'</div><div class="actions">'+action+'</div></article>';}).join('');}root.onclick=e=>{const u=e.target?.dataset?.uninstall;if(u){vscode.postMessage({type:'uninstall',key:u});return;}const i=e.target?.dataset?.install;if(i){vscode.postMessage({type:'install',key:i});return;}const o=e.target?.dataset?.open;if(o)vscode.postMessage({type:'openExternal',url:o});const m=e.target?.dataset?.manager;if(m)vscode.postMessage({type:'manager',manager:m});};document.getElementById('search').oninput=render;installedChip.onclick=()=>{installedOnly=!installedOnly;render();};document.getElementById('refresh').onclick=()=>vscode.postMessage({type:'refresh'});${env ? "document.getElementById('installAll').onclick=()=>vscode.postMessage({type:'installAll'});document.getElementById('changeRoot').onclick=()=>vscode.postMessage({type:'changeRoot'});document.querySelectorAll('[data-manager]').forEach(x=>x.onclick=()=>vscode.postMessage({type:'manager',manager:x.dataset.manager}));" : "document.getElementById('back').onclick=()=>vscode.postMessage({type:'back'});"}window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];const managed=document.getElementById('managedRoot');if(managed)managed.textContent=e.data.managedRoot||'';render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+<title>C Development Environment</title><style>
+body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}h1,h3{margin:0}.muted{color:var(--vscode-descriptionForeground)}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}button{font:inherit;border:0;border-radius:3px;padding:7px 12px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover:not(:disabled){background:var(--vscode-button-hoverBackground)}button.secondary,.tabButton{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.secondary:hover:not(:disabled),.tabButton:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground)}button.danger{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground);border:1px solid var(--vscode-inputValidation-errorBorder,var(--vscode-panel-border))}button.danger:hover:not(:disabled){color:var(--vscode-errorForeground);background:var(--vscode-button-secondaryHoverBackground)}button:disabled{opacity:.5;cursor:default}.hidden{display:none!important}.packageTabs{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 0}.tabButton{border:1px solid var(--vscode-button-border,transparent)}.tabButton.active{color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.summary{display:flex;gap:10px;margin-top:14px;align-items:center;flex-wrap:wrap}.summary .filterChip{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px;color:var(--vscode-foreground);background:transparent}.summary .filterChip:hover:not(:disabled){background:var(--vscode-button-secondaryBackground)}.summary .filterChip.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border-color:var(--vscode-focusBorder)}.grid{display:grid;gap:10px;margin-top:20px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-disabledForeground);border-radius:7px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed{border-left-color:var(--vscode-testing-iconPassed)}.card.update{border-left-color:var(--vscode-editorWarning-foreground)}.card.missing{border-left-color:var(--vscode-testing-iconFailed)}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:5px}code{font-family:var(--vscode-editor-font-family);word-break:break-all;font-size:11px}.empty,.loading{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px;color:var(--vscode-descriptionForeground)}.refs{color:var(--vscode-descriptionForeground);font-size:11px;margin-top:7px}.search{margin-top:18px;width:100%;box-sizing:border-box;padding:8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.storageBar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border);border-radius:7px}.storageBar>div{display:grid;gap:5px;min-width:0;flex:1}.storageBar code{padding:6px 8px;background:var(--vscode-textCodeBlock-background);border-radius:3px;overflow-wrap:anywhere}@media(max-width:650px){.card{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.storageBar{align-items:flex-start;flex-direction:column}}
+</style></head><body>
+<header><div><h1 id="viewTitle">C Development Environment</h1><p id="viewSubtitle" class="muted"></p></div><div class="actions"><button id="installAll">Install all</button></div></header>
+<nav class="packageTabs" aria-label="C package views">
+<button class="tabButton" data-manager="environment">General packages</button>
+<button class="tabButton" data-manager="compiler">Compiler packages</button>
+<button class="tabButton" data-manager="programmers">Programmers</button>
+<button class="tabButton" data-manager="codegrip">CODEGRIP packages</button>
+<button class="tabButton" data-manager="core">Core packages</button>
+<button class="tabButton" data-manager="card">MCU card packages</button>
+<button class="tabButton" data-manager="board">Board packages</button>
+</nav>
+<section class="summary" aria-label="Package installation filters"><button id="installedCount" class="filterChip" title="Show only packages already installed locally" aria-pressed="false">0 installed</button><button id="missingCount" class="filterChip" title="Show only packages not installed locally" aria-pressed="false">0 not installed</button></section>
+<section id="storageBar" class="storageBar"><div><span class="muted">Managed installation path</span><code id="managedRoot">Loading…</code></div><button id="changeRoot" class="secondary">Change</button></section>
+<input id="search" class="search" type="search" placeholder="Filter packages…" autocomplete="off"><main id="packages" class="grid"></main>
+<script nonce="${nonce}">
+const vscode=acquireVsCodeApi();
+const root=document.getElementById('packages');
+const search=document.getElementById('search');
+const installedChip=document.getElementById('installedCount');
+const missingChip=document.getElementById('missingCount');
+const installAll=document.getElementById('installAll');
+const storageBar=document.getElementById('storageBar');
+const tabs=[...document.querySelectorAll('[data-manager]')];
+const descriptors={
+  environment:{title:'C Development Environment',subtitle:'Shared C runtime components. MCU cores and BSPs are installed separately and only when needed.'},
+  compiler:{title:'Compiler Packages',subtitle:'Compiler toolchains from the NECTO Compilers table. Compatibility is determined by CompilerToDevice and per-compiler core package mappings.'},
+  programmers:{title:'Programmer Packages',subtitle:'Programmer support packages referenced by the database.'},
+  codegrip:{title:'CODEGRIP Packages',subtitle:'Installed CODEGRIP GDB server and MCU-specific device packs used by C or Rust setups.'},
+  core:{title:'MCU Core Packages',subtitle:'Per-MCU compiler core packages referenced by Devices.installer_package.'},
+  card:{title:'MCU Card BSP Packages',subtitle:'MCU-card BSP packages referenced by Devices.installer_package.'},
+  board:{title:'Board BSP Packages',subtitle:'Board BSP packages referenced by Boards.installer_package.'}
+};
+let activeKind=${JSON.stringify(initialKind)};
+let all=[];
+let statusFilter='all';
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function isInstalled(p){return p?.status==='installed'||p?.status==='update';}
+function syncView(kind){activeKind=descriptors[kind]?kind:'environment';const d=descriptors[activeKind];document.getElementById('viewTitle').textContent=d.title;document.getElementById('viewSubtitle').textContent=d.subtitle;tabs.forEach(b=>b.classList.toggle('active',b.dataset.manager===activeKind));const env=activeKind==='environment';installAll.classList.toggle('hidden',!env);storageBar.classList.toggle('hidden',!env);}
+function updateCounts(){const installed=all.filter(isInstalled).length;const missing=Math.max(0,all.length-installed);installedChip.textContent=statusFilter==='installed'?installed+' installed · showing only':installed+' installed';missingChip.textContent=statusFilter==='missing'?missing+' not installed · showing only':missing+' not installed';installedChip.classList.toggle('active',statusFilter==='installed');missingChip.classList.toggle('active',statusFilter==='missing');installedChip.setAttribute('aria-pressed',String(statusFilter==='installed'));missingChip.setAttribute('aria-pressed',String(statusFilter==='missing'));}
+function setFilter(next){statusFilter=statusFilter===next?'all':next;render();}
+function render(){updateCounts();const q=search.value.trim().toLowerCase();const items=all.filter(p=>{if(statusFilter==='installed'&&!isInstalled(p))return false;if(statusFilter==='missing'&&isInstalled(p))return false;if(!q)return true;return JSON.stringify(p).toLowerCase().includes(q);});if(!items.length){root.innerHTML='<div class="empty">'+(statusFilter!=='all'?'No packages match the selected installation filter.':'No matching packages.')+'</div>';return;}root.innerHTML=items.map(p=>{const state=esc(p.status||'missing');const refs=Array.isArray(p.references)&&p.references.length?'<div class="refs">Used by setup: '+esc(p.references.join(', '))+'</div>':'';const detail=p.detail?'<div class="refs">'+esc(p.detail)+'</div>':'';let actions='';if(p.unavailable)actions='<button disabled>Unavailable</button>';else if(p.external)actions='<button data-external="'+esc(p.externalUrl||p.sourceUrl||'')+'">Open download page</button>';else if(p.status==='installed')actions='<button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>';else actions='<button data-install="'+esc(p.key)+'">'+(p.status==='update'?'Update':'Install')+'</button>'+(p.externalUrl?'<button class="secondary" data-external="'+esc(p.externalUrl)+'">Download</button>':'');return '<article class="card '+state+'"><div><h3>'+esc(p.displayName||p.name)+'</h3><div class="meta"><span>'+esc(p.kind||'package')+'</span><span>'+esc(p.version||'')+'</span><span>'+state+'</span></div>'+(p.root?'<p><code>'+esc(p.root)+'</code></p>':'')+detail+refs+'</div><div class="actions">'+actions+'</div></article>';}).join('');}
+function selectManager(kind){if(!descriptors[kind]||kind===activeKind)return;statusFilter='all';search.value='';all=[];syncView(kind);updateCounts();root.innerHTML='<div class="loading">Loading packages…</div>';vscode.postMessage({type:'manager',manager:activeKind});}
+root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.external)vscode.postMessage({type:'openExternal',url:b.dataset.external});};
+search.oninput=render;installedChip.onclick=()=>setFilter('installed');missingChip.onclick=()=>setFilter('missing');installAll.onclick=()=>vscode.postMessage({type:'installAll'});document.getElementById('changeRoot').onclick=()=>vscode.postMessage({type:'changeRoot'});tabs.forEach(b=>b.onclick=()=>selectManager(b.dataset.manager));
+window.addEventListener('focus',()=>vscode.postMessage({type:'ready'}));
+window.addEventListener('message',e=>{if(e.data?.type!=='state')return;if(e.data.manager)syncView(e.data.manager);all=e.data.items||[];document.getElementById('managedRoot').textContent=e.data.managedRoot||'';render();});
+syncView(activeKind);root.innerHTML='<div class="loading">Loading packages…</div>';vscode.postMessage({type:'ready'});
+</script></body></html>`;
 }
-
 function packageStateFromSpecs(context, specs) {
   const installedAll = listInstalledPackages(context, true);
   return specs.map((spec) => {
@@ -1867,7 +1906,7 @@ async function postManagerState(context, kind, panel) {
   const items = packageStateFromSpecs(context, specs).map((item) => {
     return item;
   });
-  void panel.webview.postMessage({ type:'state', items, managedRoot: getManagedRoot(context) });
+  void panel.webview.postMessage({ type:'state', manager: kind, items, managedRoot: getManagedRoot(context) });
 }
 
 async function installManagerPackage(context, kind, key) {
@@ -1880,25 +1919,14 @@ async function installManagerPackage(context, kind, key) {
   });
 }
 
-async function showEnvironmentPackageView(context, kind = 'environment', options = {}) {
+async function showEnvironmentPackageView(context, kind = 'environment') {
   if (!environmentPanel) return;
-  const nextKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
+  environmentViewKind = ['environment', 'compiler', 'programmers', 'codegrip', 'core', 'card', 'board'].includes(kind)
     ? kind
     : 'environment';
-  if (options.pushHistory && nextKind !== environmentViewKind) {
-    environmentViewHistory.push(environmentViewKind);
-  }
-  environmentViewKind = nextKind;
-  const descriptor = managerDescriptor(environmentViewKind);
-  environmentPanel.title = `MikroBUS C: ${descriptor.title}`;
-  environmentPanel.webview.html = cManagerHtml(environmentViewKind);
+  environmentPanel.title = 'MikroBUS C: Development Environment';
+  await postManagerState(context, environmentViewKind, environmentPanel);
 }
-
-async function goBackEnvironmentPackageView(context) {
-  const previous = environmentViewHistory.pop() || 'environment';
-  await showEnvironmentPackageView(context, previous);
-}
-
 async function openPackageManager(context, kind) {
   return openEnvironmentPackages(context, kind);
 }
@@ -1921,32 +1949,29 @@ async function openBoardPackages(context){return openPackageManager(context,'boa
 async function openEnvironmentPackages(context, initialKind = 'environment') {
   if (environmentPanel) {
     environmentPanel.reveal(vscode.ViewColumn.Active);
-    environmentViewHistory = initialKind === 'environment' ? [] : ['environment'];
     await showEnvironmentPackageView(context, initialKind);
     return;
   }
-  environmentViewHistory = initialKind === 'environment' ? [] : ['environment'];
   environmentPanel=vscode.window.createWebviewPanel('mikrobusC.environmentPackages','MikroBUS C: Development Environment',vscode.ViewColumn.Active,{enableScripts:true,retainContextWhenHidden:true});
+  environmentPanel.webview.html = cManagerHtml(initialKind);
   environmentPanel.webview.onDidReceiveMessage(async(message)=>{try{
-    const activeKind = environmentViewKind;
-    if(message?.type==='ready'||message?.type==='refresh')await postManagerState(context,activeKind,environmentPanel);
+    if(message?.type==='ready')await postManagerState(context,environmentViewKind,environmentPanel);
     if(message?.type==='installAll'){
       await installAllEnvironmentPackages(context);
-      await postManagerState(context,activeKind,environmentPanel);
+      await postManagerState(context,environmentViewKind,environmentPanel);
     }
     if(message?.type==='install'&&typeof message.key==='string'){
-      await installManagerPackage(context,activeKind,message.key);
-      await postManagerState(context,activeKind,environmentPanel);
+      await installManagerPackage(context,environmentViewKind,message.key);
+      await postManagerState(context,environmentViewKind,environmentPanel);
     }
     if(message?.type==='uninstall'&&typeof message.key==='string'){
-      if(await uninstallPackage(context,message.key))await postManagerState(context,activeKind,environmentPanel);
+      if(await uninstallPackage(context,message.key))await postManagerState(context,environmentViewKind,environmentPanel);
     }
     if(message?.type==='openExternal'&&message.url)await vscode.env.openExternal(vscode.Uri.parse(message.url));
-    if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager,{pushHistory:true});
-    if(message?.type==='back')await goBackEnvironmentPackageView(context);
-    if(message?.type==='changeRoot'){ if(await changeManagedRoot(context)) await postManagerState(context,activeKind,environmentPanel); }
+    if(message?.type==='manager'&&typeof message.manager==='string')await showEnvironmentPackageView(context,message.manager);
+    if(message?.type==='changeRoot'){ if(await changeManagedRoot(context)) await postManagerState(context,environmentViewKind,environmentPanel); }
   }catch(error){vscode.window.showErrorMessage(`MikroBUS C ${environmentViewKind} packages: ${error.message||error}`);}},null,context.subscriptions);
-  environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';environmentViewHistory=[];},null,context.subscriptions);
+  environmentPanel.onDidDispose(()=>{environmentPanel=undefined;environmentViewKind='environment';},null,context.subscriptions);
   await showEnvironmentPackageView(context, initialKind);
 }
 
@@ -1957,10 +1982,10 @@ function clickExamplesHtml() {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Click Board Examples</title><style>
 body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}h1,h3{margin:0}.muted{color:var(--vscode-descriptionForeground)}button{border:0;border-radius:3px;padding:8px 14px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}.toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,280px);gap:10px;margin-top:20px}.toolbar input,.toolbar select{width:100%;box-sizing:border-box;padding:9px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.summary span{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.grid{display:grid;gap:10px;margin-top:18px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-testing-iconFailed);border-radius:7px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed,.card.update{border-left-color:var(--vscode-testing-iconPassed)}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:6px}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.loading{margin-top:28px;color:var(--vscode-descriptionForeground)}code{font-family:var(--vscode-editor-font-family);font-size:11px;word-break:break-all}@media(max-width:650px){.toolbar{grid-template-columns:1fr}.card{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}}
-</style></head><body><header><div><h1>Click Board Examples</h1><p class="muted">Browse, install and open C Click Board example projects.</p></div><button id="refresh" class="secondary">Refresh metadata</button></header>
+</style></head><body><header><div><h1>Click Board Examples</h1><p class="muted">Browse, install and open C Click Board example projects.</p></div></header>
 <div class="toolbar"><input id="search" type="search" placeholder="Search Click Boards…" autocomplete="off"><select id="category"><option value="">All categories</option></select></div>
 <section class="summary"><span id="shown">0 shown</span><span id="installed">0 installed</span><span id="total">0 total</span></section><main id="packages" class="grid"><div class="loading">Downloading Click Board metadata…</div></main>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');const category=document.getElementById('category');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const cat=category.value;const items=all.filter(p=>(!cat||p.category===cat)&&(!q||[p.displayName,p.category,p.name].some(v=>String(v||'').toLowerCase().includes(q))));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Click Board examples match this filter.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.category)+'</span><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}function setCategories(categories){const current=category.value;category.innerHTML='<option value="">All categories</option>'+categories.map(c=>'<option value="'+esc(c)+'">'+esc(c)+'</option>').join('');category.value=categories.includes(current)?current:'';}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;category.onchange=render;document.getElementById('refresh').onclick=()=>{root.innerHTML='<div class="loading">Refreshing Click Board metadata…</div>';vscode.postMessage({type:'refresh'});};window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];setCategories(e.data.categories||[]);render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');const category=document.getElementById('category');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const cat=category.value;const items=all.filter(p=>(!cat||p.category===cat)&&(!q||[p.displayName,p.category,p.name].some(v=>String(v||'').toLowerCase().includes(q))));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Click Board examples match this filter.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.category)+'</span><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}function setCategories(categories){const current=category.value;category.innerHTML='<option value="">All categories</option>'+categories.map(c=>'<option value="'+esc(c)+'">'+esc(c)+'</option>').join('');category.value=categories.includes(current)?current:'';}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;category.onchange=render;window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];setCategories(e.data.categories||[]);render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
 function resolveExampleProjectRoot(entry) {
@@ -2035,8 +2060,7 @@ async function openClickExamples(context) {
   clickExamplesPanel.webview.onDidReceiveMessage(async (message) => {
     try {
       if (message?.type === 'ready') await postClickExamplesState(context, true);
-      if (message?.type === 'refresh') await postClickExamplesState(context, true);
-      if (message?.type === 'install' && typeof message.key === 'string') { await installClickExample(context, message.key); await postClickExamplesState(context, false); }
+            if (message?.type === 'install' && typeof message.key === 'string') { await installClickExample(context, message.key); await postClickExamplesState(context, false); }
       if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) await postClickExamplesState(context, false); }
       if (message?.type === 'openProject' && typeof message.key === 'string') await openClickExampleProject(context, message.key);
     } catch (error) {
@@ -2053,10 +2077,10 @@ function demoExamplesHtml() {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Demo Examples</title><style>
 body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:24px;max-width:1180px;margin:auto}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.muted{color:var(--vscode-descriptionForeground)}button{border:0;border-radius:3px;padding:8px 13px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}button.danger{background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder)}.toolbar{margin-top:18px}.toolbar input{width:100%;box-sizing:border-box;padding:9px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border)}.summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.summary span{padding:5px 9px;border:1px solid var(--vscode-panel-border);border-radius:999px}.grid{display:grid;gap:10px;margin-top:18px}.card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-testing-iconFailed);border-radius:7px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:18px}.card.installed,.card.update{border-left-color:var(--vscode-testing-iconPassed)}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:12px;margin-top:6px}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.empty{padding:32px;border:1px dashed var(--vscode-panel-border);text-align:center;border-radius:8px}.loading{margin-top:28px;color:var(--vscode-descriptionForeground)}code{font-family:var(--vscode-editor-font-family);font-size:11px;word-break:break-all}@media(max-width:650px){.card{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}}
-</style></head><body><header><div><h1>Demo Examples</h1><p class="muted">Browse, install and open C demo projects.</p></div><button id="refresh" class="secondary">Refresh metadata</button></header>
+</style></head><body><header><div><h1>Demo Examples</h1><p class="muted">Browse, install and open C demo projects.</p></div></header>
 <div class="toolbar"><input id="search" type="search" placeholder="Search demos…" autocomplete="off"></div>
 <section class="summary"><span id="shown">0 shown</span><span id="installed">0 installed</span><span id="total">0 total</span></section><main id="packages" class="grid"><div class="loading">Downloading Demo metadata…</div></main>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const items=all.filter(p=>!q||[p.displayName,p.name].some(v=>String(v||'').toLowerCase().includes(q)));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Demo examples match this search.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;document.getElementById('refresh').onclick=()=>{root.innerHTML='<div class="loading">Refreshing Demo metadata…</div>';vscode.postMessage({type:'refresh'});};window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();const root=document.getElementById('packages');const search=document.getElementById('search');let all=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function installed(p){return p.status==='installed'||p.status==='update';}function render(){const q=search.value.trim().toLowerCase();const items=all.filter(p=>!q||[p.displayName,p.name].some(v=>String(v||'').toLowerCase().includes(q)));document.getElementById('shown').textContent=items.length+' shown';document.getElementById('installed').textContent=all.filter(installed).length+' installed';document.getElementById('total').textContent=all.length+' total';if(!items.length){root.innerHTML='<div class="empty">No Demo examples match this search.</div>';return;}root.innerHTML=items.map(p=>'<article class="card '+esc(p.status||'missing')+'"><div><h3>'+esc(p.displayName)+'</h3><div class="meta"><span>'+esc(p.status||'missing')+'</span></div>'+(installed(p)?'<p><code>'+esc(p.root||'')+'</code></p>':'')+'</div><div class="actions">'+(installed(p)?'<button class="secondary" data-open="'+esc(p.key)+'">Open Project</button><button class="danger" data-uninstall="'+esc(p.key)+'">Uninstall</button>':'<button data-install="'+esc(p.key)+'">Install</button>')+'</div></article>').join('');}root.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.install)vscode.postMessage({type:'install',key:b.dataset.install});else if(b.dataset.uninstall)vscode.postMessage({type:'uninstall',key:b.dataset.uninstall});else if(b.dataset.open)vscode.postMessage({type:'openProject',key:b.dataset.open});};search.oninput=render;window.addEventListener('message',e=>{if(e.data?.type==='state'){all=e.data.items||[];render();}});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
 
 async function postDemoExamplesState(context, force = false) {
@@ -2097,8 +2121,7 @@ async function openDemoExamples(context) {
   demoExamplesPanel.webview.onDidReceiveMessage(async (message) => {
     try {
       if (message?.type === 'ready') await postDemoExamplesState(context, true);
-      if (message?.type === 'refresh') await postDemoExamplesState(context, true);
-      if (message?.type === 'install' && typeof message.key === 'string') { await installDemoExample(context, message.key); await postDemoExamplesState(context, false); }
+            if (message?.type === 'install' && typeof message.key === 'string') { await installDemoExample(context, message.key); await postDemoExamplesState(context, false); }
       if (message?.type === 'uninstall' && typeof message.key === 'string') { if (await uninstallPackage(context, message.key)) await postDemoExamplesState(context, false); }
       if (message?.type === 'openProject' && typeof message.key === 'string') await openDemoExampleProject(context, message.key);
     } catch (error) {

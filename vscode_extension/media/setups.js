@@ -12,7 +12,6 @@
   const cProjectState = document.getElementById('cProjectState');
   let activeEnvironment = 'rust';
 
-  document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   document.getElementById('configure').addEventListener('click', configure);
   document.getElementById('configureFirst').addEventListener('click', configure);
   document.getElementById('environment').addEventListener('click', () => vscode.postMessage({ type: 'environment' }));

@@ -16,7 +16,9 @@ const {
 const codegripCatalog = require('./c_codegrip_catalog');
 const sharedProgrammerPackages = require('./c_package_manager');
 const { ensureRustCorePackage } = require('./rust_core_packages');
-const { ensureRustBspSelection, materializeRustBspSelection } = require('./rust_bsp_packages');
+const { ensureRustBoardPackage, ensureRustShieldPackage } = require('./rust_board_packages');
+const { ensureRustCardPackage } = require('./rust_card_packages');
+const { materializeRustBspPackages } = require('./rust_entity_packages');
 
 let mcuPanel;
 let outputChannel;
@@ -871,7 +873,7 @@ function resolveManagedBspFile(paths, configuredPath) {
     throw new Error(`Refusing to read a BSP file outside the managed BSP package: ${configuredPath}`);
   }
   if (!fs.existsSync(resolved)) {
-    throw new Error(`Required BSP file was not found: ${resolved}. Update the corresponding Rust BSP package in Development Environment → BSP Packages.`);
+    throw new Error(`Required BSP file was not found: ${resolved}. Update the corresponding Rust Board or MCU Card package in Development Environment.`);
   }
   return resolved;
 }
@@ -3519,16 +3521,30 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       selectedShieldBsp = readBoardShieldBsp(paths.database, payload.boardUid, payload.shieldUid, mcuName);
     }
 
-    progress.report({ message: 'Resolving selected Board / MCU-card / Shield BSP packages...' });
-    const bspSelection = await ensureRustBspSelection(context, {
-      boardUid: board.uid,
-      mcuCardUid: mcuOption.mcuCardBspPath ? (mcuOption.mcuCardUid || undefined) : undefined,
-      shieldUid: payload.shieldUid || undefined
-    }, progress, options.token);
+    // Board/Shield and MCU-card BSPs intentionally live in separate release
+    // catalogs. Resolve only the entities selected by this setup and materialize
+    // them into sdk/bsp as a disposable compatibility overlay.
+    progress.report({ message: 'Resolving selected Board BSP package...' });
+    const boardPackage = await ensureRustBoardPackage(context, board.uid, progress, options.token);
+
+    let cardPackage;
+    if (mcuOption.mcuCardBspPath) {
+      if (!mcuOption.mcuCardUid) {
+        throw new Error(`Board '${board.name}' resolves ${mcuName} through an MCU card but no MCUCard UID was returned by the database.`);
+      }
+      progress.report({ message: 'Resolving selected MCU Card BSP package...' });
+      cardPackage = await ensureRustCardPackage(context, mcuOption.mcuCardUid, progress, options.token);
+    }
+
+    let shieldPackage;
+    if (payload.shieldUid) {
+      progress.report({ message: 'Resolving selected Shield BSP package...' });
+      shieldPackage = await ensureRustShieldPackage(context, payload.shieldUid, progress, options.token);
+    }
 
     // Keep sdk/bsp only as a disposable compatibility overlay for existing SDK
     // code. It contains the exact selected entity BSP files, not a global BSP.
-    materializeRustBspSelection(bspSelection, paths.bsp);
+    materializeRustBspPackages([boardPackage, cardPackage, shieldPackage], paths.bsp);
   } else {
     // Prevent a previous board setup from leaking BSP files into a direct-MCU
     // setup that should have no board/card/shield dependency.

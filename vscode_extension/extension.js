@@ -16,7 +16,8 @@ const { cLanguageSupport } = require('./feature_flags');
 const { registerCSupport, getCSetupDashboardState, rebuildSetupById, reconfigureSetupById, removeSetupById } = require('./c_setup');
 const sharedProgrammerPackages = require('./c_package_manager');
 const rustCorePackages = require('./rust_core_packages');
-const rustBspPackages = require('./rust_bsp_packages');
+const rustBoardPackages = require('./rust_board_packages');
+const rustCardPackages = require('./rust_card_packages');
 
 const CODEGRIP_SERVER_SPEC = Object.freeze(
   sharedProgrammerPackages.codegripServerPackageSpec({ environment: false }) || {
@@ -243,7 +244,7 @@ async function openEnvironmentSetup(context) {
 async function handleDashboardMessage(message, view, context) {
   if (!message || typeof message.type !== 'string') return;
   try {
-    if (message.type === 'ready' || message.type === 'refresh') {
+    if (message.type === 'ready') {
       postDashboardState(view, context);
       return;
     }
@@ -306,7 +307,7 @@ async function handleSetupMessage(message, view, context) {
     return;
   }
 
-  if (message.type === 'ready' || message.type === 'refresh') {
+  if (message.type === 'ready') {
     postStatus(view, scanPackages(context), context);
     return;
   }
@@ -1045,7 +1046,7 @@ async function handleInstallRequest(id, context) {
 
   if (action.type === 'external') {
     await vscode.env.openExternal(vscode.Uri.parse(action.url));
-    vscode.window.showInformationMessage(`Complete the ${definition.name} installation/download, then return to MikroBUS Rust Setup and click Refresh.`);
+    vscode.window.showInformationMessage(`Complete the ${definition.name} installation/download, then return to the Development Environment. Package status is rechecked automatically when the window regains focus.`);
     return;
   }
 
@@ -1057,7 +1058,7 @@ async function handleInstallRequest(id, context) {
     const terminal = vscode.window.createTerminal(options);
     terminal.show(true);
     terminal.sendText(action.command, true);
-    vscode.window.showInformationMessage(`Installation command started for ${definition.name}. When it finishes, click Refresh in the setup page.`);
+    vscode.window.showInformationMessage(`Installation command started for ${definition.name}. When it finishes, return to the Development Environment; package status is rechecked automatically.`);
   }
 }
 
@@ -1149,7 +1150,7 @@ async function handleUninstallRequest(id, context) {
 async function executeLifecycleAction(action, definition, verb) {
   if (action.type === 'external') {
     await vscode.env.openExternal(vscode.Uri.parse(action.url));
-    vscode.window.showInformationMessage(`Complete the ${definition.name} ${verb} externally, then click Refresh.`);
+    vscode.window.showInformationMessage(`Complete the ${definition.name} ${verb} externally, then return to the Development Environment. Package status is rechecked automatically when the window regains focus.`);
     return;
   }
 
@@ -1159,14 +1160,14 @@ async function executeLifecycleAction(action, definition, verb) {
     const terminal = vscode.window.createTerminal(options);
     terminal.show(true);
     terminal.sendText(action.command, true);
-    vscode.window.showInformationMessage(`${definition.name} ${verb} command started. Click Refresh when it finishes.`);
+    vscode.window.showInformationMessage(`${definition.name} ${verb} command started. Package status is rechecked automatically when you return to the Development Environment.`);
     return;
   }
 
   if (action.type === 'system-uninstall') {
     if (process.platform === 'win32') {
       childProcess.spawn('control.exe', [action.command], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-      vscode.window.showInformationMessage(`Windows Programs and Features opened. Uninstall ${definition.name}, then click Refresh.`);
+      vscode.window.showInformationMessage(`Windows Programs and Features opened. Uninstall ${definition.name}, then return to the Development Environment; package status is rechecked automatically.`);
     }
     return;
   }
@@ -1243,7 +1244,8 @@ async function installAllRustGeneralPackages(context) {
 
 async function rustManagerItems(context, manager) {
   if (manager === 'core') return rustCorePackages.packageState(context);
-  if (manager === 'bsp') return rustBspPackages.packageState(context);
+  if (manager === 'card') return rustCardPackages.packageState(context);
+  if (manager === 'board') return rustBoardPackages.packageState(context);
   return sharedProgrammerPackages.installedProgrammerPackages(context)
     .filter((entry) => /codegrip/i.test(`${entry.name || ''} ${entry.displayName || ''}`))
     .map((entry) => ({
@@ -1269,7 +1271,7 @@ async function postRustManagerState(view, context, manager) {
 }
 
 async function installRustManagerPackage(context, manager, key) {
-  const api = manager === 'core' ? rustCorePackages : rustBspPackages;
+  const api = manager === 'core' ? rustCorePackages : (manager === 'card' ? rustCardPackages : rustBoardPackages);
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing Rust ${manager} package ${key}`, cancellable: true }, async (progress, token) => {
     await api.installNamedPackage(context, key, progress, token);
   });
@@ -1279,7 +1281,8 @@ async function uninstallRustManagerPackage(context, manager, key) {
   const choice = await vscode.window.showWarningMessage(`Uninstall ${key}?`, { modal: true }, 'Uninstall');
   if (choice !== 'Uninstall') return;
   if (manager === 'core') await rustCorePackages.uninstallPackage(context, key);
-  else if (manager === 'bsp') await rustBspPackages.uninstallPackage(context, key);
+  else if (manager === 'card') await rustCardPackages.uninstallPackage(context, key);
+  else if (manager === 'board') await rustBoardPackages.uninstallPackage(context, key);
   else await sharedProgrammerPackages.uninstallPackage(context, key);
 }
 
@@ -2040,7 +2043,6 @@ function getDashboardHtml(webview, extensionUri) {
   <main class="dashboard">
     <header>
       <div><p class="eyebrow">MIKROBUS EMBEDDED</p><h1 id="environmentTitle">Rust Environment</h1></div>
-      <button id="refresh" class="iconButton" title="Refresh">↻</button>
     </header>
     <div id="environmentSwitch" class="environmentSwitch" role="group" aria-label="Programming environment">
       <button id="selectRust" data-environment="rust">Rust</button>
@@ -2091,38 +2093,49 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
-  <title>MikroBUS Rust Setup</title>
+  <title>MikroBUS Rust Development Environment</title>
 </head>
 <body>
   <main class="page">
-    <header class="hero">
+    <header>
       <div>
-        <p class="eyebrow">MIKROBUS RUST</p>
-        <h1>Development environment setup</h1>
-        <p class="subtitle">The extension detects the current host platform and checks the packages required by the Rust MikroBUS workflow.</p>
+        <h1 id="viewTitle">Rust Development Environment</h1>
+        <p id="viewSubtitle" class="subtitle">Shared Rust environment components. Core, CODEGRIP, MCU Card and Board packages are managed in the tabs below.</p>
       </div>
-      <div class="heroActions"><button id="installAll">Install all</button><button id="updateManaged" class="secondary">Update managed</button></div>
+      <div class="actions">
+        <button id="installAll">Install all</button>
+      </div>
     </header>
 
-    <section class="summary" aria-live="polite">
-      <div><strong id="installedCount">–</strong><span>installed</span></div>
-      <div><strong id="missingCount">–</strong><span>missing</span></div>
-      <div class="storage platformStorage"><span>Platform</span><code id="platformLabel">Loading…</code></div>
-      <div class="storage"><span>Extension-managed root</span><code id="managedRoot">Loading…</code><button id="settings" class="linkButton">Change</button></div>
-    </section>
-
-    <div id="platformNotice" class="notice hidden"></div>
     <nav class="packageTabs" aria-label="Rust package views">
       <button class="tabButton active" data-tab="general">General packages</button>
       <button class="tabButton" data-tab="core">Core packages</button>
       <button class="tabButton" data-tab="codegrip">CODEGRIP packages</button>
-      <button class="tabButton" data-tab="bsp">BSP packages</button>
+      <button class="tabButton" data-tab="card">MCU card packages</button>
+      <button class="tabButton" data-tab="board">Board packages</button>
     </nav>
+
+    <section class="summary" aria-label="Package installation filters">
+      <button id="installedCount" class="filterChip" title="Show only packages already installed locally" aria-pressed="false">0 installed</button>
+      <button id="missingCount" class="filterChip" title="Show only packages not installed locally" aria-pressed="false">0 not installed</button>
+    </section>
+
+    <section id="storageBar" class="storageBar">
+      <div>
+        <span class="muted">Managed installation path</span>
+        <code id="managedRoot">Loading…</code>
+      </div>
+      <button id="changeRoot" class="secondary">Change</button>
+    </section>
+
+    <div id="platformNotice" class="notice hidden"></div>
     <div id="managerNotice" class="notice hidden"></div>
-    <section id="packageGrid" class="grid" aria-label="Package status"></section>
+
+    <input id="search" class="search" type="search" placeholder="Filter packages…" autocomplete="off">
+    <main id="packageGrid" class="grid" aria-label="Package status"></main>
 
     <footer>
-      <p>General packages can be installed together. Core packages are downloaded on demand per MCU SYSTEM_LIB. BSP packages are downloaded per selected Board / MCU card / Shield. The Core, CODEGRIP and BSP tabs show package state and allow removal.</p>
+      General packages can be installed together. Core packages are resolved per MCU SYSTEM_LIB. MCU Card packages and Board/Shield packages are resolved independently from the Rust hardware database. CODEGRIP packages are shared with the C environment.
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

@@ -39,6 +39,8 @@ try {
   const codegripCatalog = require('../c_codegrip_catalog');
   const rustMcu = require('../mcu_configurator')._test;
   const rustCorePackages = require('../rust_core_packages')._test;
+  const rustBoardPackages = require('../rust_board_packages')._test;
+  const rustCardPackages = require('../rust_card_packages')._test;
   const cConfigurator = require('../c_configurator')._test;
   const rfp = require('../c_rfp_backend')._test;
   const cmakeVisibility = require('../c_cmake_visibility')._test;
@@ -2197,7 +2199,10 @@ endfunction()
   assert.ok(packageManagerSource.includes("kind === 'compiler'"));
   assert.ok(packageManagerSource.includes('CODEGRIP packages'));
   assert.ok(packageManagerSource.includes("kind === 'codegrip'"));
-  assert.ok(packageManagerSource.includes('installedOnly'));
+  assert.ok(packageManagerSource.includes("let statusFilter='all'"));
+  assert.ok(packageManagerSource.includes('id="installedCount"'));
+  assert.ok(packageManagerSource.includes('id="missingCount"'));
+  assert.ok(packageManagerSource.includes('data-manager="environment"'));
   assert.ok(packageManagerSource.includes('metadata_demos_c.json'));
   assert.ok(packageManagerSource.includes("kind: 'demo-example'"));
   assert.ok(packageManagerSource.includes('Demo Examples'));
@@ -2231,8 +2236,30 @@ endfunction()
   assert.strictEqual(rustCorePackages.packageForSystemLib(rustCoreCatalog, 'system_rl78_g24').name, 'rl78_g24');
   assert.ok(rustCorePackages.releaseAssetUrl('owner/repo', 'arm_stm32f_2xx.7z').includes('/rust-core-packages/arm_stm32f_2xx.7z'));
 
+  const rustBoardCatalog = rustBoardPackages.validateCatalog({
+    schemaVersion: 1,
+    packageModel: 'board-entity',
+    packages: [
+      { name: 'board_board-a', asset: 'board_board-a.7z', sha256: 'd'.repeat(64), entityType: 'board', uid: 'BOARD-A', displayName: 'Board A', relativeBspPath: 'boards/a.json' },
+      { name: 'shield_shield-a', asset: 'shield_shield-a.7z', sha256: 'e'.repeat(64), entityType: 'shield', uid: 'SHIELD-A', displayName: 'Shield A', relativeBspPath: 'shields/a.json' }
+    ]
+  });
+  assert.strictEqual(rustBoardPackages.packageForEntity(rustBoardCatalog, 'board', 'board-a').name, 'board_board-a');
+  assert.strictEqual(rustBoardPackages.packageForEntity(rustBoardCatalog, 'shield', 'SHIELD-A').name, 'shield_shield-a');
+  assert.ok(rustBoardPackages.releaseAssetUrl('owner/repo', 'board_board-a.7z').includes('/rust-board-packages/board_board-a.7z'));
+
+  const rustCardCatalog = rustCardPackages.validateCatalog({
+    schemaVersion: 1,
+    packageModel: 'card-entity',
+    packages: [
+      { name: 'card_card-a', asset: 'card_card-a.7z', sha256: 'f'.repeat(64), entityType: 'card', uid: 'CARD-A', displayName: 'Card A', relativeBspPath: 'cards/a.json' }
+    ]
+  });
+  assert.strictEqual(rustCardPackages.packageForEntity(rustCardCatalog, 'card', 'card-a').name, 'card_card-a');
+  assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
+
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.14');
+  assert.strictEqual(packageJson.version, '0.8.17');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');
@@ -2290,8 +2317,11 @@ endfunction()
   assert.strictEqual(rustConfiguratorUiSource.includes('id="showSetups"'), false);
   assert.strictEqual(rustConfiguratorUiSource.includes('id="showSetupsFromConfig"'), false);
   const cCompilerManagerHtml = packageManager.cManagerHtml('compiler');
-  assert.ok(cCompilerManagerHtml.includes('aria-label="Go to previous view">←</button>'));
+  assert.strictEqual(cCompilerManagerHtml.includes('aria-label="Go to previous view"'), false);
   assert.strictEqual(cCompilerManagerHtml.includes('>Back</button>'), false);
+  assert.ok(cCompilerManagerHtml.includes('data-manager="compiler"'));
+  assert.ok(cCompilerManagerHtml.includes('id="installedCount"'));
+  assert.ok(cCompilerManagerHtml.includes('id="missingCount"'));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.menus, 'debug/toolBar'), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.configuration.properties, 'mikrobusRust.dumpVariablesOnStop'), false);
 

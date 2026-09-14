@@ -126,7 +126,8 @@ The extension can manage the packages needed by a setup rather than requiring ev
 - Rust MCU database
 - Rust mikroSDK
 - MCU core packages
-- Board/BSP packages
+- MCU Card BSP packages
+- Board and Shield BSP packages
 
 ### C Environment
 

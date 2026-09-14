@@ -39,7 +39,6 @@
   const generationStatus = document.getElementById('generationStatus');
   const compilerSelect = document.getElementById('compilerSelect');
 
-  document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   document.getElementById('chooseMcuMode').addEventListener('click', () => showView('mcus'));
   document.getElementById('chooseBoardMode').addEventListener('click', () => showView('boards'));
   document.querySelectorAll('.backStart').forEach((button) => button.addEventListener('click', () => showView('start')));

@@ -293,7 +293,7 @@ async function sendInitialState(panel, context) {
 
 async function handleMessage(message, panel, context) {
   if (!message || typeof message.type !== 'string') return;
-  if (message.type === 'ready' || message.type === 'refresh') {
+  if (message.type === 'ready') {
     await sendInitialState(panel, context);
     return;
   }
@@ -366,7 +366,7 @@ function html(webview, extensionUri) {
 <link rel="stylesheet" href="${style}"><title>MikroBUS C Hardware Configuration</title></head>
 <body><div id="app" class="app">
 <header class="topbar"><div><div class="eyebrow">MIKROBUS C</div><h1>Hardware Configuration</h1><p>Select a board or MCU, configure its clock and MCU configuration options from the core JSON, then build a reusable C setup.</p></div>
-<div class="topActions"><button id="refresh" class="secondary">Refresh</button></div></header>
+</header>
 <div id="missingState" class="missing hidden"></div>
 <main id="workspace" class="workspace hidden">
 <section id="startView" class="pageView selectionStart"><div class="viewHeader"><div><div class="eyebrow">NEW C CONFIGURATION</div><h2>What do you want to start from?</h2><p>Board selection resolves its compatible MCU from the C database; MCU selection starts directly from the device.</p></div></div>
