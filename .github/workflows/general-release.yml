@@ -25,7 +25,6 @@ env:
   RELEASE_TAG: v0.1.0
   RELEASE_TITLE: General Release v0.1.0
   OUTPUT_DIR: dist/general-release
-  C_METADATA_ELASTIC_INDEX: ${{ vars.C_METADATA_ELASTIC_INDEX || 'github_live_index' }}
 
 jobs:
   package:
@@ -83,6 +82,7 @@ jobs:
 
       - name: Generate C Click and Demo metadata from Elasticsearch
         env:
+          C_METADATA_ELASTIC_INDEX: ${{ secrets.C_METADATA_ELASTIC_INDEX }}
           ELASTICSEARCH_HOST: ${{ secrets.ELASTICSEARCH_HOST }}
           ELASTICSEARCH_USER: ${{ secrets.ELASTICSEARCH_USER }}
           ELASTICSEARCH_PASSWORD: ${{ secrets.ELASTICSEARCH_PASSWORD }}
