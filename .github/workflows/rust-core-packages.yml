@@ -1,0 +1,163 @@
+name: Rust Core Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'core/**'
+      - 'scripts/pack_rust_core_packages.py'
+      - '.github/workflows/rust-core-packages.yml'
+      - 'database/**'
+      - 'database_mikro_sdk_rust.db'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rust-core-packages
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: rust-core-packages
+  RELEASE_TITLE: Rust Core Packages
+  OUTPUT_DIR: dist/rust-core-packages
+  # Override with a repository variable when the Rust database is published
+  # from another repository.
+  DATABASE_REPOSITORY: ${{ vars.RUST_DATABASE_REPOSITORY || 'IvanRuzavin/Rusty_MikroBUS' }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install 7-Zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          if ! sudo apt-get install -y 7zip; then
+            sudo apt-get install -y p7zip-full
+          fi
+
+      - name: Resolve Rust MCU database
+        id: database
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          for candidate in \
+            database/database_mikro_sdk_rust.db \
+            database_mikro_sdk_rust.db
+          do
+            if [[ -f "$candidate" ]]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              echo "Using repository database: $candidate"
+              exit 0
+            fi
+          done
+
+          mkdir -p .package-input
+          echo "Database not present in the checkout; locating database_mikro_sdk_rust.db in ${DATABASE_REPOSITORY}."
+          database_tag="$(gh api --paginate "repos/${DATABASE_REPOSITORY}/releases" \
+            --jq '.[] | select(.tag_name != "rust-core-packages") | select(any(.assets[]; .name == "database_mikro_sdk_rust.db")) | .tag_name' \
+            | head -n 1)"
+
+          if [[ -z "$database_tag" ]]; then
+            echo "Could not find database_mikro_sdk_rust.db in any published release of ${DATABASE_REPOSITORY}." >&2
+            exit 1
+          fi
+
+          echo "Using database from release: $database_tag"
+          gh release download "$database_tag" \
+            --repo "$DATABASE_REPOSITORY" \
+            --pattern 'database_mikro_sdk_rust.db' \
+            --dir .package-input
+
+          test -s .package-input/database_mikro_sdk_rust.db
+          echo "path=.package-input/database_mikro_sdk_rust.db" >> "$GITHUB_OUTPUT"
+
+      - name: Build per-system-library packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/pack_rust_core_packages.py \
+            --core core \
+            --database '${{ steps.database.outputs.path }}' \
+            --output "$OUTPUT_DIR"
+
+          echo
+          echo 'Generated assets:'
+          find "$OUTPUT_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Create Rust Core Packages release if needed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release '$RELEASE_TAG' already exists."
+            exit 0
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TITLE" \
+            --notes 'Automatically maintained Rust core packages. Each archive is scoped to one MCU SYSTEM_LIB and preserves the core architecture/platform directory layout.' \
+            --latest=false
+
+      - name: Upload only changed package assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+
+          changed=0
+          unchanged=0
+
+          while IFS= read -r file; do
+            asset="$(basename "$file")"
+            local_sha="$(sha256sum "$file" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "$asset" \
+              '.assets[] | select(.name == $name) | (.digest // "")' \
+              <<<"$release_json" | head -n 1)"
+
+            if [[ "$remote_digest" == "sha256:${local_sha}" ]]; then
+              echo "UNCHANGED  $asset  $local_sha"
+              unchanged=$((unchanged + 1))
+              continue
+            fi
+
+            if [[ -n "$remote_digest" ]]; then
+              echo "CHANGED    $asset"
+              echo "  remote: $remote_digest"
+              echo "  local:  sha256:$local_sha"
+            else
+              echo "NEW        $asset  sha256:$local_sha"
+            fi
+
+            gh release upload "$RELEASE_TAG" "$file" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            changed=$((changed + 1))
+          done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -print | sort)
+
+          echo
+          echo "Upload complete: $changed changed/new, $unchanged unchanged."

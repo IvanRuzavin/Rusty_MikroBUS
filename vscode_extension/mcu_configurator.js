@@ -15,6 +15,7 @@ const {
 } = require('./codegrip_backend');
 const codegripCatalog = require('./c_codegrip_catalog');
 const sharedProgrammerPackages = require('./c_package_manager');
+const { ensureRustCorePackage } = require('./rust_core_packages');
 
 let mcuPanel;
 let outputChannel;
@@ -2576,7 +2577,6 @@ async function sendInitialState(panel, context) {
   const missing = [];
   if (!fs.existsSync(paths.database)) missing.push('database');
   if (!fs.existsSync(paths.bsp)) missing.push('bsp');
-  if (!fs.existsSync(paths.core)) missing.push('core');
   if (!fs.existsSync(paths.sdk)) missing.push('sdk');
 
   if (missing.length > 0) {
@@ -2638,7 +2638,13 @@ async function handleMcuMessage(message, panel, context) {
   if (message.type === 'selectMcu' && typeof message.name === 'string') {
     const paths = getManagedPaths(context);
     validateDatabaseSchema(paths.database);
-    const detail = loadMcuDetail(paths, message.name);
+    const metadata = readMcuMetadata(paths.database, message.name);
+    const coreRoot = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `Preparing Rust core for ${metadata.name}`,
+      cancellable: true
+    }, async (progress, token) => ensureRustCorePackage(context, metadata, progress, token));
+    const detail = loadMcuDetail({ ...paths, core: coreRoot }, message.name);
     const programmers = readProgrammersForDevice(paths.database, message.name);
     const setup = findConfiguredSetupForMcu(context, message.name);
     void panel.webview.postMessage({ type: 'mcuDetail', detail, programmers, setup: setup ? { ...setup, active: setup.id === getActiveSetupId(context) } : undefined });
@@ -2658,7 +2664,13 @@ async function handleMcuMessage(message, panel, context) {
 
   if (message.type === 'selectBoardMcu' && typeof message.boardUid === 'string' && typeof message.mcuName === 'string') {
     const paths = getManagedPaths(context);
-    const boardDetail = loadBoardDetail(paths, message.boardUid, message.mcuName);
+    const metadata = readMcuMetadata(paths.database, message.mcuName);
+    const coreRoot = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `Preparing Rust core for ${metadata.name}`,
+      cancellable: true
+    }, async (progress, token) => ensureRustCorePackage(context, metadata, progress, token));
+    const boardDetail = loadBoardDetail({ ...paths, core: coreRoot }, message.boardUid, message.mcuName);
     const setup = listConfiguredSetups(context).find((item) =>
       item.selectionMode === 'board' &&
       item.boardUid === message.boardUid &&
@@ -2676,12 +2688,19 @@ async function handleMcuMessage(message, panel, context) {
     const setup = findConfiguredSetup(context, message.id);
     if (!setup) throw new Error(`Configured setup '${message.id}' was not found.`);
     const paths = getManagedPaths(context);
+    const metadata = readMcuMetadata(paths.database, setup.mcuName);
+    const coreRoot = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `Preparing Rust core for ${metadata.name}`,
+      cancellable: true
+    }, async (progress, token) => ensureRustCorePackage(context, metadata, progress, token));
+    const corePaths = { ...paths, core: coreRoot };
     if (setup.selectionMode === 'board' && setup.boardUid) {
-      const boardDetail = loadBoardDetail(paths, setup.boardUid, setup.mcuName);
+      const boardDetail = loadBoardDetail(corePaths, setup.boardUid, setup.mcuName);
       void panel.webview.postMessage({ type: 'boardDetail', ...boardDetail, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
       return;
     }
-    const detail = loadMcuDetail(paths, setup.mcuName);
+    const detail = loadMcuDetail(corePaths, setup.mcuName);
     const programmers = readProgrammersForDevice(paths.database, setup.mcuName);
     void panel.webview.postMessage({ type: 'mcuDetail', detail, programmers, setup: { ...setup, active: setup.id === getActiveSetupId(context) } });
     return;
@@ -3471,11 +3490,15 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   if (!mcuName) throw new Error('Select an MCU before generating the configuration.');
   if (!Number.isInteger(clockMhz) || clockMhz <= 0) throw new Error('Clock must be a positive integer in MHz.');
 
-  for (const required of [paths.database, paths.bsp, paths.sdk, paths.core]) {
+  for (const required of [paths.database, paths.bsp, paths.sdk]) {
     if (!fs.existsSync(required)) throw new Error(`Required managed package is missing: ${required}`);
   }
 
   validateDatabaseSchema(paths.database);
+  const metadata = readMcuMetadata(paths.database, mcuName);
+  progress.report({ message: `Resolving Rust core package for ${metadata.systemLib}...` });
+  paths.core = await ensureRustCorePackage(context, metadata, progress, options.token);
+
   progress.report({ message: 'Installing managed board, MCU-card and shield BSP configuration files...' });
   copyDirectoryRequired(paths.bsp, path.join(paths.sdk, 'bsp'));
 
@@ -3490,7 +3513,6 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
     boardSelection = { board, mcuOption };
   }
 
-  const metadata = readMcuMetadata(paths.database, mcuName);
   const programmerUid = String(payload.programmerUid || PROBE_RS_PROGRAMMER_UID).trim();
   const programmers = readProgrammersForDevice(paths.database, mcuName);
   const selectedProgrammer = programmers.find((programmer) => programmer.uid === programmerUid);

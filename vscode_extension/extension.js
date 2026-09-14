@@ -426,13 +426,7 @@ function getPackageDefinitions() {
     {
       id: 'sdk',
       name: 'Rust mikroSDK',
-      description: 'Rust SDK source tree used to generate the target configuration.',
-      kind: 'managed'
-    },
-    {
-      id: 'core',
-      name: 'MCU Core Package',
-      description: 'MCU definitions, startup, linker, pin mappings and system initialization sources.',
+      description: 'Rust SDK source tree used to generate the target configuration. MCU core packages are downloaded on demand per SYSTEM_LIB.',
       kind: 'managed'
     }
   ];
@@ -553,8 +547,7 @@ function getExpectedPaths(context) {
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
     database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
     bsp: path.join(managedRoot, 'bsp'),
-    sdk: path.join(managedRoot, 'sdk'),
-    core: path.join(managedRoot, 'core')
+    sdk: path.join(managedRoot, 'sdk')
   };
 }
 
@@ -805,16 +798,6 @@ function detectManaged(id, expected) {
     };
   }
 
-  if (id === 'core') {
-    const present = directoryHasContent(expected.core);
-    return {
-      status: present ? 'installed' : 'missing',
-      detail: present ? 'MCU core directory found.' : 'MCU core directory is missing or empty.',
-      expectedPath: expected.core,
-      version: ''
-    };
-  }
-
   return {
     status: 'missing',
     detail: 'Not detected.',
@@ -884,7 +867,7 @@ function getInstallAction(id, context) {
     return asset ? managedAction('Install automatically') : undefined;
   }
 
-  if (['database', 'bsp', 'sdk', 'core'].includes(id)) {
+  if (['database', 'bsp', 'sdk'].includes(id)) {
     return managedAction('Install automatically');
   }
 
@@ -892,7 +875,7 @@ function getInstallAction(id, context) {
 }
 
 function getUpdateAction(id, context) {
-  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk'].includes(id)) {
     return managedAction(id === 'openocd' || id === 'armGcc' ? 'Update / reinstall' : 'Update');
   }
 
@@ -938,7 +921,7 @@ function getUpdateAction(id, context) {
 }
 
 function getUninstallAction(id, context) {
-  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk', 'core'].includes(id)) {
+  if (['codegrip', 'openocd', 'armGcc', 'database', 'bsp', 'sdk'].includes(id)) {
     return { type: 'managed-uninstall', label: 'Uninstall' };
   }
 
@@ -1196,7 +1179,6 @@ async function uninstallManagedPackage(id, context) {
     database: expected.database,
     bsp: expected.bsp,
     sdk: expected.sdk,
-    core: expected.core
   };
   const target = targets[id];
   if (!target) throw new Error(`No managed uninstall target is defined for ${id}.`);
@@ -1270,7 +1252,7 @@ async function installManagedPackage(id, context, progress, token) {
       await installXpackPackage(id, expected, tempRoot, progress, token);
     } else if (id === 'database') {
       await installDatabase(expected, tempRoot, progress, token);
-    } else if (id === 'sdk' || id === 'core' || id === 'bsp') {
+    } else if (id === 'sdk' || id === 'bsp') {
       await installRustyArchive(id, expected, tempRoot, progress, token);
     } else {
       throw new Error(`No managed installer is defined for ${id}.`);
@@ -1405,7 +1387,7 @@ async function installDatabase(expected, tempRoot, progress, token) {
 }
 
 async function installRustyArchive(id, expected, tempRoot, progress, token) {
-  const targets = { sdk: expected.sdk, core: expected.core, bsp: expected.bsp };
+  const targets = { sdk: expected.sdk, bsp: expected.bsp };
   const target = targets[id];
   const assetName = `${id}.7z`;
 
@@ -1799,8 +1781,7 @@ function expectedPathFor(id, expected) {
     armGcc: expected.armGcc,
     database: expected.database,
     bsp: expected.bsp,
-    sdk: expected.sdk,
-    core: expected.core
+    sdk: expected.sdk
   };
   return map[id] || '';
 }

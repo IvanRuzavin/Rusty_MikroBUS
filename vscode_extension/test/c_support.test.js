@@ -38,6 +38,7 @@ try {
   const codegrip = require('../codegrip_backend')._test;
   const codegripCatalog = require('../c_codegrip_catalog');
   const rustMcu = require('../mcu_configurator')._test;
+  const rustCorePackages = require('../rust_core_packages')._test;
   const cConfigurator = require('../c_configurator')._test;
   const rfp = require('../c_rfp_backend')._test;
   const cmakeVisibility = require('../c_cmake_visibility')._test;
@@ -2217,8 +2218,21 @@ endfunction()
     fs.rmSync(demoProjectRoot, { recursive: true, force: true });
   }
 
+  const rustCoreCatalog = rustCorePackages.validateCatalog({
+    schemaVersion: 1,
+    packages: [
+      { name: 'arm_stm32f_2xx', asset: 'arm_stm32f_2xx.7z', sha256: 'a'.repeat(64), systemLib: 'system_stm32f_2xx' },
+      { name: 'mips_pic32mz', asset: 'mips_pic32mz.7z', sha256: 'b'.repeat(64), systemLib: 'system_pic32mz' },
+      { name: 'rl78_g24', asset: 'rl78_g24.7z', sha256: 'c'.repeat(64), systemLib: 'system_rl78_g24' }
+    ]
+  });
+  assert.strictEqual(rustCorePackages.packageForSystemLib(rustCoreCatalog, 'system_stm32f_2xx').name, 'arm_stm32f_2xx');
+  assert.strictEqual(rustCorePackages.packageForSystemLib(rustCoreCatalog, 'SYSTEM_PIC32MZ').name, 'mips_pic32mz');
+  assert.strictEqual(rustCorePackages.packageForSystemLib(rustCoreCatalog, 'system_rl78_g24').name, 'rl78_g24');
+  assert.ok(rustCorePackages.releaseAssetUrl('owner/repo', 'arm_stm32f_2xx.7z').includes('/rust-core-packages/arm_stm32f_2xx.7z'));
+
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.12');
+  assert.strictEqual(packageJson.version, '0.8.13');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');

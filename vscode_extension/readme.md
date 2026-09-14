@@ -43,12 +43,12 @@ Rust projects use Cargo/rustup together with the generated MCU core, linker, sta
 
 ## Rust MCU vendors
 
-Rust MCU availability is intentionally **database-driven rather than hard-coded in the extension**. An MCU is offered when the current Rust database and installed core/SDK packages contain the required Rust target, family implementation and MCU definition.
+Rust MCU availability is intentionally **database-driven rather than hard-coded in the extension**. The shared SDK is installed once, while the MCU core is resolved from `MCU.SYSTEM_LIB` and downloaded on demand from the fixed **Rust Core Packages** release. The package catalog maps each system library to an architecture-qualified archive such as `arm_stm32f_2xx.7z`.
 
 | Coverage | Status |
 |---|---|
 | **STMicroelectronics / STM32** | Supported and used by the current Rust build/flash/debug workflow. |
-| **Other MCU vendors present in `database_mikro_sdk_rust.db`** | Supported when the database entry has the required Rust core, target and HAL/BSP package data. |
+| **Other MCU vendors present in `database_mikro_sdk_rust.db`** | Supported when the database entry has the required Rust target/HAL/BSP data and its `SYSTEM_LIB` is present in the Rust Core Packages catalog. New architecture packages are picked up without hard-coding them in the extension. |
 | **Board / MCU-card vendors** | Database-driven; board and compatible MCU/card relationships are resolved from the current Rust database. |
 
 The vendor filter in **Configure MCU or Board** always reflects the vendors that are actually available in the installed Rust database, so the UI remains accurate as device coverage grows.
