@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "index",
-        help="SDK packages Elasticsearch index."
+        help="Click and Demo packages Elasticsearch index."
     )
 
     parser.add_argument(

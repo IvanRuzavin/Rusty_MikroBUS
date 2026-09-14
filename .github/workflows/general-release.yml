@@ -40,11 +40,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
+
           if ! sudo apt-get install -y 7zip; then
             sudo apt-get install -y p7zip-full
           fi
-          python3 -m pip install --disable-pip-version-check 'elasticsearch>=7.17,<8'
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            'elasticsearch==7.13.4'
 
       - name: Validate required source folders/files
         shell: bash
