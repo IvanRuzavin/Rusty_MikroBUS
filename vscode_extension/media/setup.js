@@ -114,7 +114,8 @@
   }
 
   function renderManagerCard(item, manager) {
-    const article = baseCard(item, manager === 'core' ? 'Rust Core package' : manager === 'bsp' ? 'Rust BSP package' : 'CODEGRIP package');
+    const bspKind = item.entityType === 'board' ? 'Rust Board BSP package' : item.entityType === 'card' ? 'Rust MCU Card BSP package' : item.entityType === 'shield' ? 'Rust Shield BSP package' : 'Rust BSP package';
+    const article = baseCard(item, manager === 'core' ? 'Rust Core package' : manager === 'bsp' ? bspKind : 'CODEGRIP package');
     const actions = document.createElement('div');
     actions.className = 'actions';
     if (item.status === 'installed') {
@@ -140,7 +141,12 @@
     const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = labelForStatus(item.status);
     heading.append(titleWrap, badge);
     const description = document.createElement('p'); description.className = 'description'; description.textContent = item.description || item.detail || '';
-    const detail = document.createElement('p'); detail.className = 'detail'; detail.textContent = item.systemLib ? `SYSTEM_LIB: ${item.systemLib}` : (item.detail && item.description ? item.detail : '');
+    const detail = document.createElement('p'); detail.className = 'detail';
+    detail.textContent = item.entityType && item.uid
+      ? `${item.entityType === 'card' ? 'MCUCard' : item.entityType.charAt(0).toUpperCase() + item.entityType.slice(1)} UID: ${item.uid}`
+      : item.systemLib
+        ? `SYSTEM_LIB: ${item.systemLib}`
+        : (item.detail && item.description ? item.detail : '');
     article.append(heading, description, detail);
     const location = item.expectedPath || item.root;
     if (location) {

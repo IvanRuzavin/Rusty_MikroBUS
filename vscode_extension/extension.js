@@ -2122,7 +2122,7 @@ function getEnvironmentSetupHtml(webview, extensionUri) {
     <section id="packageGrid" class="grid" aria-label="Package status"></section>
 
     <footer>
-      <p>General packages can be installed together. Core and BSP packages are downloaded on demand per MCU SYSTEM_LIB; the Core, CODEGRIP and BSP tabs show their local package state and allow removal.</p>
+      <p>General packages can be installed together. Core packages are downloaded on demand per MCU SYSTEM_LIB. BSP packages are downloaded per selected Board / MCU card / Shield. The Core, CODEGRIP and BSP tabs show package state and allow removal.</p>
     </footer>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>

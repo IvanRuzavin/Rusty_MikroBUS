@@ -6,7 +6,6 @@ on:
     branches: [main]
     paths:
       - 'bsp/**'
-      - 'core/**'
       - 'scripts/pack_rust_bsp_packages.py'
       - '.github/workflows/rust-bsp-packages.yml'
       - 'database/**'
@@ -28,6 +27,7 @@ env:
 jobs:
   package:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,29 +38,55 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          if ! sudo apt-get install -y 7zip; then sudo apt-get install -y p7zip-full; fi
+          if ! sudo apt-get install -y 7zip; then
+            sudo apt-get install -y p7zip-full
+          fi
 
-      - name: Resolve Rust MCU database
+      - name: Resolve Rust database
         id: database
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          for candidate in database/database_mikro_sdk_rust.db database_mikro_sdk_rust.db; do
-            if [[ -f "$candidate" ]]; then echo "path=$candidate" >> "$GITHUB_OUTPUT"; exit 0; fi
+
+          for candidate in \
+            database/database_mikro_sdk_rust.db \
+            database_mikro_sdk_rust.db
+          do
+            if [[ -f "$candidate" ]]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           done
+
           mkdir -p .package-input
-          database_tag="$(gh api --paginate "repos/${DATABASE_REPOSITORY}/releases" --jq '.[] | select(.tag_name != "rust-core-packages" and .tag_name != "rust-bsp-packages") | select(any(.assets[]; .name == "database_mikro_sdk_rust.db")) | .tag_name' | head -n1)"
-          test -n "$database_tag" || { echo 'database_mikro_sdk_rust.db not found in releases' >&2; exit 1; }
-          gh release download "$database_tag" --repo "$DATABASE_REPOSITORY" --pattern database_mikro_sdk_rust.db --dir .package-input
+
+          database_tag="$(gh api --paginate "repos/${DATABASE_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.tag_name != "rust-core-packages" and .tag_name != "rust-bsp-packages") | select(any(.assets[]; .name == "database_mikro_sdk_rust.db")) | .tag_name' \
+            | head -n1)"
+
+          test -n "$database_tag" || {
+            echo 'database_mikro_sdk_rust.db not found in repository or releases' >&2
+            exit 1
+          }
+
+          gh release download "$database_tag" \
+            --repo "$DATABASE_REPOSITORY" \
+            --pattern database_mikro_sdk_rust.db \
+            --dir .package-input
+
           test -s .package-input/database_mikro_sdk_rust.db
           echo 'path=.package-input/database_mikro_sdk_rust.db' >> "$GITHUB_OUTPUT"
 
-      - name: Build per-system-library BSP packages
+      - name: Build per-entity BSP packages
         run: |
           set -euo pipefail
-          python3 scripts/pack_rust_bsp_packages.py --bsp bsp --core core --database '${{ steps.database.outputs.path }}' --output "$OUTPUT_DIR"
+          python3 scripts/pack_rust_bsp_packages.py \
+            --bsp bsp \
+            --database '${{ steps.database.outputs.path }}' \
+            --output "$OUTPUT_DIR"
+
           find "$OUTPUT_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Create Rust BSP Packages release if needed
@@ -69,7 +95,12 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TITLE" --notes 'Automatically maintained Rust BSP packages grouped by MCU SYSTEM_LIB.' --latest=false
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes 'Automatically maintained Rust BSP packages, one package per Board, MCUCard and Shield database entity.' \
+              --latest=false
           fi
 
       - name: Upload only changed package assets
@@ -78,14 +109,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-          changed=0; unchanged=0
+
+          release_id="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            --jq '.id')"
+
+          # A per-board/card/shield release can easily exceed the number of assets
+          # embedded in a single release response, so fetch the asset collection
+          # explicitly with pagination.
+          remote_assets="$(gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq -s 'add // []')"
+
+          changed=0
+          unchanged=0
+
           while IFS= read -r file; do
-            asset="$(basename "$file")"; local_sha="$(sha256sum "$file" | awk '{print $1}')"
-            remote_digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | (.digest // "")' <<<"$release_json" | head -n1)"
-            if [[ "$remote_digest" == "sha256:${local_sha}" ]]; then echo "UNCHANGED  $asset"; unchanged=$((unchanged+1)); continue; fi
+            asset="$(basename "$file")"
+            local_sha="$(sha256sum "$file" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "$asset" \
+              '.[] | select(.name == $name) | (.digest // "")' \
+              <<<"$remote_assets" | head -n1)"
+
+            if [[ "$remote_digest" == "sha256:${local_sha}" ]]; then
+              echo "UNCHANGED  $asset"
+              unchanged=$((unchanged + 1))
+              continue
+            fi
+
             echo "UPLOAD     $asset  sha256:$local_sha"
-            gh release upload "$RELEASE_TAG" "$file" --repo "$GITHUB_REPOSITORY" --clobber
-            changed=$((changed+1))
-          done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -print | sort)
+            gh release upload "$RELEASE_TAG" "$file" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            changed=$((changed + 1))
+          done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f \( -name '*.7z' -o -name 'rust_bsp_packages.json' \) -print | sort)
+
           echo "Upload complete: $changed changed/new, $unchanged unchanged."

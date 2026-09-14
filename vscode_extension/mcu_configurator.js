@@ -16,7 +16,7 @@ const {
 const codegripCatalog = require('./c_codegrip_catalog');
 const sharedProgrammerPackages = require('./c_package_manager');
 const { ensureRustCorePackage } = require('./rust_core_packages');
-const { ensureRustBspPackage } = require('./rust_bsp_packages');
+const { ensureRustBspSelection, materializeRustBspSelection } = require('./rust_bsp_packages');
 
 let mcuPanel;
 let outputChannel;
@@ -860,8 +860,9 @@ function resolveManagedBspFile(paths, configuredPath) {
   const portablePath = String(configuredPath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!portablePath) throw new Error('The Rust database contains an empty BSP path.');
 
-  // Database paths are stored as bsp/boards/... and bsp/shields/.... The
-  // independently managed package itself is installed at <managed root>/bsp.
+  // Database paths are stored as bsp/boards/... / bsp/cards/... / bsp/shields/....
+  // paths.bsp is a disposable overlay materialized from the exact selected
+  // per-entity packages before setup generation.
   const packageRelativePath = portablePath.toLowerCase().startsWith('bsp/')
     ? portablePath.slice(4)
     : portablePath;
@@ -3497,14 +3498,13 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   const metadata = readMcuMetadata(paths.database, mcuName);
   progress.report({ message: `Resolving Rust core package for ${metadata.systemLib}...` });
   paths.core = await ensureRustCorePackage(context, metadata, progress, options.token);
-  progress.report({ message: `Resolving Rust BSP package for ${metadata.systemLib}...` });
-  paths.bsp = await ensureRustBspPackage(context, metadata, progress, options.token);
 
-  // Keep sdk/bsp as a disposable compatibility overlay for existing SDK code.
-  progress.report({ message: 'Installing selected board, MCU-card and shield BSP configuration files...' });
-  copyDirectoryRequired(paths.bsp, path.join(paths.sdk, 'bsp'));
-
+  // BSP packages are entity based, not SYSTEM_LIB based. A bare MCU setup does
+  // not need BSP at all. A board setup installs only the exact Board, MCUCard
+  // and optional Shield packages selected through the database relationships.
   let boardSelection;
+  let selectedShieldBsp;
+  paths.bsp = path.join(paths.sdk, 'bsp');
   if (payload.selectionMode === 'board' && payload.boardUid) {
     const board = readBoardList(paths.database).find((item) => item.uid === payload.boardUid);
     if (!board) throw new Error(`Board '${payload.boardUid}' is not present in the Rust database.`);
@@ -3513,6 +3513,26 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
       throw new Error(`${mcuName} is not linked to board '${payload.boardUid}' through BoardToDevice or BoardToCard → CardToMCU.`);
     }
     boardSelection = { board, mcuOption };
+
+    if (payload.shieldUid) {
+      // Validate BoardToShield before downloading the Shield package.
+      selectedShieldBsp = readBoardShieldBsp(paths.database, payload.boardUid, payload.shieldUid, mcuName);
+    }
+
+    progress.report({ message: 'Resolving selected Board / MCU-card / Shield BSP packages...' });
+    const bspSelection = await ensureRustBspSelection(context, {
+      boardUid: board.uid,
+      mcuCardUid: mcuOption.mcuCardBspPath ? (mcuOption.mcuCardUid || undefined) : undefined,
+      shieldUid: payload.shieldUid || undefined
+    }, progress, options.token);
+
+    // Keep sdk/bsp only as a disposable compatibility overlay for existing SDK
+    // code. It contains the exact selected entity BSP files, not a global BSP.
+    materializeRustBspSelection(bspSelection, paths.bsp);
+  } else {
+    // Prevent a previous board setup from leaking BSP files into a direct-MCU
+    // setup that should have no board/card/shield dependency.
+    fs.rmSync(paths.bsp, { recursive: true, force: true });
   }
 
   const programmerUid = String(payload.programmerUid || PROBE_RS_PROGRAMMER_UID).trim();
@@ -3569,11 +3589,10 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
     let shieldConfig;
     let shieldName;
     if (payload.shieldUid) {
-      const bsp = readBoardShieldBsp(paths.database, payload.boardUid, payload.shieldUid, mcuName);
-      const shieldSource = resolveManagedBspFile(paths, bsp.shieldBspPath);
+      const shieldSource = resolveManagedBspFile(paths, selectedShieldBsp.shieldBspPath);
       copyRequired(shieldSource, path.join(selectedBspRoot, 'shield.cfg'));
       shieldConfig = JSON.parse(readRequired(shieldSource));
-      shieldName = bsp.shieldName;
+      shieldName = selectedShieldBsp.shieldName;
     }
 
     // A shield may provide an alternate mikroBUS routing, but it is never a
