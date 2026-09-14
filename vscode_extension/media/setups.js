@@ -38,8 +38,8 @@
     environmentTitle.textContent = isC ? 'C Environment' : 'Rust Environment';
     document.getElementById('configure').textContent = 'Configure MCU or Board';
     document.getElementById('environment').textContent = 'Development Environment';
-    document.getElementById('clickExamples').classList.toggle('hidden', !isC);
-    document.getElementById('demoExamples').classList.toggle('hidden', !isC);
+    document.getElementById('clickExamples').classList.remove('hidden');
+    document.getElementById('demoExamples').classList.remove('hidden');
   }
 
   window.addEventListener('message', (event) => {

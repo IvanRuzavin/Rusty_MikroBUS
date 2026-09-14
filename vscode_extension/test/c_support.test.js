@@ -1758,7 +1758,7 @@ try {
     }
     const installed = new Map([
       ['shared:cmake@necto-live', { kind: 'shared', name: 'cmake', root: managedCmakeRoot }],
-      ['shared:mikroc_cmake@0.0.1', { kind: 'shared', name: 'mikroc_cmake', root: moduleRoot }]
+      ['shared:mikroc_cmake@0.1.0', { kind: 'shared', name: 'mikroc_cmake', root: moduleRoot }]
     ]);
     assert.strictEqual(setup.resolveManagedNectoCmake(installed), managedCmake);
     assert.strictEqual(setup.resolveManagedMikroCCmakeModules(installed), moduleRoot);
@@ -2259,7 +2259,7 @@ endfunction()
   assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.17');
+  assert.strictEqual(packageJson.version, '0.8.19');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');
@@ -2680,6 +2680,20 @@ endfunction()
   assert.ok(extensionSource.includes('/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z'));
   assert.ok(!extensionSource.includes('/NECTOStudio7/development/codegrip/'));
   assert.ok(extensionSource.includes("return URLS.codegrip[process.platform]"));
+  assert.ok(extensionSource.includes("['core', 'codegrip', 'card', 'board'].includes(message.manager)"));
+  assert.ok(extensionSource.includes("['core', 'card', 'board'].includes(message.manager)"));
+  assert.ok(!extensionSource.includes("'Uninstall...'"));
+  assert.ok(extensionSource.includes("GENERAL_RELEASE_TAG = 'v0.1.0'"));
+  assert.ok(extensionSource.includes("database.db"));
+  assert.ok(extensionSource.includes("mikrobusRust.openClickExamples"));
+  assert.ok(extensionSource.includes("mikrobusRust.openDemoExamples"));
+  const rustExamplesSource = fs.readFileSync(path.join(__dirname, '..', 'rust_examples.js'), 'utf8');
+  assert.ok(rustExamplesSource.includes('metadata_clicks_rust.json'));
+  assert.ok(rustExamplesSource.includes('metadata_demos_rust.json'));
+  assert.ok(cPackageManagerSource.includes('/releases/download/v0.1.0/metadata_clicks_c.json'));
+  assert.ok(cPackageManagerSource.includes('/releases/download/v0.1.0/metadata_demos_c.json'));
+  const cPackageCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_catalog.js'), 'utf8');
+  assert.ok(cPackageCatalogSource.includes('/releases/download/v0.1.0/mikroc_cmake.7z'));
   assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('cmake')"));
   assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('ninja')"));
   assert.ok(cSetupSource.includes('Visual Studio Build Tools commonly ships both CMake and Ninja'));

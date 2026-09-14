@@ -47,7 +47,7 @@ function getManagedPaths(context) {
   const root = getManagedRoot(context);
   return {
     root,
-    database: path.join(root, 'database', 'database_mikro_sdk_rust.db'),
+    database: path.join(root, 'database', 'database.db'),
     sdk: path.join(root, 'sdk'),
     core: path.join(root, 'core')
   };

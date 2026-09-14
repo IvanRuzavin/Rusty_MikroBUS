@@ -18,6 +18,7 @@ const sharedProgrammerPackages = require('./c_package_manager');
 const rustCorePackages = require('./rust_core_packages');
 const rustBoardPackages = require('./rust_board_packages');
 const rustCardPackages = require('./rust_card_packages');
+const rustExamples = require('./rust_examples');
 
 const CODEGRIP_SERVER_SPEC = Object.freeze(
   sharedProgrammerPackages.codegripServerPackageSpec({ environment: false }) || {
@@ -28,6 +29,12 @@ const CODEGRIP_SERVER_SPEC = Object.freeze(
     environment: false
   }
 );
+
+const GENERAL_RELEASE_TAG = 'v0.1.0';
+const GENERAL_RELEASE_API = `https://api.github.com/repos/IvanRuzavin/Rusty_MikroBUS/releases/tags/${GENERAL_RELEASE_TAG}`;
+const GENERAL_RELEASE_DOWNLOAD_BASE = `https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/${GENERAL_RELEASE_TAG}`;
+let generalReleaseSdkVersion = '';
+let generalReleaseSdkVersionLoadedAt = 0;
 
 const VERSIONS = {
   probeRs: '0.32.0',
@@ -48,7 +55,7 @@ const URLS = {
     darwin: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z',
     linux: 'https://s3-us-west-2.amazonaws.com/software-update.mikroe.com/Codegrip/live/codegrip_gdb_server/linux/codegrip_gdb_server.7z'
   },
-  rustyMikrobus: 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/latest',
+  rustyMikrobus: GENERAL_RELEASE_API,
   probeRsShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.sh`,
   probeRsPowerShell: `https://github.com/probe-rs/probe-rs/releases/download/v${VERSIONS.probeRs}/probe-rs-tools-installer.ps1`,
   probeRsUdev: 'https://probe.rs/files/69-probe-rs.rules'
@@ -153,6 +160,12 @@ function activate(context) {
     if (!cLanguageSupport) return;
     await sharedProgrammerPackages.openDemoExamples(context);
   });
+  const openRustClickExamples = vscode.commands.registerCommand('mikrobusRust.openClickExamples', async () => {
+    await rustExamples.openClickExamples(context);
+  });
+  const openRustDemoExamples = vscode.commands.registerCommand('mikrobusRust.openDemoExamples', async () => {
+    await rustExamples.openDemoExamples(context);
+  });
   const refreshDatabase = vscode.commands.registerCommand('mikrobusRust.refreshDatabase', async () => {
     await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -174,6 +187,8 @@ function activate(context) {
     refreshSetupView,
     openClickExamples,
     openDemoExamples,
+    openRustClickExamples,
+    openRustDemoExamples,
     refreshDatabase,
     vscode.workspace.onDidChangeWorkspaceFolders(() => postDashboardState(setupView, context)),
     vscode.workspace.onDidCreateFiles(() => postDashboardState(setupView, context)),
@@ -262,12 +277,12 @@ async function handleDashboardMessage(message, view, context) {
       else await openEnvironmentSetup(context);
       return;
     }
-    if (message.type === 'clickExamples' && activeEnvironment === 'c') {
-      await vscode.commands.executeCommand('mikrobusC.openClickExamples');
+    if (message.type === 'clickExamples') {
+      await vscode.commands.executeCommand(activeEnvironment === 'c' ? 'mikrobusC.openClickExamples' : 'mikrobusRust.openClickExamples');
       return;
     }
-    if (message.type === 'demoExamples' && activeEnvironment === 'c') {
-      await vscode.commands.executeCommand('mikrobusC.openDemoExamples');
+    if (message.type === 'demoExamples') {
+      await vscode.commands.executeCommand(activeEnvironment === 'c' ? 'mikrobusC.openDemoExamples' : 'mikrobusRust.openDemoExamples');
       return;
     }
     if (message.type === 'cApply' && typeof message.id === 'string') { await vscode.commands.executeCommand('mikrobusC.applySetup', message.id); postDashboardState(view, context); return; }
@@ -350,18 +365,18 @@ async function handleSetupMessage(message, view, context) {
     return;
   }
 
-  if (message.type === 'manager' && ['core', 'codegrip', 'bsp'].includes(message.manager)) {
+  if (message.type === 'manager' && ['core', 'codegrip', 'card', 'board'].includes(message.manager)) {
     await postRustManagerState(view, context, message.manager);
     return;
   }
 
-  if (message.type === 'managerInstall' && ['core', 'bsp'].includes(message.manager) && typeof message.key === 'string') {
+  if (message.type === 'managerInstall' && ['core', 'card', 'board'].includes(message.manager) && typeof message.key === 'string') {
     await installRustManagerPackage(context, message.manager, message.key);
     await postRustManagerState(view, context, message.manager);
     return;
   }
 
-  if (message.type === 'managerUninstall' && ['core', 'codegrip', 'bsp'].includes(message.manager) && typeof message.key === 'string') {
+  if (message.type === 'managerUninstall' && ['core', 'codegrip', 'card', 'board'].includes(message.manager) && typeof message.key === 'string') {
     await uninstallRustManagerPackage(context, message.manager, message.key);
     await postRustManagerState(view, context, message.manager);
     return;
@@ -379,11 +394,10 @@ async function handleSetupMessage(message, view, context) {
   }
 }
 
-function postStatus(view, statuses, context) {
-  if (!view) {
-    return;
-  }
-
+async function postStatus(view, _statuses, context) {
+  if (!view) return;
+  await refreshGeneralReleaseSdkVersion().catch(() => {});
+  const statuses = scanPackages(context);
   void view.webview.postMessage({
     type: 'status',
     platform: process.platform,
@@ -392,6 +406,32 @@ function postStatus(view, statuses, context) {
     managedRoot: getManagedRoot(context),
     packages: statuses
   });
+}
+
+async function refreshGeneralReleaseSdkVersion(force = false) {
+  if (!force && generalReleaseSdkVersion && Date.now() - generalReleaseSdkVersionLoadedAt < 10 * 60 * 1000) {
+    return generalReleaseSdkVersion;
+  }
+  try {
+    const manifest = await fetchJson(`${GENERAL_RELEASE_DOWNLOAD_BASE}/sdk_manifest.json`);
+    const version = String(manifest?.version || '').trim();
+    if (version) {
+      generalReleaseSdkVersion = version;
+      generalReleaseSdkVersionLoadedAt = Date.now();
+    }
+  } catch {
+    // Keep package detection usable offline. The installed SDK manifest is still shown.
+  }
+  return generalReleaseSdkVersion;
+}
+
+function installedSdkVersion(sdkRoot) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(sdkRoot, 'manifest.json'), 'utf8'));
+    return String(manifest?.version || '').trim();
+  } catch {
+    return '';
+  }
 }
 
 function scanPackages(context) {
@@ -439,7 +479,7 @@ function getPackageDefinitions() {
     {
       id: 'database',
       name: 'MikroBUS Rust Database',
-      description: 'database_mikro_sdk_rust.db used to enumerate MCUs and family metadata.',
+      description: 'database.db from the General Release, used to enumerate MCUs and family metadata.',
       kind: 'managed'
     },
     {
@@ -564,7 +604,7 @@ function getExpectedPaths(context) {
     codegrip: sharedProgrammerPackages.packageTarget(context, CODEGRIP_SERVER_SPEC),
     openocd: path.join(managedRoot, 'runner', `xpack-openocd-${VERSIONS.openocd}`),
     armGcc: path.join(managedRoot, 'runner', `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}`),
-    database: path.join(managedRoot, 'database', 'database_mikro_sdk_rust.db'),
+    database: path.join(managedRoot, 'database', 'database.db'),
     sdk: path.join(managedRoot, 'sdk')
   };
 }
@@ -796,11 +836,15 @@ function detectManaged(id, expected) {
 
   if (id === 'sdk') {
     const present = directoryHasContent(expected.sdk);
+    const installedVersion = present ? installedSdkVersion(expected.sdk) : '';
+    const updateAvailable = Boolean(present && installedVersion && generalReleaseSdkVersion && installedVersion !== generalReleaseSdkVersion);
     return {
-      status: present ? 'installed' : 'missing',
-      detail: present ? 'Rust SDK directory found.' : 'Rust SDK directory is missing or empty.',
+      status: updateAvailable ? 'update' : (present ? 'installed' : 'missing'),
+      detail: present
+        ? (updateAvailable ? `Rust SDK ${installedVersion} is installed; ${generalReleaseSdkVersion} is available.` : `Rust SDK directory found${installedVersion ? ` (v${installedVersion})` : ''}.`)
+        : 'Rust SDK directory is missing or empty.',
       expectedPath: expected.sdk,
-      version: ''
+      version: installedVersion
     };
   }
 
@@ -935,14 +979,14 @@ function getUninstallAction(id, context) {
   if (id === 'rust') {
     const rustup = path.join(expected.cargoBin, process.platform === 'win32' ? 'rustup.exe' : 'rustup');
     const command = `${quoteShellArg(fs.existsSync(rustup) ? rustup : 'rustup')} self uninstall`;
-    return terminalAction('Uninstall...', command, 'MikroBUS Rust - Rust uninstall', process.platform === 'win32' ? 'powershell.exe' : undefined);
+    return terminalAction('Uninstall', command, 'MikroBUS Rust - Rust uninstall', process.platform === 'win32' ? 'powershell.exe' : undefined);
   }
 
   if (id === 'probeRs') {
     if (process.platform === 'win32') {
       const bin = expected.cargoBin.replace(/'/g, "''");
       return terminalAction(
-        'Uninstall...',
+        'Uninstall',
         `Remove-Item -Force -ErrorAction SilentlyContinue '${bin}\\probe-rs.exe','${bin}\\cargo-flash.exe','${bin}\\cargo-embed.exe'`,
         'MikroBUS Rust - probe-rs uninstall',
         'powershell.exe'
@@ -950,7 +994,7 @@ function getUninstallAction(id, context) {
     }
     if (process.platform === 'linux') {
       return terminalAction(
-        'Uninstall...',
+        'Uninstall',
         `rm -f ${quoteShellArg(path.join(expected.cargoBin, 'probe-rs'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-flash'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-embed'))}`,
         'MikroBUS Rust - probe-rs uninstall'
       );
@@ -959,25 +1003,25 @@ function getUninstallAction(id, context) {
 
   if (id === 'udev' && process.platform === 'linux') {
     return terminalAction(
-      'Uninstall...',
+      'Uninstall',
       `sudo rm -f ${quoteShellArg(expected.udevRules)} && sudo udevadm control --reload && sudo udevadm trigger`,
       'MikroBUS Rust - udev uninstall'
     );
   }
 
   if (id === 'linuxBuild') {
-    return { type: 'guidance', label: 'Uninstall...', message: 'Linux build prerequisites are shared system packages. MikroBUS Rust will not remove them automatically because other development environments may depend on them. Remove only the packages you no longer need using your distribution package manager.' };
+    return { type: 'guidance', label: 'Uninstall', message: 'Linux build prerequisites are shared system packages. MikroBUS Rust will not remove them automatically because other development environments may depend on them. Remove only the packages you no longer need using your distribution package manager.' };
   }
 
   if (id === 'msvc' || id === 'stlink') {
-    return { type: 'system-uninstall', label: 'Uninstall...', command: 'appwiz.cpl' };
+    return { type: 'system-uninstall', label: 'Uninstall', command: 'appwiz.cpl' };
   }
 
   if (id === 'jlink') {
     if (process.platform === 'win32') {
-      return { type: 'system-uninstall', label: 'Uninstall...', command: 'appwiz.cpl' };
+      return { type: 'system-uninstall', label: 'Uninstall', command: 'appwiz.cpl' };
     }
-    return { type: 'guidance', label: 'Uninstall...', message: 'SEGGER J-Link is system-managed. Use the package/uninstaller method you used to install J-Link. MikroBUS Rust will not delete /opt/SEGGER automatically.' };
+    return { type: 'guidance', label: 'Uninstall', message: 'SEGGER J-Link is system-managed. Use the package/uninstaller method you used to install J-Link. MikroBUS Rust will not delete /opt/SEGGER automatically.' };
   }
 
   return undefined;
@@ -1451,8 +1495,8 @@ async function installXpackPackage(id, expected, tempRoot, progress, token) {
 
 async function installDatabase(expected, tempRoot, progress, token) {
   const assetName = path.basename(expected.database);
-  progress.report({ message: `Resolving latest Rusty_MikroBUS release asset ${assetName}...` });
-  const assetUrl = await resolveLatestRustyAsset(assetName, token);
+  progress.report({ message: `Resolving General Release asset ${assetName}...` });
+  const assetUrl = await resolveGeneralReleaseAsset(assetName, token);
   const downloaded = path.join(tempRoot, assetName);
 
   progress.report({ message: `Downloading ${assetName}...` });
@@ -1486,8 +1530,8 @@ async function installRustyArchive(id, expected, tempRoot, progress, token) {
   const target = targets[id];
   const assetName = `${id}.7z`;
 
-  const assetUrl = await resolveLatestRustyAsset(assetName, token);
-  progress.report({ message: `Resolved latest Rusty_MikroBUS release asset ${assetName}...` });
+  const assetUrl = await resolveGeneralReleaseAsset(assetName, token);
+  progress.report({ message: `Resolved General Release asset ${assetName}...` });
   const archivePath = path.join(tempRoot, assetName);
   const extractRoot = path.join(tempRoot, 'payload');
   await fs.promises.mkdir(extractRoot, { recursive: true });
@@ -1514,14 +1558,14 @@ async function installRustyArchive(id, expected, tempRoot, progress, token) {
   await replaceDirectory(source, target);
 }
 
-async function resolveLatestRustyAsset(assetName, token) {
+async function resolveGeneralReleaseAsset(assetName, token) {
   ensureNotCancelled(token);
-  const release = await fetchJson('https://api.github.com/repos/IvanRuzavin/Rusty_MikroBUS/releases/latest', token);
+  const release = await fetchJson(GENERAL_RELEASE_API, token);
   const assets = Array.isArray(release.assets) ? release.assets : [];
   const asset = assets.find((item) => item && item.name === assetName);
   if (!asset || !asset.browser_download_url) {
     const available = assets.map((item) => item && item.name).filter(Boolean).join(', ');
-    throw new Error(`Latest Rusty_MikroBUS release does not contain ${assetName}.${available ? ` Available assets: ${available}` : ''}`);
+    throw new Error(`General Release ${GENERAL_RELEASE_TAG} does not contain ${assetName}.${available ? ` Available assets: ${available}` : ''}`);
   }
   return asset.browser_download_url;
 }

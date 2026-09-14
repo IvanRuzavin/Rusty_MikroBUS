@@ -343,7 +343,7 @@ async function packageSpecs(context, metadata, mode, setup, token) {
     result.push({
       kind: 'shared',
       name: 'mikroc_cmake',
-      version: '0.0.1',
+      version: '0.1.0',
       displayName: 'mikroC CMake Language Modules',
       environment: true,
       installRelativePath: 'tools/mikroc-cmake'

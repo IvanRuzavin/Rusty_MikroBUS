@@ -14,7 +14,7 @@ It is designed around the MIKROE/NECTO package ecosystem and mikroBUS hardware m
 - Automatically manage databases, compiler packages, MCU core packages, BSP packages and programmer tools.
 - Build, clean, flash, erase and debug directly from VS Code.
 - Use **CODEGRIP**, **SEGGER J-Link**, **probe-rs**, **Microchip PICkit/ICD/EDBG-class tools** and **Renesas Flash Programmer** where applicable.
-- Browse and install **Click Board examples** and **Demo examples** for C.
+- Browse and install **Click Board examples** and **Demo examples** for both Rust and C.
 - Shared managed installation root for Rust and C packages.
 - Host support for **Linux, Windows and macOS**, with platform-aware package/tool discovery.
 
@@ -48,7 +48,7 @@ Rust MCU availability is intentionally **database-driven rather than hard-coded 
 | Coverage | Status |
 |---|---|
 | **STMicroelectronics / STM32** | Supported and used by the current Rust build/flash/debug workflow. |
-| **Other MCU vendors present in `database_mikro_sdk_rust.db`** | Supported when the database entry has the required Rust target/HAL/BSP data and its `SYSTEM_LIB` is present in the Rust Core Packages catalog. New architecture packages are picked up without hard-coding them in the extension. |
+| **Other MCU vendors present in `database.db`** | Supported when the database entry has the required Rust target/HAL/BSP data and its `SYSTEM_LIB` is present in the Rust Core Packages catalog. New architecture packages are picked up without hard-coding them in the extension. |
 | **Board / MCU-card vendors** | Database-driven; board and compatible MCU/card relationships are resolved from the current Rust database. |
 
 The vendor filter in **Configure MCU or Board** always reflects the vendors that are actually available in the installed Rust database, so the UI remains accurate as device coverage grows.
