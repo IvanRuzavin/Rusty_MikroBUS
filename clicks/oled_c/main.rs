@@ -5,10 +5,10 @@
 use panic_halt as _;
 use system::init_clock::delay_1sec;
 
-mod mikrobus_1;
+mod mikrobus;
 mod oled_c;
 
-use mikrobus_1::*;
+use mikrobus::*;
 use oled_c::{
     Config, OledC, COLOR_BLACK, COLOR_BLUE, COLOR_CYAN, COLOR_LIME, COLOR_MAGENTA,
     COLOR_RED, COLOR_WHITE, COLOR_YELLOW,

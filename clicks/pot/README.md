@@ -1,4 +1,4 @@
-# IPS Display 2 Click Rust example
+# POT Click Rust example
 
 This package is structured for the **reusable setup** workflow used by MikroBUS Rust Tools.
 It intentionally contains no hard-coded SDK/Core paths and no standalone Click-driver Cargo crate.
@@ -18,5 +18,5 @@ Boards without a routed USB UART need that mapping added to their BSP before thi
 
 - `Cargo.toml` — portable project marker used by the extension.
 - `main.rs` — example application.
-- `ipsdisplay2.rs` — Click driver translated from the supplied C package.
+- `pot.rs` — Click driver translated from the supplied C package.
 - `reference_c/` — original C source retained for comparison.

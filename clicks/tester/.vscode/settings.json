@@ -1,6 +1,0 @@
-{
-  "rust-analyzer.linkedProjects": [
-    "/home/ivan-ruzavin/.config/Code/User/globalStorage/ivanruzavin.mikrobus-rust-tools/configured-setups/workspaces/uni_ds_v8-stm32f756zg-no-shield/Cargo.toml"
-  ],
-  "rust-analyzer.cargo.target": "thumbv7em-none-eabi"
-}

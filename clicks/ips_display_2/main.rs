@@ -3,58 +3,96 @@
 #![allow(non_upper_case_globals)]
 
 use panic_halt as _;
+use system::init_clock::Delay_ms;
+use drv_uart::{uart_config_t, uart_open, uart_print, uart_set_baud, uart_set_blocking, uart_t};
 
-mod ips_display_2;
+mod ipsdisplay2;
 mod mikrobus;
 
-use ips_display_2::{Config, IpsDisplay2};
-use mikrobus::*;
+use ipsdisplay2::{
+    resources, IpsDisplay2, IpsDisplay2Config, Point, COLOR_BLACK, COLOR_BLUE,
+    COLOR_CYAN, COLOR_LIME, COLOR_MAGENTA, COLOR_RED,
+};
 
-// Static 240x240 RGB565 version of assets/rust_logo_240x240.png.
-// It is stored directly in flash and sent to the display once at startup.
-const RUST_LOGO: &[u8; 240 * 240 * 2] =
-    include_bytes!("assets/rust_logo_240x240.rgb565");
+
+const ENABLE_UART_OUTPUT: bool = true;
+
+fn init_log_uart() -> Option<uart_t> {
+    if !ENABLE_UART_OUTPUT {
+        return None;
+    }
+
+    let mut uart = uart_t::default();
+    let mut config = uart_config_t::default();
+    config.rx = mikrobus::USB_UART_RX;
+    config.tx = mikrobus::USB_UART_TX;
+
+    if uart_open(&mut uart, config).is_err() {
+        return None;
+    }
+    if uart_set_baud(&mut uart, 115_200).is_err() {
+        return None;
+    }
+    if uart_set_blocking(&mut uart, false).is_err() {
+        return None;
+    }
+
+    Some(uart)
+}
 
 #[unsafe(no_mangle)]
 fn main() -> ! {
-    let config = Config {
-        sck: MIKROBUS_1_SCK,
-        miso: MIKROBUS_1_MISO,
-        mosi: MIKROBUS_1_MOSI,
-        cs: MIKROBUS_1_CS,
-        rst: MIKROBUS_1_RST,
-        dc: MIKROBUS_1_INT,
-        backlight: MIKROBUS_1_AN,
-        // A faster SPI clock makes the one-time full-screen upload nearly instant.
-        spi_speed: 20_000_000,
-    };
-
-    let mut display = match IpsDisplay2::new(config) {
-        Ok(display) => display,
-        Err(_) => loop {
-            core::hint::spin_loop();
-        },
-    };
-
-    if display.default_config().is_err() {
-        loop {
-            core::hint::spin_loop();
-        }
+    let mut log_uart = init_log_uart();
+    if let Some(uart) = log_uart.as_mut() {
+        let _ = uart_print(uart, " Application Init \r\n");
     }
 
-    // Hide the transfer itself. The logo appears as a complete frame.
-    let _ = display.backlight(false);
+    let config = IpsDisplay2Config {
+        sck: mikrobus::MIKROBUS_1_SCK,
+        miso: mikrobus::MIKROBUS_1_MISO,
+        mosi: mikrobus::MIKROBUS_1_MOSI,
+        cs: mikrobus::MIKROBUS_1_CS,
+        rst: mikrobus::MIKROBUS_1_RST,
+        backlight: mikrobus::MIKROBUS_1_AN,
+        dc: mikrobus::MIKROBUS_1_INT,
+        ..Default::default()
+    };
+    let mut display = IpsDisplay2::new(config).unwrap_or_else(|_| loop {});
+    if display.default_config().is_err() { loop {} }
+    if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " Application Task \r\n"); }
 
-    if display.draw_rgb565_image(RUST_LOGO).is_err() {
-        loop {
-            core::hint::spin_loop();
-        }
-    }
-
-    let _ = display.backlight(true);
-
-    // Static presentation demo: keep the Rust logo on screen forever.
     loop {
-        core::hint::spin_loop();
+        if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " Drawing MIKROE logo example\r\n"); }
+        let _ = display.draw_picture(&resources::IPSDISPLAY2_IMG_MIKROE);
+        Delay_ms(3_000);
+
+        if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " Writing text example\r\n"); }
+        let _ = display.fill_screen(COLOR_BLACK);
+        Delay_ms(1_000);
+        for (y, text) in [
+            (50, "      MIKROE      "), (70, "   IPS Display 2  "), (90, "       Click      "),
+            (110, "     240x240px    "), (130, "ST7789V controller"), (150, "   TEST EXAMPLE   "),
+        ] { let _ = display.write_string(Point { x: 0, y }, text, COLOR_RED); }
+        Delay_ms(3_000);
+
+        if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " RGB fill screen example\r\n"); }
+        for color in [COLOR_RED, COLOR_LIME, COLOR_BLUE] {
+            let _ = display.fill_screen(color);
+            Delay_ms(1_000);
+        }
+
+        if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " Drawing objects example\r\n"); }
+        let _ = display.fill_screen(COLOR_BLACK);
+        Delay_ms(1_000);
+        let _ = display.draw_line(Point { x: 0, y: 0 }, Point { x: 239, y: 239 }, COLOR_BLUE);
+        Delay_ms(1_000);
+        let _ = display.draw_line(Point { x: 239, y: 0 }, Point { x: 0, y: 239 }, COLOR_BLUE);
+        Delay_ms(1_000);
+        let _ = display.draw_rectangle(Point { x: 60, y: 40 }, Point { x: 180, y: 100 }, COLOR_CYAN);
+        Delay_ms(1_000);
+        let _ = display.draw_rectangle(Point { x: 60, y: 140 }, Point { x: 180, y: 200 }, COLOR_CYAN);
+        Delay_ms(1_000);
+        let _ = display.draw_circle(Point { x: 120, y: 120 }, 120, COLOR_MAGENTA);
+        Delay_ms(2_000);
     }
 }
