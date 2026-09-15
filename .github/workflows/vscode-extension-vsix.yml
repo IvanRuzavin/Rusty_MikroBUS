@@ -1,0 +1,118 @@
+name: Build VS Code Extension VSIX
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'vscode_extension/**'
+      - '.github/workflows/vscode-extension-vsix.yml'
+
+permissions:
+  contents: write
+
+# Share the same release lock as the General Release workflow so the two jobs
+# never mutate v0.1.0 assets concurrently.
+concurrency:
+  group: general-release-v0.1.0
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v0.1.0
+  RELEASE_TITLE: General Release v0.1.0
+  EXTENSION_DIR: vscode_extension
+  VSIX_ASSET: mikrobus-rust-tools.vsix
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: vscode_extension/package-lock.json
+
+      - name: Validate extension source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$EXTENSION_DIR"
+          test -s "$EXTENSION_DIR/package.json"
+          test -s "$EXTENSION_DIR/package-lock.json"
+          node -e "const p=require('./$EXTENSION_DIR/package.json'); if(!p.name || !p.version) process.exit(1); console.log('Extension:', p.name, p.version);"
+
+      - name: Install extension dependencies
+        working-directory: vscode_extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Validate extension
+        working-directory: vscode_extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          npm test
+
+      - name: Build VSIX
+        working-directory: vscode_extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist/vsix"
+          npx --yes @vscode/vsce@3 package \
+            --out "$GITHUB_WORKSPACE/dist/vsix/$VSIX_ASSET"
+          test -s "$GITHUB_WORKSPACE/dist/vsix/$VSIX_ASSET"
+          sha256sum "$GITHUB_WORKSPACE/dist/vsix/$VSIX_ASSET"
+
+      - name: Create General Release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes 'General Rusty_MikroBUS release assets.' \
+              --latest=false
+          fi
+
+      - name: Upload VSIX if new or changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$GITHUB_WORKSPACE/dist/vsix/$VSIX_ASSET"
+          local_sha="$(sha256sum "$file" | awk '{print $1}')"
+
+          release_id="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          remote_digest="$(gh api --paginate -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq -rs --arg name "$VSIX_ASSET" \
+              'add // [] | .[] | select(.name == $name) | (.digest // "")' \
+            | head -n1)"
+
+          if [[ "$remote_digest" == "sha256:${local_sha}" ]]; then
+            echo "UNCHANGED  $VSIX_ASSET"
+            exit 0
+          fi
+
+          echo "UPLOAD     $VSIX_ASSET  sha256:$local_sha"
+          gh release upload "$RELEASE_TAG" "$file" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

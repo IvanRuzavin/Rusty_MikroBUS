@@ -2,43 +2,46 @@
 """
 validate_rust_mcus.py
 
-Standalone bulk validator for the Rust MikroBUS environment.
+Zero-argument recursive validator for the published Rust MikroBUS environment.
 
-Required positional arguments:
-    1) Rust SDK path
-    2) Rust core path
-    3) MCU list (a file path, or a comma-separated list)
+Run:
+    python3 validate_rust_mcus.py
 
-The Rust database is intentionally NOT a required CLI argument. It is
-auto-discovered from the same managed layout used by the VS Code extension:
+The validator bootstraps everything needed from the same fixed GitHub release
+channels used by the VS Code extension:
 
-    <managed-root>/sdk
-    <managed-root>/core
-    <managed-root>/database/database_mikro_sdk_rust.db
+    General Release v0.1.0 / tag v0.1.0
+        - sdk.7z
+        - database.db
+        - general_release_manifest.json
 
-If your database lives elsewhere, set:
-    MIKROBUS_RUST_DATABASE=/path/to/database_mikro_sdk_rust.db
+    Rust Core Packages / tag rust-core-packages
+        - rust_core_packages.json
+        - every Core package required by MCU.SYSTEM_LIB in database.db
 
-Per MCU the validator:
-    1. Always validates the direct/bare MCU setup.
-    2. Resolves the MCU/family metadata and MCU JSON.
-    3. Generates the same .setup/core and .setup/sdk structure used by the
-       VS Code extension.
-    4. Runs Cargo setup validation and a real blank-project build/link.
-    5. Searches every enabled MCUCard.CONFIG_JSON for the MCU.
-    6. For every matching MCU card, discovers every enabled BoardToCard board.
-    7. Treats every discovered Board + MCU-card combination as a mandatory
-       additional build check, validating CardToMCU consistency, board/card BSP
-       merge, selection.json, and generated mikrobus.rs when the board exposes
-       a resolvable mikroBUS mapping.
-    8. Deletes the generated setup and target overlay after every individual
-       direct or board/card check before moving to the next configuration.
-    9. Continues after failures and writes CSV/JSON/per-configuration logs.
+    Rust MCU Card Packages / tag rust-card-packages
+        - rust_card_packages.json
+        - every enabled MCUCard package referenced by database.db
 
-The database and BSP package remain auto-discovered so the command line still
-has only the three requested positional arguments. For non-standard layouts:
-    MIKROBUS_RUST_DATABASE=/path/to/database_mikro_sdk_rust.db
-    MIKROBUS_RUST_BSP=/path/to/bsp
+    Rust Board Packages / tag rust-board-packages
+        - rust_board_packages.json
+        - every enabled Board package referenced by database.db
+
+The MCU list is also read from database.db, so no SDK/core/MCU-list arguments
+are necessary. Package catalogs, package SHA-256 values, database availability,
+and archive contents are validated before recursive builds start.
+
+Optional environment overrides:
+    MIKROBUS_RUST_REPOSITORY=owner/repository
+    MIKROBUS_RUST_GENERAL_RELEASE_TAG=v0.1.0
+    MIKROBUS_RUST_CORE_PACKAGES_REPOSITORY=owner/repository
+    MIKROBUS_RUST_BOARD_PACKAGES_REPOSITORY=owner/repository
+    MIKROBUS_RUST_CARD_PACKAGES_REPOSITORY=owner/repository
+    MIKROBUS_RUST_7ZIP=/path/to/7z
+    MIKROBUS_RUST_CARGO=/path/to/cargo
+    MIKROBUS_RUST_RUSTUP=/path/to/rustup
+    MIKROBUS_RUST_BUILD_TIMEOUT=900
+    MIKROBUS_RUST_KEEP_TEMP=1
 
 No third-party Python packages are required.
 """
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -58,13 +62,15 @@ import sys
 import tempfile
 import time
 import tomllib
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 
-SCRIPT_VERSION = "1.1.2"
+SCRIPT_VERSION = "1.3.1"
 BLANK_BIN_NAME = "mikrobus_validation_blank"
 SETUP_STAGING_NAME = ".setup.__mikrobus_staging"
 
@@ -76,11 +82,25 @@ CARGO_TARGET_DIR_NAME = ".bulk-validation-target"
 
 # Optional environment controls. These do not add required CLI arguments.
 ENV_DATABASE = "MIKROBUS_RUST_DATABASE"
-ENV_BSP = "MIKROBUS_RUST_BSP"
+ENV_BSP = "MIKROBUS_RUST_BSP"  # legacy/raw BSP tree fallback
+ENV_BOARD_PACKAGES = "MIKROBUS_RUST_BOARD_PACKAGES"
+ENV_CARD_PACKAGES = "MIKROBUS_RUST_CARD_PACKAGES"
+ENV_BOARD_PACKAGES_REPOSITORY = "MIKROBUS_RUST_BOARD_PACKAGES_REPOSITORY"
+ENV_CARD_PACKAGES_REPOSITORY = "MIKROBUS_RUST_CARD_PACKAGES_REPOSITORY"
+ENV_7ZIP = "MIKROBUS_RUST_7ZIP"
 ENV_CARGO = "MIKROBUS_RUST_CARGO"
 ENV_RUSTUP = "MIKROBUS_RUST_RUSTUP"
 ENV_TIMEOUT = "MIKROBUS_RUST_BUILD_TIMEOUT"
 ENV_KEEP_TEMP = "MIKROBUS_RUST_KEEP_TEMP"
+ENV_REPOSITORY = "MIKROBUS_RUST_REPOSITORY"
+ENV_GENERAL_RELEASE_TAG = "MIKROBUS_RUST_GENERAL_RELEASE_TAG"
+ENV_CORE_PACKAGES_REPOSITORY = "MIKROBUS_RUST_CORE_PACKAGES_REPOSITORY"
+
+DEFAULT_REPOSITORY = "IvanRuzavin/Rusty_MikroBUS"
+DEFAULT_GENERAL_RELEASE_TAG = "v0.1.0"
+CORE_PACKAGES_RELEASE = "rust-core-packages"
+CORE_PACKAGES_CATALOG = "rust_core_packages.json"
+GENERAL_RELEASE_MANIFEST = "general_release_manifest.json"
 
 
 class ValidationError(RuntimeError):
@@ -178,18 +198,12 @@ def safe_name(value: str) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate and build every requested Rust MCU setup using the same "
-            "core/SDK contract as the MikroBUS VS Code extension."
+            "Download the published Rust SDK/database/Core/Board/Card packages "
+            "and recursively validate every MCU/setup. No positional arguments are required."
         )
     )
-    parser.add_argument("sdk", help="Path to the extracted Rust SDK directory.")
-    parser.add_argument("core", help="Path to the extracted Rust core directory.")
     parser.add_argument(
-        "mcus",
-        help=(
-            "Path to MCU list (.txt/.csv/.json), or a comma-separated MCU list. "
-            "Text files may contain one MCU per line."
-        ),
+        "--version", action="version", version=f"%(prog)s {SCRIPT_VERSION}"
     )
     return parser.parse_args()
 
@@ -223,6 +237,299 @@ def resolve_executable(env_name: str, default: str) -> str:
     return resolved
 
 
+def _release_asset_url(repository: str, tag: str, asset: str) -> str:
+    return (
+        f"https://github.com/{repository}/releases/download/"
+        f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(asset, safe='')}"
+    )
+
+
+def _download_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "mikrobus-rust-bulk-validator"})
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+    except Exception as exc:
+        raise ValidationError(f"Failed to download required release asset {url}: {exc}") from exc
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sevenzip_executable() -> str:
+    configured = os.environ.get(ENV_7ZIP, "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if not candidate.is_file():
+            raise ValidationError(f"{ENV_7ZIP} points to a missing executable: {candidate}")
+        return str(candidate)
+    for executable in ("7zz", "7z", "7za"):
+        found = shutil.which(executable)
+        if found:
+            return found
+    raise ValidationError(
+        "7-Zip is required to bootstrap the published Rust SDK/Core/Board/Card packages. "
+        f"Install 7z/7zz/7za or set {ENV_7ZIP}."
+    )
+
+
+def _extract_7z(archive: Path, destination: Path, sevenzip: str) -> None:
+    shutil.rmtree(destination, ignore_errors=True)
+    destination.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [sevenzip, "x", "-y", str(archive), f"-o{destination}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode != 0:
+        raise ValidationError(f"7-Zip failed extracting {archive.name}:\n{result.stdout}")
+
+
+def _manifest_asset(manifest: dict[str, Any], asset_name: str) -> dict[str, Any]:
+    assets = manifest.get("assets")
+    if not isinstance(assets, list):
+        raise ValidationError(f"{GENERAL_RELEASE_MANIFEST} does not contain an assets array.")
+    matches = [item for item in assets if isinstance(item, dict) and item.get("name") == asset_name]
+    if len(matches) != 1:
+        raise ValidationError(
+            f"Expected exactly one '{asset_name}' entry in {GENERAL_RELEASE_MANIFEST}, found {len(matches)}."
+        )
+    spec = matches[0]
+    digest = str(spec.get("sha256") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValidationError(f"{GENERAL_RELEASE_MANIFEST}: {asset_name} has an invalid SHA-256.")
+    return spec
+
+
+def _download_manifest_asset(
+    repository: str,
+    tag: str,
+    manifest: dict[str, Any],
+    asset_name: str,
+    destination: Path,
+) -> Path:
+    spec = _manifest_asset(manifest, asset_name)
+    _download_file(_release_asset_url(repository, tag, asset_name), destination)
+    actual = _file_sha256(destination)
+    expected = str(spec["sha256"])
+    if actual.casefold() != expected.casefold():
+        raise ValidationError(
+            f"SHA-256 mismatch for {asset_name}: expected {expected}, downloaded {actual}."
+        )
+    return destination
+
+
+def load_all_mcus(database: Path) -> list[str]:
+    with sqlite3.connect(database) as db:
+        rows = db.execute(
+            """
+            SELECT NAME
+            FROM MCU
+            WHERE trim(coalesce(SYSTEM_LIB, '')) <> ''
+            ORDER BY NAME COLLATE NOCASE
+            """
+        ).fetchall()
+    result = [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
+    if not result:
+        raise ValidationError(f"No Rust MCU rows with SYSTEM_LIB were found in {database}.")
+    return result
+
+
+def _required_system_libs(database: Path) -> list[str]:
+    with sqlite3.connect(database) as db:
+        rows = db.execute(
+            """
+            SELECT DISTINCT SYSTEM_LIB
+            FROM MCU
+            WHERE trim(coalesce(SYSTEM_LIB, '')) <> ''
+            ORDER BY SYSTEM_LIB COLLATE NOCASE
+            """
+        ).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
+
+
+def _merge_tree(source: Path, destination: Path) -> None:
+    for item in sorted(source.rglob("*"), key=lambda p: (len(p.parts), p.as_posix().casefold())):
+        relative = item.relative_to(source)
+        if relative.as_posix() == ".rust-core-package.json":
+            continue
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if item.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(os.readlink(item))
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            if _file_sha256(target) != _file_sha256(item):
+                raise ValidationError(
+                    f"Conflicting files while merging Rust Core packages: {relative}"
+                )
+            continue
+        shutil.copy2(item, target)
+
+
+class PublishedEnvironmentBootstrap:
+    def __init__(self, temp_root: Path):
+        self.temp_root = temp_root
+        self.repository = os.environ.get(ENV_REPOSITORY, "").strip() or DEFAULT_REPOSITORY
+        self.general_tag = (
+            os.environ.get(ENV_GENERAL_RELEASE_TAG, "").strip() or DEFAULT_GENERAL_RELEASE_TAG
+        )
+        self.core_repository = (
+            os.environ.get(ENV_CORE_PACKAGES_REPOSITORY, "").strip() or self.repository
+        )
+        self.sevenzip = _sevenzip_executable()
+        self.download_root = temp_root / ".published-downloads"
+
+    def _general_manifest(self) -> dict[str, Any]:
+        path = self.download_root / "general" / GENERAL_RELEASE_MANIFEST
+        _download_file(
+            _release_asset_url(self.repository, self.general_tag, GENERAL_RELEASE_MANIFEST),
+            path,
+        )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValidationError(f"Invalid {GENERAL_RELEASE_MANIFEST}: {exc}") from exc
+        if not isinstance(data, dict) or data.get("schemaVersion") != 1:
+            raise ValidationError(f"{GENERAL_RELEASE_MANIFEST} has an unsupported schema.")
+        return data
+
+    def _core_catalog(self) -> dict[str, Any]:
+        path = self.download_root / "core" / CORE_PACKAGES_CATALOG
+        _download_file(
+            _release_asset_url(self.core_repository, CORE_PACKAGES_RELEASE, CORE_PACKAGES_CATALOG),
+            path,
+        )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValidationError(f"Invalid {CORE_PACKAGES_CATALOG}: {exc}") from exc
+        if not isinstance(data, dict) or data.get("schemaVersion") != 1 or not isinstance(data.get("packages"), list):
+            raise ValidationError(f"{CORE_PACKAGES_CATALOG} has an unsupported schema.")
+        return data
+
+    def _bootstrap_core(self, database: Path) -> tuple[Path, int]:
+        catalog = self._core_catalog()
+        merged_root = self.temp_root / "core"
+        merged_root.mkdir(parents=True, exist_ok=True)
+        package_count = 0
+        for system_lib in _required_system_libs(database):
+            matches = [
+                item for item in catalog["packages"]
+                if isinstance(item, dict)
+                and str(item.get("systemLib", "")).casefold() == system_lib.casefold()
+            ]
+            if len(matches) != 1:
+                raise ValidationError(
+                    f"Expected exactly one published Rust Core package for SYSTEM_LIB '{system_lib}', found {len(matches)}."
+                )
+            spec = matches[0]
+            for key in ("name", "asset", "sha256", "systemLib"):
+                if not str(spec.get(key, "")).strip():
+                    raise ValidationError(f"Core package for {system_lib} is missing '{key}'.")
+            expected_sha = str(spec["sha256"])
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha):
+                raise ValidationError(f"Core package {spec['name']} has an invalid SHA-256.")
+            archive = self.download_root / "core" / "archives" / str(spec["asset"])
+            _download_file(
+                _release_asset_url(self.core_repository, CORE_PACKAGES_RELEASE, str(spec["asset"])),
+                archive,
+            )
+            actual_sha = _file_sha256(archive)
+            if actual_sha.casefold() != expected_sha.casefold():
+                raise ValidationError(
+                    f"SHA-256 mismatch for Core package {archive.name}: expected {expected_sha}, downloaded {actual_sha}."
+                )
+            extracted = self.download_root / "core" / "packages" / str(spec["name"])
+            _extract_7z(archive, extracted, self.sevenzip)
+            marker_path = extracted / ".rust-core-package.json"
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValidationError(f"{archive.name} is missing/has invalid .rust-core-package.json: {exc}") from exc
+            if str(marker.get("systemLib", "")).casefold() != system_lib.casefold():
+                raise ValidationError(
+                    f"{archive.name} marker SYSTEM_LIB does not match {system_lib}."
+                )
+            _merge_tree(extracted, merged_root)
+            package_count += 1
+        return merged_root, package_count
+
+    def bootstrap(self) -> tuple[Path, Path, Path, int]:
+        manifest = self._general_manifest()
+        general_root = self.download_root / "general"
+        sdk_archive = _download_manifest_asset(
+            self.repository,
+            self.general_tag,
+            manifest,
+            "sdk.7z",
+            general_root / "sdk.7z",
+        )
+        database = _download_manifest_asset(
+            self.repository,
+            self.general_tag,
+            manifest,
+            "database.db",
+            general_root / "database.db",
+        )
+        sdk_root = self.temp_root / "published-sdk"
+        _extract_7z(sdk_archive, sdk_root, self.sevenzip)
+        if not (sdk_root / "Cargo.toml").is_file():
+            raise ValidationError(f"Published sdk.7z does not contain Cargo.toml at its root: {sdk_root}")
+        core_root, core_count = self._bootstrap_core(database)
+        return sdk_root, core_root, database, core_count
+
+
+def preflight_bsp_packages(database: Path, resolver: "BspPackageResolver") -> tuple[int, int]:
+    with sqlite3.connect(database) as db:
+        db.row_factory = sqlite3.Row
+        boards = db.execute(
+            """
+            SELECT UID, NAME, BSP_PATH
+            FROM Board
+            WHERE ENABLED = 1 AND trim(coalesce(BSP_PATH, '')) <> ''
+            ORDER BY NAME COLLATE NOCASE, UID
+            """
+        ).fetchall()
+        cards = db.execute(
+            """
+            SELECT UID, NAME, BSP_PATH
+            FROM MCUCard
+            WHERE ENABLED = 1 AND trim(coalesce(BSP_PATH, '')) <> ''
+            ORDER BY NAME COLLATE NOCASE, UID
+            """
+        ).fetchall()
+
+    for row in boards:
+        uid = str(row["UID"] or "").strip()
+        path = str(row["BSP_PATH"] or "").strip()
+        if not uid or not path:
+            raise ValidationError(f"Enabled Board '{row['NAME']}' is missing UID or BSP_PATH in database.db.")
+        resolver.resolve("board", uid, path)
+
+    for row in cards:
+        uid = str(row["UID"] or "").strip()
+        path = str(row["BSP_PATH"] or "").strip()
+        if not uid or not path:
+            raise ValidationError(f"Enabled MCUCard '{row['NAME']}' is missing UID or BSP_PATH in database.db.")
+        resolver.resolve("card", uid, path)
+
+    return len(boards), len(cards)
+
+
 def discover_database(sdk_root: Path, core_root: Path) -> Path:
     env_value = os.environ.get(ENV_DATABASE, "").strip()
     candidates: list[Path] = []
@@ -232,6 +539,13 @@ def discover_database(sdk_root: Path, core_root: Path) -> Path:
 
     candidates.extend(
         [
+            sdk_root / "database.db",
+            sdk_root.parent / "database" / "database.db",
+            sdk_root.parent / "database.db",
+            core_root.parent / "database" / "database.db",
+            core_root.parent / "database.db",
+            Path.cwd() / "database.db",
+            # Legacy filename fallback during migration.
             sdk_root / "database_mikro_sdk_rust.db",
             sdk_root.parent / "database" / "database_mikro_sdk_rust.db",
             sdk_root.parent / "database_mikro_sdk_rust.db",
@@ -259,14 +573,12 @@ def discover_database(sdk_root: Path, core_root: Path) -> Path:
     )
 
 
-def discover_bsp_root(sdk_root: Path, core_root: Path) -> Path:
-    """Find the independently managed BSP package without adding a CLI arg."""
+def discover_legacy_bsp_root(sdk_root: Path, core_root: Path) -> Path | None:
+    """Find a raw/legacy bsp/ tree as an offline fallback."""
     env_value = os.environ.get(ENV_BSP, "").strip()
     candidates: list[Path] = []
-
     if env_value:
         candidates.append(Path(env_value).expanduser())
-
     candidates.extend(
         [
             sdk_root / "bsp",
@@ -275,7 +587,6 @@ def discover_bsp_root(sdk_root: Path, core_root: Path) -> Path:
             Path.cwd() / "bsp",
         ]
     )
-
     seen: set[Path] = set()
     for candidate in candidates:
         resolved = candidate.resolve()
@@ -284,15 +595,309 @@ def discover_bsp_root(sdk_root: Path, core_root: Path) -> Path:
         seen.add(resolved)
         if resolved.is_dir():
             return resolved
+    return None
 
-    rendered = "\n".join(f"  - {candidate.resolve()}" for candidate in candidates)
-    raise ValidationError(
-        "A requested MCU is used by at least one MCU card, so board+card "
-        "validation is mandatory, but the managed BSP package was not found.\n"
-        "Expected the VS Code managed layout or set "
-        f"{ENV_BSP}=/path/to/bsp.\nChecked:\n{rendered}"
-    )
 
+class BspPackageResolver:
+    """Resolve Board/Shield and MCUCard BSPs from their independent packages.
+
+    Resolution order:
+      1. already installed rust-board-packages / rust-card-packages;
+      2. a raw legacy bsp/ tree (useful when validating directly in the repo);
+      3. the fixed GitHub Board/Card package releases, downloaded into a temp cache.
+
+    This mirrors the VS Code extension's split package model while keeping the
+    validator's original three positional arguments unchanged.
+    """
+
+    DEFAULT_REPOSITORY = "IvanRuzavin/Rusty_MikroBUS"
+    BOARD_RELEASE = "rust-board-packages"
+    BOARD_CATALOG = "rust_board_packages.json"
+    CARD_RELEASE = "rust-card-packages"
+    CARD_CATALOG = "rust_card_packages.json"
+
+    def __init__(self, sdk_root: Path, core_root: Path, cache_root: Path):
+        self.sdk_root = sdk_root
+        self.core_root = core_root
+        self.cache_root = cache_root
+        self.legacy_root = discover_legacy_bsp_root(sdk_root, core_root)
+        self.board_root = self._discover_package_root(ENV_BOARD_PACKAGES, "rust-board-packages")
+        self.card_root = self._discover_package_root(ENV_CARD_PACKAGES, "rust-card-packages")
+        self._catalog_cache: dict[str, dict[str, Any]] = {}
+        self._sevenzip: str | None = None
+
+    def _discover_package_root(self, env_name: str, directory_name: str) -> Path | None:
+        configured = os.environ.get(env_name, "").strip()
+        candidates: list[Path] = []
+        if configured:
+            candidates.append(Path(configured).expanduser())
+        candidates.extend(
+            [
+                self.sdk_root.parent / directory_name,
+                self.core_root.parent / directory_name,
+                Path.cwd() / directory_name,
+            ]
+        )
+        seen: set[Path] = set()
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.is_dir():
+                return resolved
+        return None
+
+    @staticmethod
+    def _portable_bsp_path(configured_path: str) -> str:
+        portable = str(configured_path or "").strip().replace("\\", "/").lstrip("/")
+        if portable.casefold().startswith("bsp/"):
+            portable = portable[4:]
+        if not portable or any(part == ".." for part in Path(portable).parts):
+            raise ValidationError(f"Invalid BSP path in database: {configured_path!r}")
+        return portable
+
+    def _raw_file(self, configured_path: str) -> Path | None:
+        if self.legacy_root is None:
+            return None
+        portable = self._portable_bsp_path(configured_path)
+        resolved = (self.legacy_root / portable).resolve()
+        try:
+            resolved.relative_to(self.legacy_root.resolve())
+        except ValueError:
+            return None
+        return resolved if resolved.is_file() else None
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any] | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _local_package_file(
+        self,
+        root: Path | None,
+        entity_type: str,
+        uid: str,
+        configured_path: str,
+        marker_names: tuple[str, ...],
+    ) -> Path | None:
+        if root is None or not root.is_dir():
+            return None
+        wanted_uid = uid.casefold()
+        portable = self._portable_bsp_path(configured_path)
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            marker: dict[str, Any] | None = None
+            for marker_name in marker_names:
+                marker = self._read_json(child / marker_name)
+                if marker:
+                    break
+            if not marker:
+                continue
+            if str(marker.get("entityType", "")).casefold() != entity_type.casefold():
+                continue
+            if str(marker.get("uid", "")).casefold() != wanted_uid:
+                continue
+            relative = str(marker.get("relativeBspPath") or portable).replace("\\", "/")
+            candidate = (child / relative).resolve()
+            try:
+                candidate.relative_to(child.resolve())
+            except ValueError:
+                raise ValidationError(f"Package {child} contains an invalid relativeBspPath: {relative}")
+            if not candidate.is_file():
+                raise ValidationError(f"Installed {entity_type} package for {uid} is missing {relative}: {child}")
+            return candidate
+        return None
+
+    @staticmethod
+    def _repo_env(entity_type: str) -> str:
+        return ENV_CARD_PACKAGES_REPOSITORY if entity_type == "card" else ENV_BOARD_PACKAGES_REPOSITORY
+
+    def _repository(self, entity_type: str) -> str:
+        return os.environ.get(self._repo_env(entity_type), "").strip() or self.DEFAULT_REPOSITORY
+
+    @staticmethod
+    def _release_info(entity_type: str) -> tuple[str, str, str, tuple[str, ...]]:
+        if entity_type == "card":
+            return (
+                BspPackageResolver.CARD_RELEASE,
+                BspPackageResolver.CARD_CATALOG,
+                "card-entity",
+                (".rust-card-installed.json", ".rust-card-package.json"),
+            )
+        return (
+            BspPackageResolver.BOARD_RELEASE,
+            BspPackageResolver.BOARD_CATALOG,
+            "board-entity",
+            (".rust-board-installed.json", ".rust-board-package.json"),
+        )
+
+    @staticmethod
+    def _release_url(repository: str, release_tag: str, asset: str) -> str:
+        return (
+            f"https://github.com/{repository}/releases/download/"
+            f"{urllib.parse.quote(release_tag, safe='')}/{urllib.parse.quote(asset, safe='')}"
+        )
+
+    @staticmethod
+    def _download(url: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        request = urllib.request.Request(url, headers={"User-Agent": "mikrobus-rust-bulk-validator"})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+        except Exception as exc:
+            raise ValidationError(f"Failed to download {url}: {exc}") from exc
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _catalog(self, entity_type: str) -> dict[str, Any]:
+        family = "card" if entity_type == "card" else "board"
+        cached = self._catalog_cache.get(family)
+        if cached is not None:
+            return cached
+        release_tag, catalog_asset, package_model, _markers = self._release_info(entity_type)
+        repository = self._repository(entity_type)
+        local_catalog = self.cache_root / family / catalog_asset
+        if not local_catalog.is_file():
+            self._download(self._release_url(repository, release_tag, catalog_asset), local_catalog)
+        try:
+            catalog = json.loads(local_catalog.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValidationError(f"Invalid {catalog_asset}: {exc}") from exc
+        if not isinstance(catalog, dict) or catalog.get("schemaVersion") != 1 or catalog.get("packageModel") != package_model:
+            raise ValidationError(f"{catalog_asset} has an unsupported schema/packageModel.")
+        packages = catalog.get("packages")
+        if not isinstance(packages, list):
+            raise ValidationError(f"{catalog_asset} does not contain a packages array.")
+        self._catalog_cache[family] = catalog
+        return catalog
+
+    def _sevenzip_executable(self) -> str:
+        if self._sevenzip:
+            return self._sevenzip
+        configured = os.environ.get(ENV_7ZIP, "").strip()
+        if configured:
+            candidate = Path(configured).expanduser().resolve()
+            if not candidate.is_file():
+                raise ValidationError(f"{ENV_7ZIP} points to a missing executable: {candidate}")
+            self._sevenzip = str(candidate)
+            return self._sevenzip
+        for executable in ("7zz", "7z", "7za"):
+            found = shutil.which(executable)
+            if found:
+                self._sevenzip = found
+                return found
+        raise ValidationError(
+            "7-Zip is required to download split Rust Board/MCU Card packages. "
+            f"Install 7z/7zz/7za, set {ENV_7ZIP}, or provide a raw BSP tree via {ENV_BSP}."
+        )
+
+    def _download_package(self, entity_type: str, uid: str, configured_path: str) -> Path:
+        catalog = self._catalog(entity_type)
+        wanted = uid.casefold()
+        matches = [
+            item for item in catalog["packages"]
+            if isinstance(item, dict)
+            and str(item.get("entityType", "")).casefold() == entity_type.casefold()
+            and str(item.get("uid", "")).casefold() == wanted
+        ]
+        if len(matches) != 1:
+            raise ValidationError(
+                f"Expected exactly one published Rust {entity_type} package for UID '{uid}', found {len(matches)}."
+            )
+        spec = matches[0]
+        for key in ("name", "asset", "sha256", "relativeBspPath"):
+            if not str(spec.get(key, "")).strip():
+                raise ValidationError(f"Published {entity_type} package for {uid} is missing '{key}'.")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(spec["sha256"])):
+            raise ValidationError(f"Published {entity_type} package for {uid} has an invalid SHA-256.")
+
+        family = "card" if entity_type == "card" else "board"
+        package_root = self.cache_root / family / "packages" / str(spec["name"])
+        marker_name = ".rust-card-package.json" if entity_type == "card" else ".rust-board-package.json"
+        expected_file = package_root / str(spec["relativeBspPath"])
+        marker = self._read_json(package_root / marker_name)
+        if marker and expected_file.is_file() and str(marker.get("uid", "")).casefold() == wanted:
+            return expected_file
+
+        release_tag, _catalog_asset, _package_model, _markers = self._release_info(entity_type)
+        repository = self._repository(entity_type)
+        archive = self.cache_root / family / "archives" / str(spec["asset"])
+        if not archive.is_file() or self._sha256(archive).casefold() != str(spec["sha256"]).casefold():
+            self._download(self._release_url(repository, release_tag, str(spec["asset"])), archive)
+        actual = self._sha256(archive)
+        if actual.casefold() != str(spec["sha256"]).casefold():
+            raise ValidationError(
+                f"SHA-256 mismatch for {archive.name}: expected {spec['sha256']}, downloaded {actual}."
+            )
+
+        shutil.rmtree(package_root, ignore_errors=True)
+        package_root.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [self._sevenzip_executable(), "x", "-y", str(archive), f"-o{package_root}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if result.returncode != 0:
+            raise ValidationError(f"7-Zip failed extracting {archive.name}:\n{result.stdout}")
+
+        marker = self._read_json(package_root / marker_name)
+        if not marker:
+            raise ValidationError(f"{archive.name} does not contain {marker_name}.")
+        if str(marker.get("entityType", "")).casefold() != entity_type.casefold() or str(marker.get("uid", "")).casefold() != wanted:
+            raise ValidationError(f"{archive.name} contains metadata for a different {entity_type} entity.")
+        expected_file = package_root / str(spec["relativeBspPath"])
+        if not expected_file.is_file():
+            raise ValidationError(f"{archive.name} is missing {spec['relativeBspPath']}.")
+        return expected_file
+
+    def resolve(self, entity_type: str, uid: str, configured_path: str, logger: Logger | None = None) -> Path:
+        type_name = entity_type.casefold()
+        if type_name not in {"board", "card", "shield"}:
+            raise ValidationError(f"Unsupported Rust BSP package entity type: {entity_type}")
+        release_type = "card" if type_name == "card" else type_name
+        root = self.card_root if type_name == "card" else self.board_root
+        _release_tag, _catalog_asset, _package_model, markers = self._release_info(type_name)
+        local = self._local_package_file(root, type_name, uid, configured_path, markers)
+        if local:
+            if logger:
+                logger.write(f"Resolved {type_name} BSP from installed split package: {local}")
+            return local
+
+        raw = self._raw_file(configured_path)
+        if raw:
+            if logger:
+                logger.write(f"Resolved {type_name} BSP from raw/legacy BSP tree: {raw}")
+            return raw
+
+        downloaded = self._download_package(type_name, uid, configured_path)
+        if logger:
+            logger.write(f"Resolved {type_name} BSP from split GitHub package release: {downloaded}")
+        return downloaded
+
+    def description(self) -> str:
+        parts = []
+        if self.board_root:
+            parts.append(f"board={self.board_root}")
+        if self.card_root:
+            parts.append(f"card={self.card_root}")
+        if self.legacy_root:
+            parts.append(f"raw={self.legacy_root}")
+        if not parts:
+            parts.append("on-demand GitHub Board/Card packages")
+        return ", ".join(parts)
 
 def card_config_mcus(config_json: str) -> set[str]:
     """Return MCU names declared by MCUCard.CONFIG_JSON."""
@@ -803,36 +1408,31 @@ def build_mikrobus_rust(board_config: dict[str, Any], board_name: str) -> str:
                         f"// MIKROBUS_{socket}_{signal} is not routed ({reference})."
                     )
         lines.append("")
+
+    # Match the VS Code extension and the C BSP USB_UART_TX/RX convention.
+    # The selected MCU Card has already been merged into board_config, so a
+    # connector reference such as RIGHT_CN.P160 resolves to the concrete GPIO.
+    usb_uart = board_config.get("usb_uart")
+    if isinstance(usb_uart, dict):
+        lines.append("// USB UART")
+        for signal in ("TX", "RX"):
+            reference = usb_uart.get(signal)
+            if reference is None or not str(reference).strip():
+                continue
+            pin = resolve_board_pin(board_config, reference)
+            if pin:
+                lines.append(f"pub const USB_UART_{signal}: pin_name_t = {pin};")
+            else:
+                lines.append(f"// USB_UART_{signal} is not routed ({reference}).")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
-
-
-def resolve_bsp_file(bsp_root: Path, configured_path: str) -> Path:
-    portable = str(configured_path or "").strip().replace("\\", "/").lstrip("/")
-    if not portable:
-        raise ValidationError("The Rust database contains an empty BSP path.")
-    if portable.casefold().startswith("bsp/"):
-        portable = portable[4:]
-
-    resolved = (bsp_root / portable).resolve()
-    try:
-        resolved.relative_to(bsp_root.resolve())
-    except ValueError as exc:
-        raise ValidationError(
-            f"Refusing to read a BSP file outside the managed BSP package: {configured_path}"
-        ) from exc
-    if not resolved.is_file():
-        raise ValidationError(
-            f"Required BSP file was not found: {resolved}. "
-            "Update the Board Support Package."
-        )
-    return resolved
 
 
 def install_board_card_setup(
     staging_root: Path,
     combination: BoardCardCombination,
     mcu: str,
-    bsp_root: Path,
+    bsp_resolver: BspPackageResolver,
     logger: Logger,
 ) -> bool:
     """Create .setup/bsp exactly for a board + MCU-card selection."""
@@ -846,8 +1446,12 @@ def install_board_card_setup(
     selected_bsp_root = staging_root / "bsp"
     selected_bsp_root.mkdir(parents=True, exist_ok=True)
 
-    board_source = resolve_bsp_file(bsp_root, combination.board_bsp_path)
-    card_source = resolve_bsp_file(bsp_root, combination.card_bsp_path)
+    board_source = bsp_resolver.resolve(
+        "board", combination.board_uid, combination.board_bsp_path, logger
+    )
+    card_source = bsp_resolver.resolve(
+        "card", combination.card_uid, combination.card_bsp_path, logger
+    )
     copy_required(board_source, selected_bsp_root / "board.cfg")
     copy_required(card_source, selected_bsp_root / "card.cfg")
 
@@ -903,7 +1507,7 @@ def generate_setup(
     clock_mhz: int,
     logger: Logger,
     board_card: BoardCardCombination | None = None,
-    bsp_root: Path | None = None,
+    bsp_resolver: BspPackageResolver | None = None,
 ) -> tuple[Path, Path, bool]:
     """Mirror generateMcuConfiguration() for direct and board+card setups."""
     mcu = metadata.name
@@ -942,13 +1546,13 @@ def generate_setup(
     mikrobus_generated = False
     try:
         if board_card is not None:
-            if bsp_root is None:
+            if bsp_resolver is None:
                 raise ValidationError(
-                    "Board+card validation requires the managed BSP package."
+                    "Board+card validation requires the split Board/Card BSP package resolver."
                 )
             logger.section("BOARD + MCU CARD BSP")
             mikrobus_generated = install_board_card_setup(
-                staging_root, board_card, mcu, bsp_root, logger
+                staging_root, board_card, mcu, bsp_resolver, logger
             )
 
         core_setup = staging_root / "core"
@@ -1539,7 +2143,7 @@ def write_reports(
     core_root: Path,
     database: Path,
     requested_count: int,
-    bsp_root: Path | None,
+    bsp_description: str | None,
 ) -> None:
     csv_path = report_root / "results.csv"
     json_path = report_root / "results.json"
@@ -1574,7 +2178,7 @@ def write_reports(
         "sdk": str(sdk_root),
         "core": str(core_root),
         "database": str(database),
-        "bsp": str(bsp_root) if bsp_root else None,
+        "bsp_packages": bsp_description,
         "requested_mcus": requested_count,
         "total_checks": len(results),
         "direct_mcu_checks": direct_total,
@@ -1604,7 +2208,7 @@ def write_reports(
         f"SDK:      {sdk_root}",
         f"Core:     {core_root}",
         f"Database: {database}",
-        f"BSP:      {bsp_root if bsp_root else '(not needed/resolved yet)'}",
+        f"BSP packages: {bsp_description or '(not needed/resolved yet)'}",
         "",
     ]
     if stage_counts:
@@ -1649,8 +2253,7 @@ def run_configuration_check(
     logs_root: Path,
     report_root: Path,
     board_card: BoardCardCombination | None,
-    bsp_root: Path | None,
-    bsp_error: str | None,
+    bsp_resolver: BspPackageResolver | None,
 ) -> ValidationResult:
     if board_card is None:
         configuration_type = "mcu"
@@ -1706,10 +2309,8 @@ def run_configuration_check(
                 )
 
             result.failed_stage = "bsp-discovery"
-            if bsp_error:
-                raise ValidationError(bsp_error)
-            if bsp_root is None:
-                raise ValidationError("Managed BSP package was not resolved.")
+            if bsp_resolver is None:
+                raise ValidationError("Rust Board/Card BSP package resolver was not initialized.")
 
         result.failed_stage = "rust-target"
         ensure_rust_target(
@@ -1732,7 +2333,7 @@ def run_configuration_check(
             clock_mhz=clock_mhz,
             logger=logger,
             board_card=board_card,
-            bsp_root=bsp_root,
+            bsp_resolver=bsp_resolver,
         )
         result.setup_generated = True
         result.mikrobus_generated = mikrobus_generated
@@ -1821,36 +2422,7 @@ def metadata_failure_result(
 
 
 def main() -> int:
-    args = parse_args()
-
-    try:
-        sdk_root = require_directory(args.sdk, "Rust SDK")
-        core_root = require_directory(args.core, "Rust core")
-        database = discover_database(sdk_root, core_root)
-        validate_database_schema(database)
-        mcus = load_mcu_list(args.mcus)
-
-        cargo = resolve_executable(ENV_CARGO, "cargo")
-        rustup = resolve_executable(ENV_RUSTUP, "rustup")
-
-        try:
-            timeout = int(os.environ.get(ENV_TIMEOUT, "900"))
-        except ValueError:
-            raise ValidationError(
-                f"{ENV_TIMEOUT} must be an integer number of seconds."
-            )
-
-        if not (sdk_root / "Cargo.toml").is_file():
-            raise ValidationError(f"Rust SDK Cargo.toml not found: {sdk_root / 'Cargo.toml'}")
-        if not (sdk_root / ".cargo" / "template_config.toml").is_file():
-            raise ValidationError(
-                "Rust SDK .cargo/template_config.toml not found: "
-                f"{sdk_root / '.cargo' / 'template_config.toml'}"
-            )
-
-    except ValidationError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 2
+    parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_root = Path.cwd() / f"rust_mcu_validation_{timestamp}"
@@ -1858,35 +2430,74 @@ def main() -> int:
     logs_root.mkdir(parents=True, exist_ok=True)
 
     temp_root = Path(tempfile.mkdtemp(prefix="mikrobus-rust-bulk-"))
-    working_sdk = temp_root / "sdk"
+    working_sdk = temp_root / "sdk-working"
     cargo_target_dir = temp_root / CARGO_TARGET_DIR_NAME
 
-    print("Rust MCU bulk validator")
-    print(f"  SDK:      {sdk_root}")
-    print(f"  Core:     {core_root}")
-    print(f"  Database: {database}")
-    print(f"  MCUs:     {len(mcus)}")
+    try:
+        print("Rust MCU bulk validator")
+        print(f"  Version:  {SCRIPT_VERSION}")
+        print("  Mode:     zero-argument published-environment bootstrap")
+        print(f"  Temp:     {temp_root}")
+        print()
+        print("Bootstrapping General Release, Core packages and database...", flush=True)
+        bootstrap = PublishedEnvironmentBootstrap(temp_root)
+        sdk_root, core_root, database, core_package_count = bootstrap.bootstrap()
+
+        validate_database_schema(database)
+        mcus = load_all_mcus(database)
+        cargo = resolve_executable(ENV_CARGO, "cargo")
+        rustup = resolve_executable(ENV_RUSTUP, "rustup")
+        try:
+            timeout = int(os.environ.get(ENV_TIMEOUT, "900"))
+        except ValueError:
+            raise ValidationError(f"{ENV_TIMEOUT} must be an integer number of seconds.")
+
+        if not (sdk_root / ".cargo" / "template_config.toml").is_file():
+            raise ValidationError(
+                "Published Rust SDK .cargo/template_config.toml not found: "
+                f"{sdk_root / '.cargo' / 'template_config.toml'}"
+            )
+
+        print(f"Published SDK:      {sdk_root}")
+        print(f"Published database: {database}")
+        print(f"Core packages:      {core_package_count} downloaded/verified")
+        print(f"MCUs from database: {len(mcus)}")
+        print()
+
+        print("Creating one disposable SDK working copy...", flush=True)
+        copy_sdk_layers(sdk_root, working_sdk)
+        print("Disposable SDK ready.", flush=True)
+
+        bsp_resolver = BspPackageResolver(
+            sdk_root, core_root, temp_root / ".rust-bsp-package-cache"
+        )
+        print("Preflighting every enabled Board and MCU Card package...", flush=True)
+        board_package_count, card_package_count = preflight_bsp_packages(database, bsp_resolver)
+        bsp_description = (
+            f"{bsp_resolver.description()}; preflight verified "
+            f"{board_package_count} board package(s), {card_package_count} card package(s)"
+        )
+        print(f"Board packages:     {board_package_count} downloaded/verified")
+        print(f"MCU Card packages:  {card_package_count} downloaded/verified")
+        print()
+
+    except ValidationError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return 2
+    except Exception as error:
+        print(f"ERROR: bootstrap failed: {error}", file=sys.stderr)
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return 2
+
     print(f"  Cargo:    {cargo}")
     print(f"  Rustup:   {rustup}")
     print(f"  Reports:  {report_root}")
-    print(f"  Temp:     {temp_root}")
     print()
-
-    try:
-        print("Creating one disposable SDK working copy...", flush=True)
-        copy_sdk_layers(sdk_root, working_sdk)
-        print("Disposable SDK ready.\n", flush=True)
-    except Exception as error:
-        print(f"ERROR: could not prepare working SDK: {error}", file=sys.stderr)
-        shutil.rmtree(temp_root, ignore_errors=True)
-        return 2
 
     results: list[ValidationResult] = []
     rust_targets: dict[str, tuple[bool, str]] = {}
     interrupted = False
-    bsp_root: Path | None = None
-    bsp_error: str | None = None
-    bsp_discovery_attempted = False
 
     try:
         for index, requested_mcu in enumerate(mcus, start=1):
@@ -1902,40 +2513,15 @@ def main() -> int:
                 break
             except Exception as error:
                 log_path = logs_root / f"{index:05d}_{safe_name(requested_mcu)}_metadata.log"
-                result = metadata_failure_result(
-                    requested_mcu, error, log_path, report_root
-                )
+                result = metadata_failure_result(requested_mcu, error, log_path, report_root)
                 results.append(result)
-                print_progress(
-                    index,
-                    len(mcus),
-                    requested_mcu,
-                    f"FAIL Direct MCU [metadata] {error}",
-                )
+                print_progress(index, len(mcus), requested_mcu, f"FAIL Direct MCU [metadata] {error}")
                 write_reports(
-                    report_root,
-                    results,
-                    sdk_root,
-                    core_root,
-                    database,
-                    len(mcus),
-                    bsp_root,
+                    report_root, results, sdk_root, core_root, database, len(mcus), bsp_description
                 )
                 continue
 
-            combinations, cards_without_boards = read_board_card_combinations(
-                database, metadata.name
-            )
-
-            if combinations and not bsp_discovery_attempted:
-                bsp_discovery_attempted = True
-                try:
-                    bsp_root = discover_bsp_root(sdk_root, core_root)
-                    print(f"Resolved BSP package: {bsp_root}")
-                except ValidationError as error:
-                    bsp_error = str(error)
-                    print(f"WARNING: {bsp_error}", file=sys.stderr)
-
+            combinations, cards_without_boards = read_board_card_combinations(database, metadata.name)
             print_progress(
                 index,
                 len(mcus),
@@ -1974,8 +2560,7 @@ def main() -> int:
                         logs_root=logs_root,
                         report_root=report_root,
                         board_card=board_card,
-                        bsp_root=bsp_root,
-                        bsp_error=bsp_error,
+                        bsp_resolver=bsp_resolver,
                     )
                     results.append(result)
                 except KeyboardInterrupt:
@@ -1989,18 +2574,14 @@ def main() -> int:
                         core_root,
                         database,
                         len(mcus),
-                        bsp_root,
+                        bsp_description,
                     )
-
             if interrupted:
                 break
 
     finally:
         keep_temp = os.environ.get(ENV_KEEP_TEMP, "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
+            "1", "true", "yes", "on"
         }
         if keep_temp:
             print(f"\nKeeping temporary workspace because {ENV_KEEP_TEMP}=1:")
@@ -2015,10 +2596,7 @@ def main() -> int:
 
     print()
     print("=" * 72)
-    print(
-        f"Validation complete: {passed} passed, {failed} failed "
-        f"across {len(results)} checks"
-    )
+    print(f"Validation complete: {passed} passed, {failed} failed across {len(results)} checks")
     print(f"  Direct MCU checks:     {direct}")
     print(f"  Board + card checks:   {board_card}")
     print(f"Reports: {report_root}")
