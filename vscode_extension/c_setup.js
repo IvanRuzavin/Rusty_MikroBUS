@@ -3786,11 +3786,21 @@ function xc32GdbArchitecture(gdbPath) {
 
 function codegripCppDebugConfiguration(setup, projectRoot, elf, debugPort, generation, options = {}) {
   const gdbPath = setup.tools?.gdb;
+  const compilerFamily = compilerFamilyForSetup(setup);
+  const gdbName = path.basename(String(gdbPath || '')).toLowerCase();
+  const armTarget = compilerFamily.endsWith('-arm') || /arm(?:-none)?-eabi-gdb/.test(gdbName);
   const setupCommands = [{
     description: 'Allow access to all MCU memory regions',
     text: '-gdb-set mem inaccessible-by-default off',
     ignoreFailures: true
   }];
+  if (armTarget) {
+    setupCommands.push({
+      description: 'Prefer hardware breakpoints for read-only target code',
+      text: '-gdb-set breakpoint auto-hw on',
+      ignoreFailures: true
+    });
+  }
   return {
     type: 'cppdbg',
     request: 'launch',
@@ -3807,6 +3817,11 @@ function codegripCppDebugConfiguration(setup, projectRoot, elf, debugPort, gener
       miDebuggerArgs: `-ex "set architecture ${options.gdbArchitecture}" -ex "set endian little"`
     } : {}),
     miDebuggerServerAddress: `127.0.0.1:${debugPort}`,
+    ...(armTarget ? {
+      targetArchitecture: 'arm',
+      useExtendedRemote: false,
+      hardwareBreakpoints: { require: true }
+    } : {}),
     stopAtEntry: false,
     externalConsole: false,
     // Let the compiler-provided GDB infer the target architecture from the ELF

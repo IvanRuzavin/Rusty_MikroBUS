@@ -478,7 +478,7 @@
       {
         "command": "mikrobusRust.debugCurrentFile",
         "key": "f5",
-        "when": "editorLangId == rust && mikrobusRust.workspaceBound"
+        "when": "editorLangId == rust && mikrobusRust.workspaceBound && !inDebugMode"
       },
       {
         "command": "mikrobusC.build",
@@ -495,7 +495,7 @@
       {
         "command": "mikrobusC.debug",
         "key": "f5",
-        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugAvailable"
+        "when": "mikrobusRust.cSupportEnabled && mikrobusRust.cWorkspaceBound && (editorLangId == c || editorLangId == cpp) && mikrobusRust.cDebugAvailable && !inDebugMode"
       }
     ],
     "debuggers": [

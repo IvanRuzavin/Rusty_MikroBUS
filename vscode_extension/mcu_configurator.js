@@ -2134,6 +2134,12 @@ function rustCodegripCppDebugConfiguration(setup, binding, source, programBinary
     MIMode: 'gdb',
     miDebuggerPath: gdbPath,
     miDebuggerServerAddress: `127.0.0.1:${debugPort}`,
+    // CODEGRIP is an embedded Arm remote target. Force hardware breakpoints so
+    // GDB's temporary stepping/finish breakpoints are never attempted as flash
+    // software breakpoints when the server does not expose a complete memory map.
+    targetArchitecture: 'arm',
+    useExtendedRemote: false,
+    hardwareBreakpoints: { require: true },
     stopAtEntry: false,
     externalConsole: false,
     // CODEGRIP has already programmed the ELF image and starts the MCU halted.
@@ -2145,6 +2151,11 @@ function rustCodegripCppDebugConfiguration(setup, binding, source, programBinary
       {
         description: 'Allow access to all MCU memory regions',
         text: '-gdb-set mem inaccessible-by-default off',
+        ignoreFailures: true
+      },
+      {
+        description: 'Prefer hardware breakpoints for read-only target code',
+        text: '-gdb-set breakpoint auto-hw on',
         ignoreFailures: true
       },
       {
@@ -3241,10 +3252,7 @@ function loadMcuDetail(paths, mcuName) {
       mask: field.mask,
       init: field.init,
       hidden: Boolean(field.hidden),
-      settings: (field.settings || []).map((setting) => ({
-        label: setting.label,
-        value: setting.value
-      }))
+      settings: fieldSettings(field)
     })).filter((field) => !field.hidden)
   })).filter((reg) => reg.fields.length > 0);
 
@@ -3297,6 +3305,44 @@ function parseNumber(value) {
   return 0;
 }
 
+function maskShift(mask) {
+  let value = parseNumber(mask) >>> 0;
+  if (!value) return 0;
+  let shift = 0;
+  while ((value & 1) === 0 && shift < 32) {
+    value >>>= 1;
+    shift += 1;
+  }
+  return shift;
+}
+
+function settingsArrayOptions(field) {
+  const range = field?.settings_array;
+  if (!range || typeof range !== 'object') return [];
+  const min = Number.parseInt(String(range.min_value ?? ''), 10);
+  const max = Number.parseInt(String(range.max_value ?? ''), 10);
+  const mask = parseNumber(field.mask) >>> 0;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min > max || !mask) return [];
+  // Match the C configurator: numeric register ranges are materialized into
+  // already-positioned register bit values before being sent to the webview.
+  if ((max - min) > 4096) return [];
+  const shift = maskShift(mask);
+  const values = [];
+  for (let number = min; number <= max; number += 1) values.push(number);
+  if (range.decrease === true) values.reverse();
+  return values.map((number) => ({
+    label: `${field.label || field.key || 'Value'} = ${number}`,
+    value: ((((number << shift) >>> 0) & mask) >>> 0).toString(16).toUpperCase().padStart(8, '0')
+  }));
+}
+
+function fieldSettings(field) {
+  if (Array.isArray(field?.settings) && field.settings.length) {
+    return field.settings.map((setting) => ({ label: setting.label, value: setting.value }));
+  }
+  return settingsArrayOptions(field);
+}
+
 function buildRegisterHeader(definition, selectedValues, clockMhz) {
   const collected = new Map();
 
@@ -3314,11 +3360,12 @@ function buildRegisterHeader(definition, selectedValues, clockMhz) {
       } else {
         const fieldId = `${regIndex}:${fieldIndex}`;
         const selected = selectedValues[fieldId];
-        const allowed = (field.settings || []).map((setting) => String(setting.value));
+        const settings = fieldSettings(field);
+        const allowed = settings.map((setting) => String(setting.value));
         if (selected !== undefined && allowed.includes(String(selected))) {
           value = selected;
         } else {
-          value = field.init ?? (field.settings && field.settings[0] ? field.settings[0].value : '0x0');
+          value = field.init ?? (settings[0] ? settings[0].value : '0x0');
         }
       }
 
@@ -4126,6 +4173,8 @@ module.exports = {
     readFamilyImplementationMetadata,
     loadMcuDetail,
     buildRegisterHeader,
+    maskShift,
+    settingsArrayOptions,
     generateMcuConfiguration,
     getConfiguredSetupPaths,
     readConfiguredSetupRegistry,

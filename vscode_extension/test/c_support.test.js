@@ -65,6 +65,13 @@ try {
   assert.strictEqual(pllOptions[0].value, '00000C80'); // 50 << 6
   assert.strictEqual(pllOptions[pllOptions.length - 1].value, '00006C00'); // 432 << 6
   assert.strictEqual(cConfigurator.maskShift('00007FC0'), 6);
+  const rustPllOptions = rustMcu.settingsArrayOptions(pllDefinition.config_registers[0].fields[0]);
+  assert.strictEqual(rustPllOptions.length, 383);
+  assert.strictEqual(rustPllOptions[0].value, '00000C80');
+  assert.strictEqual(rustPllOptions[rustPllOptions.length - 1].value, '00006C00');
+  assert.strictEqual(rustMcu.maskShift('00007FC0'), 6);
+  const rustPllHeader = rustMcu.buildRegisterHeader(pllDefinition, { '0:0': '00000C80' }, 216);
+  assert.match(rustPllHeader, /VALUE_RCC_PLLCFGR: u32 = 0x00000C80;/);
 
   const pllRegister = {
     default: '00000000',
@@ -807,6 +814,10 @@ try {
   assert.strictEqual(codegripDebugConfig.launchCompleteCommand, 'exec-continue');
   assert.strictEqual(codegripDebugConfig.stopAtEntry, false);
   assert.ok(codegripDebugConfig.setupCommands.some((item) => item.text === '-gdb-set mem inaccessible-by-default off'));
+  assert.ok(codegripDebugConfig.setupCommands.some((item) => item.text === '-gdb-set breakpoint auto-hw on'));
+  assert.deepStrictEqual(codegripDebugConfig.hardwareBreakpoints, { require: true });
+  assert.strictEqual(codegripDebugConfig.targetArchitecture, 'arm');
+  assert.strictEqual(codegripDebugConfig.useExtendedRemote, false);
   assert.strictEqual(JSON.stringify(codegripDebugConfig).includes('monitor reset halt'), false);
   assert.strictEqual(codegripDebugConfig.__mikrobusCodegripC, true);
   assert.strictEqual(codegripDebugConfig.__mikrobusCodegripGeneration, 'generation-test');
@@ -822,6 +833,8 @@ try {
   assert.strictEqual(xc32CodegripDebugConfig.miDebuggerArgs, undefined);
   assert.strictEqual(xc32CodegripDebugConfig.setupCommands.some((item) => /architecture|endian/i.test(item.text)), false);
   assert.ok(xc32CodegripDebugConfig.setupCommands.some((item) => item.text === '-gdb-set mem inaccessible-by-default off'));
+  assert.strictEqual(xc32CodegripDebugConfig.hardwareBreakpoints, undefined);
+  assert.strictEqual(xc32CodegripDebugConfig.targetArchitecture, undefined);
   const xc32ArchitectureConfig = setup.codegripCppDebugConfiguration({
     name: 'PIC32MZ CODEGRIP probed architecture',
     tools: { gdb: '/toolchain/bin/pic32-gdb' },
@@ -2333,6 +2346,10 @@ endfunction()
   assert.ok(cCompilerManagerHtml.includes('id="installedCount"'));
   assert.ok(cCompilerManagerHtml.includes('id="missingCount"'));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.menus, 'debug/toolBar'), false);
+  const rustF5 = packageJson.contributes.keybindings.find((item) => item.command === 'mikrobusRust.debugCurrentFile' && item.key === 'f5');
+  const cF5 = packageJson.contributes.keybindings.find((item) => item.command === 'mikrobusC.debug' && item.key === 'f5');
+  assert.match(rustF5?.when || '', /!inDebugMode/);
+  assert.match(cF5?.when || '', /!inDebugMode/);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson.contributes.configuration.properties, 'mikrobusRust.dumpVariablesOnStop'), false);
 
   const rustCodegripDebug = rustMcu.rustCodegripCppDebugConfiguration(
@@ -2349,6 +2366,10 @@ endfunction()
   assert.strictEqual(rustCodegripDebug.MIMode, 'gdb');
   assert.strictEqual(rustCodegripDebug.miDebuggerServerAddress, '127.0.0.1:4242');
   assert.strictEqual(rustCodegripDebug.launchCompleteCommand, 'exec-continue');
+  assert.deepStrictEqual(rustCodegripDebug.hardwareBreakpoints, { require: true });
+  assert.strictEqual(rustCodegripDebug.targetArchitecture, 'arm');
+  assert.strictEqual(rustCodegripDebug.useExtendedRemote, false);
+  assert.ok(rustCodegripDebug.setupCommands.some((item) => item.text === '-gdb-set breakpoint auto-hw on'));
   assert.strictEqual(rustCodegripDebug.__mikrobusCodegripRust, true);
   assert.strictEqual(rustCodegripDebug.__mikrobusRustSource, '/tmp/project/main.rs');
   assert.strictEqual(rustMcu.isCodegripRestartRequest({ type: 'request', command: 'restart' }), true);
