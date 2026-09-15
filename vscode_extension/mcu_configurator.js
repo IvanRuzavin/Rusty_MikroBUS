@@ -843,6 +843,22 @@ function buildMikrobusRust(boardConfig, routingConfig, boardName, shieldName) {
     }
     lines.push('');
   }
+
+  // USB UART belongs to the board itself, not to an optional shield routing.
+  // Connector references are resolved after the selected MCU Card overlay has
+  // been merged into boardConfig, matching the C BSP USB_UART_TX/RX behavior.
+  const usbUart = boardConfig?.usb_uart;
+  if (usbUart && typeof usbUart === 'object' && !Array.isArray(usbUart)) {
+    lines.push('// USB UART');
+    for (const signal of ['TX', 'RX']) {
+      const reference = usbUart[signal];
+      if (reference === undefined || reference === null || String(reference).trim() === '') continue;
+      const pin = resolveBoardPin(boardConfig, reference);
+      if (pin) lines.push(`pub const USB_UART_${signal}: pin_name_t = ${pin};`);
+      else lines.push(`// USB_UART_${signal} is not routed (${reference}).`);
+    }
+    lines.push('');
+  }
   return `${lines.join('\n').trimEnd()}\n`;
 }
 

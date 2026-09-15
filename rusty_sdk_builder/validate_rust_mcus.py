@@ -546,12 +546,12 @@ def discover_database(sdk_root: Path, core_root: Path) -> Path:
             core_root.parent / "database.db",
             Path.cwd() / "database.db",
             # Legacy filename fallback during migration.
-            sdk_root / "database_mikro_sdk_rust.db",
-            sdk_root.parent / "database" / "database_mikro_sdk_rust.db",
-            sdk_root.parent / "database_mikro_sdk_rust.db",
-            core_root.parent / "database" / "database_mikro_sdk_rust.db",
-            core_root.parent / "database_mikro_sdk_rust.db",
-            Path.cwd() / "database_mikro_sdk_rust.db",
+            sdk_root / "database.db",
+            sdk_root.parent / "database" / "database.db",
+            sdk_root.parent / "database.db",
+            core_root.parent / "database" / "database.db",
+            core_root.parent / "database.db",
+            Path.cwd() / "database.db",
         ]
     )
 

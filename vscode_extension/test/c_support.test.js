@@ -939,10 +939,18 @@ try {
   }), false);
 
   const nativeBoardConfig = {
+    usb_uart: {
+      TX: 'USB.TX',
+      RX: 'USB.RX'
+    },
     headers: {
       MB1: {
         AN: 'GPIO_A0',
         RST: 'GPIO_B1'
+      },
+      USB: {
+        TX: 'GPIO_A9',
+        RX: 'GPIO_A10'
       }
     },
     mikrobus: {
@@ -959,6 +967,8 @@ try {
   assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_AN: pin_name_t = GPIO_A0;'));
   assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_RST: pin_name_t = GPIO_B1;'));
   assert.ok(nativeBoardRust.includes('pub const MIKROBUS_1_CS: pin_name_t = GPIO_C2;'));
+  assert.ok(nativeBoardRust.includes('pub const USB_UART_TX: pin_name_t = GPIO_A9;'));
+  assert.ok(nativeBoardRust.includes('pub const USB_UART_RX: pin_name_t = GPIO_A10;'));
   assert.strictEqual(nativeBoardRust.includes('with undefined'), false);
 
   const noMikrobusConfig = { headers: { CN1: { A: 'GPIO_A0' } } };
@@ -2259,7 +2269,7 @@ endfunction()
   assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.19');
+  assert.strictEqual(packageJson.version, '0.8.20');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');

@@ -10,7 +10,7 @@ on:
       - 'scripts/pack_rust_core_packages.py'
       - '.github/workflows/rust-core-packages.yml'
       - 'database/**'
-      - 'database_mikro_sdk_rust.db'
+      - 'database.db'
 
 permissions:
   contents: write
@@ -55,8 +55,8 @@ jobs:
           set -euo pipefail
 
           for candidate in \
-            database/database_mikro_sdk_rust.db \
-            database_mikro_sdk_rust.db
+            database/database.db \
+            database.db
           do
             if [[ -f "$candidate" ]]; then
               echo "path=$candidate" >> "$GITHUB_OUTPUT"
@@ -66,24 +66,24 @@ jobs:
           done
 
           mkdir -p .package-input
-          echo "Database not present in the checkout; locating database_mikro_sdk_rust.db in ${DATABASE_REPOSITORY}."
+          echo "Database not present in the checkout; locating database.db in ${DATABASE_REPOSITORY}."
           database_tag="$(gh api --paginate "repos/${DATABASE_REPOSITORY}/releases" \
-            --jq '.[] | select(.tag_name != "rust-core-packages") | select(any(.assets[]; .name == "database_mikro_sdk_rust.db")) | .tag_name' \
+            --jq '.[] | select(.tag_name != "rust-core-packages") | select(any(.assets[]; .name == "database.db")) | .tag_name' \
             | head -n 1)"
 
           if [[ -z "$database_tag" ]]; then
-            echo "Could not find database_mikro_sdk_rust.db in any published release of ${DATABASE_REPOSITORY}." >&2
+            echo "Could not find database.db in any published release of ${DATABASE_REPOSITORY}." >&2
             exit 1
           fi
 
           echo "Using database from release: $database_tag"
           gh release download "$database_tag" \
             --repo "$DATABASE_REPOSITORY" \
-            --pattern 'database_mikro_sdk_rust.db' \
+            --pattern 'database.db' \
             --dir .package-input
 
-          test -s .package-input/database_mikro_sdk_rust.db
-          echo "path=.package-input/database_mikro_sdk_rust.db" >> "$GITHUB_OUTPUT"
+          test -s .package-input/database.db
+          echo "path=.package-input/database.db" >> "$GITHUB_OUTPUT"
 
       - name: Build per-system-library packages
         shell: bash

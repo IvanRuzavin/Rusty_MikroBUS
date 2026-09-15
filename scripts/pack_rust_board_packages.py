@@ -44,7 +44,7 @@ class Entity:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bsp", default="bsp", help="Path to the BSP source directory.")
-    parser.add_argument("--database", required=True, help="Path to database_mikro_sdk_rust.db.")
+    parser.add_argument("--database", required=True, help="Path to database.db.")
     parser.add_argument("--output", default="dist/rust-board-packages")
     parser.add_argument("--sevenzip", default="")
     return parser.parse_args()

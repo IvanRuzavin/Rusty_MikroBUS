@@ -9,7 +9,7 @@ on:
       - 'scripts/pack_rust_card_packages.py'
       - '.github/workflows/rust-card-packages.yml'
       - 'database/**'
-      - 'database_mikro_sdk_rust.db'
+      - 'database.db'
 
 permissions:
   contents: write
@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for candidate in database/database_mikro_sdk_rust.db database_mikro_sdk_rust.db; do
+          for candidate in database/database.db database.db; do
             if [[ -f "$candidate" ]]; then
               echo "path=$candidate" >> "$GITHUB_OUTPUT"
               exit 0
@@ -57,12 +57,12 @@ jobs:
 
           mkdir -p .package-input
           database_tag="$(gh api --paginate "repos/${DATABASE_REPOSITORY}/releases?per_page=100" \
-            --jq '.[] | select(.tag_name != "rust-core-packages" and .tag_name != "rust-bsp-packages" and .tag_name != "rust-board-packages" and .tag_name != "rust-card-packages") | select(any(.assets[]; .name == "database_mikro_sdk_rust.db")) | .tag_name' \
+            --jq '.[] | select(.tag_name != "rust-core-packages" and .tag_name != "rust-bsp-packages" and .tag_name != "rust-board-packages" and .tag_name != "rust-card-packages") | select(any(.assets[]; .name == "database.db")) | .tag_name' \
             | head -n1)"
-          test -n "$database_tag" || { echo 'database_mikro_sdk_rust.db not found in repository or releases' >&2; exit 1; }
-          gh release download "$database_tag" --repo "$DATABASE_REPOSITORY" --pattern database_mikro_sdk_rust.db --dir .package-input
-          test -s .package-input/database_mikro_sdk_rust.db
-          echo 'path=.package-input/database_mikro_sdk_rust.db' >> "$GITHUB_OUTPUT"
+          test -n "$database_tag" || { echo 'database.db not found in repository or releases' >&2; exit 1; }
+          gh release download "$database_tag" --repo "$DATABASE_REPOSITORY" --pattern database.db --dir .package-input
+          test -s .package-input/database.db
+          echo 'path=.package-input/database.db' >> "$GITHUB_OUTPUT"
 
       - name: Build MCU Card packages
         run: |

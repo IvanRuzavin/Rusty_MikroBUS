@@ -10,7 +10,7 @@ Example:
     core/arm/stm32/system/system_stm32f_2xx
         -> arm_stm32f_2xx.7z
 
-The MCU -> SYSTEM_LIB/FAMILY relationship comes from database_mikro_sdk_rust.db,
+The MCU -> SYSTEM_LIB/FAMILY relationship comes from database.db,
 so new architectures/platforms are discovered from the core tree rather than
 being hard-coded in this script.
 """
@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--database",
         required=True,
-        help="Path to database_mikro_sdk_rust.db used to map MCUs to SYSTEM_LIB.",
+        help="Path to database.db used to map MCUs to SYSTEM_LIB.",
     )
     parser.add_argument("--output", default="dist/rust-core-packages", help="Output directory.")
     parser.add_argument(
