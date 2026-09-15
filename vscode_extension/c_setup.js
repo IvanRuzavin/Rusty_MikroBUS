@@ -1420,7 +1420,7 @@ function infrastructureLocations(installed) {
   const preinitFile = values.map((entry) => findRecursive(entry.root, (_candidate, name) => name === 'preinit.c', 8)).find(Boolean);
   const cmakeUtils = cmakeModuleFile ? path.dirname(cmakeModuleFile) : undefined;
   const testLib = testFile ? path.dirname(path.dirname(testFile)) : undefined;
-  const preinit = preinitFile ? path.dirname(path.dirname(preinitFile)).replace(/\\/g, '/') : undefined;
+  const preinit = preinitFile ? path.dirname(path.dirname(preinitFile)) : undefined;
   return { cmakeModuleFile, cmakeUtils, testLib, preinit };
 }
 
