@@ -15,6 +15,7 @@ const rfp = require('./c_rfp_backend');
 const tiXds110 = require('./c_ti_xds110_backend');
 const cmakeVisibility = require('./c_cmake_visibility');
 const microchip = require('./c_microchip_backend');
+const optionalExtensions = require('./optional_extensions');
 const { openCConfigurator } = require('./c_configurator');
 const {
   discoverUsbCodegrips,
@@ -40,6 +41,42 @@ function metadataMcuName(metadata = {}) {
 
 function setupMcuName(setup = {}) {
   return metadataMcuName(setup.metadata || {});
+}
+
+function cSetupExtensionRequirements(setup = {}) {
+  const programmer = setup?.metadata?.programmer || {};
+  const uid = String(programmer.uid || setup?.selection?.programmerUid || '').trim().toLowerCase();
+  const requirements = [];
+
+  if (uid === 'segger_jlink') {
+    requirements.push(optionalExtensions.EXTENSIONS.CORTEX_DEBUG);
+  } else if (uid === tiXds110.TI_XDS110_PROGRAMMER_UID) {
+    // TI Embedded Debug provides the managed OpenOCD/GDB payload used for
+    // program/erase. Cortex-Debug owns the actual debug-adapter UI/session.
+    requirements.push(
+      optionalExtensions.EXTENSIONS.TI_EMBEDDED_DEBUG,
+      optionalExtensions.EXTENSIONS.CORTEX_DEBUG
+    );
+  } else if (microchip.isMicrochipProgrammer(programmer)) {
+    // The current MPLAB debug-adapter stack is split into Services, Platform
+    // and the actual DA extension. Program/erase/debug all use this stack.
+    requirements.push(
+      optionalExtensions.EXTENSIONS.MPLAB_SERVICES,
+      optionalExtensions.EXTENSIONS.MPLAB_PLATFORM,
+      optionalExtensions.EXTENSIONS.MPLAB_DEBUG
+    );
+  } else if (uid === 'codegrip') {
+    // CODEGRIP flash/erase does not need cppdbg. Install C/C++ only for setup
+    // combinations where CODEGRIP debugging is actually supported.
+    const family = compilerFamilyForSetup(setup);
+    if (!isMikroCFamily(family) && !/^xc(?:8|16|32)$/.test(family)) {
+      requirements.push(optionalExtensions.EXTENSIONS.CPPTOOLS);
+    }
+  }
+
+  // RFP itself does not require Renesas Debug. That extension is installed
+  // only if an RX/RL78 E2/E2 Lite debug session is actually requested.
+  return optionalExtensions._test.uniqueRequirements(requirements);
 }
 const C_BUILD_SUPPORT_VERSION = 66;
 const output = vscode.window.createOutputChannel('MikroBUS C');
@@ -2213,6 +2250,11 @@ async function createSetupFromSelection(context, selection) {
       reconfiguredAt: existing ? new Date().toISOString() : undefined
     };
 
+    await optionalExtensions.ensureExtensionsForSetup(
+      cSetupExtensionRequirements(setup),
+      `Installing VS Code support required by ${metadata.programmer?.name || selection.programmerUid || 'the selected programmer'}...`
+    );
+
     // Reconfiguration must not reuse CMake caches/libraries generated for the
     // previous clock/register/output/programmer selection. Keep setup.json and
     // its stable ID, but rebuild all generated content from scratch.
@@ -3775,16 +3817,12 @@ function renesasRfpDebugConfiguration(setup, projectRoot, elf, profile, generati
 }
 
 async function ensureRenesasDebugExtension(deviceFamily = 'Renesas') {
-  const extension = vscode.extensions?.getExtension(rfp.RENESAS_DEBUG_EXTENSION_ID);
-  if (!extension) {
-    const family = String(deviceFamily || 'Renesas').toUpperCase();
-    const supportFiles = family === 'RL78' ? 'Renesas RL78 Support Files' : family === 'RX' ? 'Renesas RX Support Files' : 'Renesas device-family Support Files';
-    throw new Error(
-      `${family} E2/E2 Lite debugging requires the Renesas Debug extension (${rfp.RENESAS_DEBUG_EXTENSION_ID}). ` +
-      `Install/enable it and install the ${supportFiles} through Renesas Platform → Quick Install.`
-    );
-  }
-  await extension.activate();
+  const family = String(deviceFamily || 'Renesas').toUpperCase();
+  const extension = await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.RENESAS_DEBUG);
+  const supportFiles = family === 'RL78' ? 'Renesas RL78 Support Files' : family === 'RX' ? 'Renesas RX Support Files' : 'Renesas device-family Support Files';
+  // The VS Code extension can be installed lazily, but Renesas' family support
+  // files/USB driver are external payloads managed by Renesas Platform.
+  output.appendLine(`Renesas ${family} debug extension ready. Ensure ${supportFiles} and the E2/E2 Lite USB driver are installed through Renesas Platform → Quick Install.`);
   return extension;
 }
 
@@ -3907,6 +3945,7 @@ async function debugWorkspace(context, debugOptions = {}) {
     entryBreakpoint = ensureCMainEntryBreakpoint(projectRoot);
     let configuration;
     if (setup.metadata.programmer.uid === 'segger_jlink') {
+      await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.CORTEX_DEBUG);
       // Program the exact generated HEX first, then let Cortex-Debug own the
       // J-Link GDB server process. Native servertype=jlink is important here:
       // VS Code Restart/Stop can then restart/terminate the server cleanly.
@@ -3926,6 +3965,10 @@ async function debugWorkspace(context, debugOptions = {}) {
         __mikrobusJlink: true, __mikrobusCDebugInstance: debugInstanceId, __mikrobusCDebug: true
       };
     } else if (setup.metadata.programmer.uid === tiXds110.TI_XDS110_PROGRAMMER_UID) {
+      await optionalExtensions.ensureExtensions([
+        optionalExtensions.EXTENSIONS.TI_EMBEDDED_DEBUG,
+        optionalExtensions.EXTENSIONS.CORTEX_DEBUG
+      ]);
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       configuration = tiXds110.debugConfiguration(setup, projectRoot, elf, debugInstanceId);
       output.appendLine(`Starting TI XDS110/OpenOCD debug for ${setupMcuName(setup)}.`);
@@ -3967,11 +4010,7 @@ async function debugWorkspace(context, debugOptions = {}) {
         if (!setup.programmerProfile) return;
         writeJsonAtomic(setupFile(context, setup.id), setup);
       }
-      const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
-      if (!cppTools) {
-        throw new Error('CODEGRIP debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
-      }
-      await cppTools.activate();
+      await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.CPPTOOLS);
       const runtime = programmerRuntime(context, setup);
       const family = compilerFamilyForSetup(setup);
       if (/^xc(?:8|16|32)$/.test(family) && !setup.tools?.gdb) {
@@ -4523,6 +4562,7 @@ module.exports = {
     rl78G24ServerArgs,
     renesasRl78DirectCppDebugConfiguration,
     cDebugAvailability,
+    cSetupExtensionRequirements,
     isSetupDebugAvailable,
     isCodegripRestartRequest,
     isCodegripFinalStopRequest,

@@ -19,6 +19,7 @@ const { ensureRustCorePackage } = require('./rust_core_packages');
 const { ensureRustBoardPackage, ensureRustShieldPackage } = require('./rust_board_packages');
 const { ensureRustCardPackage } = require('./rust_card_packages');
 const { materializeRustBspPackages } = require('./rust_entity_packages');
+const optionalExtensions = require('./optional_extensions');
 
 let mcuPanel;
 let outputChannel;
@@ -1046,6 +1047,15 @@ function isCodegripProgrammer(setup) {
 
 function isJlinkProgrammer(setup) {
   return /j[-_ ]?link|segger/i.test(`${setup?.programmerUid || ''} ${setup?.programmerName || ''}`);
+}
+
+function rustSetupExtensionRequirements(programmer = {}) {
+  const identity = `${programmer.uid || programmer.programmerUid || ''} ${programmer.name || programmer.programmerName || ''}`;
+  if (/codegrip/i.test(identity)) return [optionalExtensions.EXTENSIONS.CPPTOOLS];
+  if (/j[-_ ]?link|segger/i.test(identity)) return [optionalExtensions.EXTENSIONS.CORTEX_DEBUG];
+  // probe-rs has a native DAP fallback and therefore has no mandatory VS Code
+  // extension dependency. cppdbg is used only opportunistically when present.
+  return [];
 }
 
 function findLocalJlinkUsbProbes(sysfsRoot = '/sys/bus/usb/devices') {
@@ -2193,11 +2203,7 @@ async function debugCurrentRustFile(context, debugOptions = {}) {
 
   const { programBinary } = await buildCurrentRustSourceForDebug(binding, setup, source, channel);
   if (isCodegripProgrammer(setup)) {
-    const cppTools = vscode.extensions.getExtension('ms-vscode.cpptools');
-    if (!cppTools) {
-      throw new Error('CODEGRIP Rust debugging requires the Microsoft C/C++ extension (ms-vscode.cpptools). Install it and reload VS Code.');
-    }
-    await cppTools.activate();
+    await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.CPPTOOLS);
     const gdbPath = resolveArmGccExecutable(context, 'arm-none-eabi-gdb');
     const entry = ensureEntryBreakpoint(source);
     channel.appendLine(`Debug source: ${source}`);
@@ -2259,11 +2265,7 @@ async function debugCurrentRustFile(context, debugOptions = {}) {
   const nativeJlink = shouldUseNativeJlink(setup);
 
   if (nativeJlink) {
-    const cortexDebug = vscode.extensions.getExtension('marus25.cortex-debug');
-    if (!cortexDebug) {
-      throw new Error('SEGGER J-Link debugging requires the Cortex-Debug extension (marus25.cortex-debug). Install it and reload VS Code.');
-    }
-    await cortexDebug.activate();
+    await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.CORTEX_DEBUG);
     const tools = resolveJlinkTools();
     if (!tools.gdbServer) {
       throw new Error('J-Link GDB Server was not found. Set mikrobusRust.jlinkGdbServerPath or install SEGGER J-Link.');
@@ -3646,6 +3648,10 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   if (!selectedProgrammer) {
     throw new Error(`Select a supported programmer for ${mcuName} before generating the configuration.`);
   }
+  await optionalExtensions.ensureExtensionsForSetup(
+    rustSetupExtensionRequirements(selectedProgrammer),
+    `Installing VS Code support required by ${selectedProgrammer.name || selectedProgrammer.uid}...`
+  );
   // CODEGRIP USB discovery is optional while building a reusable setup.
   // The setup contains the selected MCU, shared server path and exact device
   // pack(s); a physical CODEGRIP is resolved lazily when Flash/Debug/Erase is
@@ -4248,6 +4254,7 @@ module.exports = {
     isProbeRsProgrammer,
     isCodegripProgrammer,
     isJlinkProgrammer,
+    rustSetupExtensionRequirements,
     findLocalJlinkUsbProbes,
     shouldUseNativeJlink,
     normalizeJlinkDeviceName,

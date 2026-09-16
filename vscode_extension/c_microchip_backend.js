@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 const packageCatalog = require('./c_package_catalog');
+const optionalExtensions = require('./optional_extensions');
 
 const MPLAB_SERVICES_EXTENSION_ID = 'Microchip.mplab-extensions-core';
 const MPLAB_PLATFORM_EXTENSION_ID = 'Microchip.mplab-extensions-platforms';
@@ -317,16 +318,7 @@ async function ensureLinuxUsbAccess(setup) {
 }
 
 async function ensureExtension(extensionId, label) {
-  let extension = vscode.extensions.getExtension(extensionId);
-  if (!extension) {
-    try {
-      await vscode.commands.executeCommand('workbench.extensions.installExtension', extensionId);
-    } catch {}
-    extension = vscode.extensions.getExtension(extensionId);
-  }
-  if (!extension) throw new Error(`${label} (${extensionId}) is required. Install it and reload VS Code.`);
-  await extension.activate();
-  return extension;
+  return optionalExtensions.installExtension({ id: extensionId, label });
 }
 
 async function ensureDebugExtension(setup) {

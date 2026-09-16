@@ -5,11 +5,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
+const optionalExtensions = require('./optional_extensions');
 
 const TI_XDS110_PROGRAMMER_UID = 'ti_xds110';
 const TI_EMBEDDED_DEBUG_EXTENSION_ID = 'ti-development-tools.ti-embedded-debug';
 const XDS110_INTERFACE_CFG = './interface/xds110.cfg';
 const MSPM0_LAUNCHPAD_CFG = './board/ti_mspm0_launchpad.cfg';
+
+async function ensureExtension() {
+  return optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.TI_EMBEDDED_DEBUG);
+}
 
 function syntheticProgrammer() {
   return {
@@ -179,6 +184,7 @@ function runOpenOcd(tools, commands, options = {}) {
 
 async function program(setup, image, options = {}) {
   if (!image || !fs.existsSync(image)) throw new Error(`TI programming image does not exist: ${image}`);
+  await ensureExtension();
   const tools = resolveTools(setup);
   options.onStatus?.('Connecting to XDS110...');
   await runOpenOcd(tools, [
@@ -193,6 +199,7 @@ async function program(setup, image, options = {}) {
 }
 
 async function erase(setup, options = {}) {
+  await ensureExtension();
   const tools = resolveTools(setup);
   options.onStatus?.('Connecting to XDS110...');
   await runOpenOcd(tools, [
@@ -244,6 +251,7 @@ module.exports = {
   syntheticProgrammer,
   isMspm0Device,
   resolveTools,
+  ensureExtension,
   program,
   erase,
   debugConfiguration,

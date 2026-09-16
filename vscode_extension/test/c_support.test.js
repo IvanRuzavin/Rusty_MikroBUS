@@ -50,6 +50,7 @@ try {
   const tiXds110 = tiXds110Module._test;
 
   const extensionTest = require('../extension')._test;
+  const optionalExtensions = require('../optional_extensions');
 
   // config_registers settings_array fields must be materialized into real
   // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
@@ -2328,12 +2329,48 @@ endfunction()
   assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.20');
+  assert.strictEqual(packageJson.version, '0.8.21');
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');
-  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-core-da'));
-  assert.ok(packageJson.extensionDependencies.includes('ti-development-tools.ti-embedded-debug'));
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(packageJson, 'extensionDependencies'), false);
+  assert.deepStrictEqual(
+    optionalExtensions._test.uniqueRequirements([
+      optionalExtensions.EXTENSIONS.CPPTOOLS,
+      optionalExtensions.EXTENSIONS.CPPTOOLS,
+      optionalExtensions.EXTENSIONS.CORTEX_DEBUG
+    ]).map((item) => item.id),
+    ['ms-vscode.cpptools', 'marus25.cortex-debug']
+  );
+  assert.deepStrictEqual(rustMcu.rustSetupExtensionRequirements({ uid: 'PROBE_RS', name: 'probe-rs' }), []);
+  assert.deepStrictEqual(
+    rustMcu.rustSetupExtensionRequirements({ uid: 'MIKROE_CODEGRIP', name: 'CODEGRIP' }).map((item) => item.id),
+    ['ms-vscode.cpptools']
+  );
+  assert.deepStrictEqual(
+    rustMcu.rustSetupExtensionRequirements({ uid: 'SEGGER_JLINK', name: 'SEGGER J-Link' }).map((item) => item.id),
+    ['marus25.cortex-debug']
+  );
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'segger_jlink' }, compiler: { uid: 'gcc_arm_none_eabi' } } }).map((item) => item.id),
+    ['marus25.cortex-debug']
+  );
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'ti_xds110' }, compiler: { uid: 'gcc_arm_none_eabi' } } }).map((item) => item.id),
+    ['ti-development-tools.ti-embedded-debug', 'marus25.cortex-debug']
+  );
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'codegrip' }, compiler: { uid: 'gcc_arm_none_eabi' } } }).map((item) => item.id),
+    ['ms-vscode.cpptools']
+  );
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'codegrip' }, compiler: { uid: 'mikrocarm' } } }),
+    []
+  );
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'renesas_rfp' }, compiler: { uid: 'rx-elf-gcc' } } }),
+    []
+  );
   assert.strictEqual(tiXds110Module.isMspm0Device({ uid: 'MSPM0G3507' }), true);
   assert.strictEqual(tiXds110Module.isMspm0Device({ familyUid: 'MSPM0L13XX' }), true);
   assert.strictEqual(tiXds110Module.isMspm0Device({ uid: 'STM32F756ZG' }), false);
@@ -2341,8 +2378,6 @@ endfunction()
   const tiBackendSource = fs.readFileSync(path.join(__dirname, '..', 'c_ti_xds110_backend.js'), 'utf8');
   assert.match(tiBackendSource, /flash erase_sector 0 0 last/);
   assert.doesNotMatch(tiBackendSource, /['"]mspm0_mass_erase['"]/);
-  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-extensions-core'));
-  assert.ok(packageJson.extensionDependencies.includes('Microchip.mplab-extensions-platforms'));
   assert.ok(packageJson.contributes.commands.some((item) =>
     item.command === 'mikrobusC.debugUnavailableXcCodegrip' &&
     item.enablement === 'false' && /Microchip programmers/.test(item.title)));
@@ -2451,7 +2486,6 @@ endfunction()
   assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(mcuVendorFilter, state.mcus)'));
   assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(boardVendorFilter, state.boards)'));
   assert.ok(cConfiguratorClientSourceForFilters.includes('populateVendorFilter(boardDeviceVendorFilter, state.boardDevices)'));
-  assert.ok(packageJson.extensionDependencies.includes('RenesasElectronicsCorporation.renesas-debug'));
   assert.strictEqual(Boolean(packageJson.contributes?.configuration?.properties?.['mikrobusRust.rfpCliPath']), false);
   assert.ok(configuratorSource.includes('bareMetalOnly'));
   assert.ok(configuratorSource.includes('bareMetalRecommended'));

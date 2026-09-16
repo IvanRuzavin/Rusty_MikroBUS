@@ -20,6 +20,19 @@ It is designed around the MIKROE/NECTO package ecosystem and mikroBUS hardware m
 
 ---
 
+## Optional VS Code extensions are installed on demand
+
+Installing **MikroBUS Embedded Tools** no longer installs every supported vendor/debug extension up front. Optional VS Code integrations are resolved lazily from the selected setup/programmer:
+
+- **probe-rs**: no additional VS Code extension is mandatory; native probe-rs DAP remains the fallback debug path.
+- **SEGGER J-Link**: installs **Cortex-Debug** when a J-Link setup is created (and re-checks it on first debug).
+- **CODEGRIP**: installs **Microsoft C/C++** only for Rust CODEGRIP setups and C combinations where CODEGRIP debugging is supported.
+- **TI XDS110**: installs **TI Embedded Debug** and **Cortex-Debug** for XDS110 setups.
+- **Microchip PICkit/ICD/EDBG/PKOB/Power Debugger**: installs the MPLAB Services, Platform and Debug Adapter extensions for those setups.
+- **Renesas RFP**: plain flash/erase does not install Renesas Debug. **Renesas Debug** is installed only when an RX/RL78 E2/E2 Lite debug path is actually used. External Renesas family support files and USB drivers are still managed through Renesas Platform.
+
+The same checks run again at first use, so a setup copied to another machine can repair any missing optional extension automatically.
+
 # Rust support
 
 Rust projects use Cargo/rustup together with the generated MCU core, linker, startup, pin-mapping and mikroSDK configuration for the selected device.
