@@ -81,7 +81,6 @@ fn main() -> ! {
             Delay_ms(1_000);
         }
 
-        if let Some(uart) = log_uart.as_mut() { let _ = uart_print(uart, " Drawing objects example\r\n"); }
         let _ = display.fill_screen(COLOR_BLACK);
         Delay_ms(1_000);
         let _ = display.draw_line(Point { x: 0, y: 0 }, Point { x: 239, y: 239 }, COLOR_BLUE);

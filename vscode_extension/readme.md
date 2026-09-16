@@ -30,6 +30,7 @@ Installing **MikroBUS Embedded Tools** no longer installs every supported vendor
 - **TI XDS110**: installs **TI Embedded Debug** and **Cortex-Debug** for XDS110 setups.
 - **Microchip PICkit/ICD/EDBG/PKOB/Power Debugger**: installs the MPLAB Services, Platform and Debug Adapter extensions for those setups.
 - **Renesas RFP**: plain flash/erase does not install Renesas Debug. **Renesas Debug** is installed only when an RX/RL78 E2/E2 Lite debug path is actually used. External Renesas family support files and USB drivers are still managed through Renesas Platform.
+- **Toshiba CMSIS-DAP (C only)**: installs **Cortex-Debug** for TMPM3H/TMPM4K/TMPM4L C setups. A private pyOCD environment is prepared lazily when programming or debugging is first used; the Toshiba CMSIS pack is resolved from the selected C Core package.
 
 The same checks run again at first use, so a setup copied to another machine can repair any missing optional extension automatically.
 
@@ -106,6 +107,7 @@ For **Microchip XC8/XC16/XC32**, MCU JSON files that expose symbolic `config_wor
 | **Microchip ICD 4** | ✅ | ✅ | Uses the official **Debug Adapter for MPLAB** and automatic connected-tool discovery. |
 | **Microchip PKOB4 / Power Debugger / EDBG / PICkit Basic mappings** | ✅ | ✅ | Exposed when the selected database row maps the tool-support package to the MCU/compiler; programming/erase/debug use the MPLAB adapter backend and connected-tool discovery. |
 | **SEGGER J-Link** | ✅ | ✅ | Uses J-Link Commander / J-Link GDB Server where supported. |
+| **Toshiba CMSIS-DAP (on-board)** | ✅ | ✅ | **C only.** Offered for the TMPM3H, TMPM4K and TMPM4L Cortex-M families. Uses pyOCD with the CMSIS pack already present in the selected C Core package and Cortex-Debug for the VS Code debug UI. |
 | **Renesas Flash Programmer (RFP)** | ✅ | Conditional | UART programming is supported. Hardware debugging is enabled only for **E2** and **E2 Lite** profiles. |
 | **Renesas E2 / E2 Lite** | ✅ | ✅ | RL78/RX debug integration uses the Renesas tooling/support files. |
 | **Renesas UART boot / UART emulator profile** | ✅ | ❌ | Debug remains visible but disabled; use E2 or E2 Lite for hardware debugging. |
@@ -121,6 +123,7 @@ C device coverage comes from the current NECTO-compatible database and the avail
 | **Renesas** | RA/ARM devices through normal ARM toolchains, plus dedicated **RL78** and **RX** compiler/programmer/debug flows. |
 | **NXP / Freescale** | ARM/Kinetis-class devices when present in the compatibility database and selected programmer mappings. |
 | **Texas Instruments** | Supported ARM devices such as TM4C-class targets when present in the database/programmer catalog. |
+| **Toshiba** | TMPM3H/TMPM4K/TMPM4L Cortex-M devices. C setups can use the on-board CMSIS-DAP debugger through the pyOCD backend and the CMSIS device data already delivered by the C Core package. |
 | **GigaDevice** | GD32-class ARM devices when present in the database/programmer catalog. |
 | **Other NECTO database vendors** | Available automatically when a compatible compiler, core package and supported programmer mapping are present. |
 

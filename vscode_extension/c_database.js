@@ -6,6 +6,7 @@ const path = require('path');
 const vscode = require('vscode');
 const rfp = require('./c_rfp_backend');
 const tiXds110 = require('./c_ti_xds110_backend');
+const toshibaCmsisDap = require('./c_toshiba_cmsis_dap_backend');
 
 function expandHome(value) {
   const text = String(value || '').trim();
@@ -449,6 +450,12 @@ function listProgrammers(context, deviceUid, compilerUid) {
     if (device && tiXds110.isMspm0Device(device) && !result.some((item) => item.uid === tiXds110.TI_XDS110_PROGRAMMER_UID)) {
       result.push(tiXds110.syntheticProgrammer());
     }
+    // Toshiba Clicker TMPM3/TMPM4 boards expose an onboard CMSIS-DAP probe.
+    // This path is intentionally C-only; Rust programmer discovery remains
+    // unchanged and continues to use its existing probe-rs/J-Link/CODEGRIP set.
+    if (device && toshibaCmsisDap.isToshibaDevice(device) && !result.some((item) => item.uid === toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID)) {
+      result.push(toshibaCmsisDap.syntheticProgrammer());
+    }
     return result;
   });
 }
@@ -718,13 +725,15 @@ function getSetupMetadata(context, selection) {
       ? (rfp.isRenesasDevice(device || {}) ? rfp.syntheticProgrammer() : undefined)
       : selection.programmerUid === tiXds110.TI_XDS110_PROGRAMMER_UID
         ? (tiXds110.isMspm0Device(device || {}) ? tiXds110.syntheticProgrammer() : undefined)
-        : normalizeRow(db.prepare(`
-            SELECT p.*, ptd.device_support_package AS device_support_package
-            FROM Programmers p
-            JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
-            WHERE p.uid = ? AND ptd.device_uid = ?
-            LIMIT 1
-          `).get(selection.programmerUid, selection.deviceUid));
+        : selection.programmerUid === toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID
+          ? (toshibaCmsisDap.isToshibaDevice(device || {}) ? toshibaCmsisDap.syntheticProgrammer() : undefined)
+          : normalizeRow(db.prepare(`
+              SELECT p.*, ptd.device_support_package AS device_support_package
+              FROM Programmers p
+              JOIN ProgrammerToDevice ptd ON ptd.programer_uid = p.uid
+              WHERE p.uid = ? AND ptd.device_uid = ?
+              LIMIT 1
+            `).get(selection.programmerUid, selection.deviceUid));
 
     if (!device || !compiler || (!bareMetal && !sdk) || !programmer || !compilerMapping) {
       throw new Error('The selected C setup is no longer complete or compiler-compatible in the NECTO database. Recreate it.');
@@ -848,7 +857,7 @@ function getSetupMetadata(context, selection) {
         description: programmer.description || '',
         packageName: programmer.uid === rfp.RFP_PROGRAMMER_UID
           ? 'renesas_rfp'
-          : programmer.uid === tiXds110.TI_XDS110_PROGRAMMER_UID
+          : (programmer.uid === tiXds110.TI_XDS110_PROGRAMMER_UID || programmer.uid === toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID)
             ? ''
             : String(programmer.installer_package || programmer.installerPackage || '').trim(),
         supportPackages: supportPackageNames(programmer.device_support_package || programmer.deviceSupportPackage),

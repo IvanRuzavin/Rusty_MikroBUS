@@ -48,6 +48,8 @@ try {
   const microchip = require('../c_microchip_backend')._test;
   const tiXds110Module = require('../c_ti_xds110_backend');
   const tiXds110 = tiXds110Module._test;
+  const toshibaCmsisDapModule = require('../c_toshiba_cmsis_dap_backend');
+  const toshibaCmsisDap = toshibaCmsisDapModule._test;
 
   const extensionTest = require('../extension')._test;
   const optionalExtensions = require('../optional_extensions');
@@ -92,6 +94,25 @@ try {
   // Existing 0.7.4 setups contain an empty PLLN override because the UI had an
   // empty select. Empty overrides must now fall back to the MCU JSON init value.
   assert.strictEqual(setup.defaultRegisterValue(pllRegister, { 'RCC_PLLCFGR.PLLN': '' }), 0x09006C10);
+  assert.strictEqual(rustMcu.configuredRegisterValue(pllRegister, 0, {}), 0x09006C10);
+  assert.strictEqual(rustMcu.configuredRegisterValue(pllRegister, 0, { '0:1': '' }), 0x09006C10);
+
+  // Rust must preserve register default bits outside the declared fields and
+  // clear `unused` bits exactly like the working C generator. This matters for
+  // MCU clock/PLL definitions where required startup bits are not represented
+  // by a visible field.
+  const preserveDefaultRegister = {
+    default: 'A0000000',
+    unused: '20000000',
+    key: 'CLOCK_CFG',
+    address: '40000000',
+    fields: [{ key: 'MODE', mask: '000000FF', init: '00000012' }]
+  };
+  assert.strictEqual(setup.defaultRegisterValue(preserveDefaultRegister, {}), 0x80000012);
+  assert.strictEqual(rustMcu.configuredRegisterValue(preserveDefaultRegister, 0, {}), 0x80000012);
+  const rustDefaultHeader = rustMcu.buildRegisterHeader({ config_registers: [preserveDefaultRegister] }, {}, 7.3728);
+  assert.match(rustDefaultHeader, /VALUE_CLOCK_CFG: u32 = 0x80000012;/);
+  assert.match(rustDefaultHeader, /FOSC_KHZ_VALUE: u32 = 7373;/);
 
   assert.strictEqual(rfp.defaultDeviceType({ device: { familyUid: 'RL78/G24', mcuName: 'R7F101GLG' } }), 'RL78');
   assert.strictEqual(rfp.defaultDeviceType({ device: { familyUid: 'RX26T', mcuName: 'R5F526TFCDFP' } }), 'RX200');
@@ -280,6 +301,60 @@ try {
     setup.isSetupDebugAvailable({ metadata: { programmer: { uid: 'segger_jlink' } } }),
     true
   );
+
+  // Toshiba CMSIS-DAP is a C-only synthetic programmer. It is exposed for the
+  // TMPM3/TMPM4 Cortex-M families, uses the CMSIS pack from the C Core package,
+  // and relies only on Cortex-Debug at the VS Code extension layer.
+  assert.strictEqual(toshibaCmsisDapModule.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID, 'toshiba_cmsis_dap');
+  assert.strictEqual(toshibaCmsisDapModule.PY_OCD_VERSION, '0.45.1');
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4KNF10AFG', familyUid: 'TMPM4K' }), true);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4L4A' }), true);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM3H2' }), true);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4G9' }), false);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMP19A' }), false);
+  assert.strictEqual(setup.isSupportedProgrammer(toshibaCmsisDapModule.syntheticProgrammer()), true);
+  assert.strictEqual(cConfigurator.isSupportedProgrammer(toshibaCmsisDapModule.syntheticProgrammer()), true);
+  assert.deepStrictEqual(
+    setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'toshiba_cmsis_dap' } } }),
+    [optionalExtensions.EXTENSIONS.CORTEX_DEBUG]
+  );
+  const toshibaPackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-toshiba-pack-'));
+  try {
+    const expandedPack = path.join(toshibaPackRoot, 'Toshiba.TMPM4K_DFP');
+    fs.mkdirSync(path.join(expandedPack, 'Flash'), { recursive: true });
+    fs.writeFileSync(
+      path.join(expandedPack, 'Toshiba.TMPM4K_DFP.pdsc'),
+      '<package><devices><family Dfamily="TMPM4K"><device Dname="TMPM4KNF10AFG"/></family></devices></package>'
+    );
+    fs.writeFileSync(path.join(expandedPack, 'Flash', 'TMPM4K.FLM'), 'flash-algo');
+    const resolvedPack = toshibaCmsisDapModule.resolveCmsisPackPath({
+      metadata: { device: { vendor: 'Toshiba', mcuName: 'TMPM4KNF10AFG' } },
+      paths: { corePackageRoot: toshibaPackRoot }
+    });
+    assert.strictEqual(resolvedPack, expandedPack);
+    const runtime = { pyocd: '/tmp/pyocd', cmsisPack: expandedPack, target: 'TMPM4KNF10AFG', probeArgs: ['--uid', 'cmsisdap:'] };
+    const args = toshibaCmsisDap.commandArgs(runtime, 'load', ['/tmp/app.elf']);
+    assert.deepStrictEqual(args, ['load', '--target', 'TMPM4KNF10AFG', '--pack', expandedPack, '--uid', 'cmsisdap:', '/tmp/app.elf']);
+    const debugConfig = toshibaCmsisDapModule.debugConfiguration(
+      { name: 'TMPM4K test', tools: { gdb: '/tmp/arm-none-eabi-gdb' } },
+      '/tmp/project',
+      '/tmp/project/app.elf',
+      runtime,
+      'toshiba-debug'
+    );
+    assert.strictEqual(debugConfig.type, 'cortex-debug');
+    assert.strictEqual(debugConfig.servertype, 'pyocd');
+    assert.strictEqual(debugConfig.serverpath, '/tmp/pyocd');
+    assert.strictEqual(debugConfig.targetId, 'TMPM4KNF10AFG');
+    assert.strictEqual(debugConfig.cmsisPack, expandedPack);
+    assert.deepStrictEqual(debugConfig.serverArgs, ['--uid', 'cmsisdap:']);
+    assert.strictEqual(debugConfig.__mikrobusToshibaCmsisDap, true);
+  } finally {
+    fs.rmSync(toshibaPackRoot, { recursive: true, force: true });
+  }
+  const rustConfiguratorSourceForToshiba = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
+  assert.strictEqual(rustConfiguratorSourceForToshiba.includes('TOSHIBA_CMSIS_DAP_PROGRAMMER_UID'), false);
+  assert.strictEqual(rustConfiguratorSourceForToshiba.includes('c_toshiba_cmsis_dap_backend'), false);
 
   const managedRfpSpec = packageManagerModule.rfpProgrammerPackageSpec();
   assert.strictEqual(managedRfpSpec.kind, 'programmer');
@@ -846,6 +921,50 @@ try {
   assert.strictEqual(codegripDebugConfig.__mikrobusCodegripGeneration, 'generation-test');
   assert.strictEqual(codegripDebugConfig.__mikrobusCDebugInstance, 'generation-test');
   assert.deepStrictEqual(codegripDebugConfig.presentation, { hidden: true });
+
+  // CODEGRIP does not expose a complete GDB memory map. Verify that the
+  // extension derives executable flash ranges from the ELF and tells GDB they
+  // are read-only so `next`/`finish` internal breakpoints become hardware BPs.
+  const codegripElfRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-codegrip-elf-'));
+  const codegripElf = path.join(codegripElfRoot, 'app.elf');
+  const elf32 = Buffer.alloc(52 + (2 * 32));
+  elf32[0] = 0x7f; elf32[1] = 0x45; elf32[2] = 0x4c; elf32[3] = 0x46;
+  elf32[4] = 1; // ELFCLASS32
+  elf32[5] = 1; // little endian
+  elf32.writeUInt32LE(52, 28);
+  elf32.writeUInt16LE(32, 42);
+  elf32.writeUInt16LE(2, 44);
+  // PT_LOAD, executable flash: [0x08000000, 0x08001234)
+  elf32.writeUInt32LE(1, 52);
+  elf32.writeUInt32LE(0x08000000, 52 + 8);
+  elf32.writeUInt32LE(0x1234, 52 + 20);
+  elf32.writeUInt32LE(5, 52 + 24); // PF_R | PF_X
+  // PT_LOAD, writable SRAM: must not be marked read-only by the debug helper.
+  const dataPh = 52 + 32;
+  elf32.writeUInt32LE(1, dataPh);
+  elf32.writeUInt32LE(0x20000000, dataPh + 8);
+  elf32.writeUInt32LE(0x100, dataPh + 20);
+  elf32.writeUInt32LE(6, dataPh + 24); // PF_R | PF_W
+  fs.writeFileSync(codegripElf, elf32);
+  assert.deepStrictEqual(codegrip.elfExecutableMemoryRegions(codegripElf), [
+    { start: 0x08000000, end: 0x08001234 }
+  ]);
+  assert.deepStrictEqual(
+    codegrip.codegripGdbMemorySetupCommands(codegripElf).map((item) => item.text),
+    ['-interpreter-exec console "mem 0x8000000 0x8001234 ro"']
+  );
+  const codegripMappedConfig = setup.codegripCppDebugConfiguration({
+    name: 'STM32 CODEGRIP memory map',
+    tools: { gdb: '/toolchain/bin/arm-none-eabi-gdb' },
+    metadata: { device: { uid: 'STM32F756ZG' } }
+  }, '/project', codegripElf, 23457, 'memory-map-test');
+  assert.ok(codegripMappedConfig.setupCommands.some((item) => item.text === '-interpreter-exec console "mem 0x8000000 0x8001234 ro"'));
+  const rustCodegripMappedConfig = rustMcu.rustCodegripCppDebugConfiguration(
+    { mcuName: 'STM32F756ZG' }, { sdkRoot: '/tmp/rust-sdk' }, '/tmp/main.rs',
+    codegripElf, '/toolchain/bin/arm-none-eabi-gdb', 23458, 'rust-memory-map-test'
+  );
+  assert.ok(rustCodegripMappedConfig.setupCommands.some((item) => item.text === '-interpreter-exec console "mem 0x8000000 0x8001234 ro"'));
+  fs.rmSync(codegripElfRoot, { recursive: true, force: true });
 
   const xc32CodegripDebugConfig = setup.codegripCppDebugConfiguration({
     name: 'PIC32MZ CODEGRIP',
@@ -2109,7 +2228,7 @@ endfunction()
   }
   assert.ok(cSetupSourceForXclm.includes('rebuilding ${setup.name} before Apply'));
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 66);
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 67);
 
   const armGdbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-arm-gdb-'));
   try {
@@ -2329,7 +2448,8 @@ endfunction()
   assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.21');
+  assert.strictEqual(packageJson.version, '0.8.23');
+  assert.strictEqual(rustMcu.RUST_SETUP_ARTIFACT_VERSION, 2);
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');
   assert.strictEqual(packageJson.license, 'MIT');

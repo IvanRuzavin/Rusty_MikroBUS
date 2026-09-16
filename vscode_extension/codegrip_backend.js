@@ -5,6 +5,95 @@ const path = require('path');
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
+function elfExecutableMemoryRegions(elfPath) {
+  const file = String(elfPath || '').trim();
+  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return [];
+
+  let data;
+  try {
+    data = fs.readFileSync(file);
+  } catch {
+    return [];
+  }
+  if (data.length < 64 || data[0] !== 0x7f || data[1] !== 0x45 || data[2] !== 0x4c || data[3] !== 0x46) return [];
+
+  const elfClass = data[4];
+  const encoding = data[5];
+  if (![1, 2].includes(elfClass) || ![1, 2].includes(encoding)) return [];
+  const littleEndian = encoding === 1;
+
+  const u16 = (offset) => {
+    if (offset < 0 || offset + 2 > data.length) throw new RangeError('ELF u16 out of bounds');
+    return littleEndian ? data.readUInt16LE(offset) : data.readUInt16BE(offset);
+  };
+  const u32 = (offset) => {
+    if (offset < 0 || offset + 4 > data.length) throw new RangeError('ELF u32 out of bounds');
+    return littleEndian ? data.readUInt32LE(offset) : data.readUInt32BE(offset);
+  };
+  const u64 = (offset) => {
+    if (offset < 0 || offset + 8 > data.length) throw new RangeError('ELF u64 out of bounds');
+    const value = littleEndian ? data.readBigUInt64LE(offset) : data.readBigUInt64BE(offset);
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('ELF address exceeds JavaScript safe integer range');
+    return Number(value);
+  };
+
+  try {
+    const programHeaderOffset = elfClass === 1 ? u32(28) : u64(32);
+    const programHeaderEntrySize = elfClass === 1 ? u16(42) : u16(54);
+    const programHeaderCount = elfClass === 1 ? u16(44) : u16(56);
+    const minimumEntrySize = elfClass === 1 ? 32 : 56;
+    if (!programHeaderOffset || !programHeaderCount || programHeaderEntrySize < minimumEntrySize) return [];
+
+    const regions = [];
+    for (let index = 0; index < programHeaderCount; index += 1) {
+      const base = programHeaderOffset + (index * programHeaderEntrySize);
+      if (base < 0 || base + minimumEntrySize > data.length) break;
+      const type = u32(base);
+      if (type !== 1) continue; // PT_LOAD
+      const flags = elfClass === 1 ? u32(base + 24) : u32(base + 4);
+      if ((flags & 0x1) === 0) continue; // PF_X
+      const virtualAddress = elfClass === 1 ? u32(base + 8) : u64(base + 16);
+      const memorySize = elfClass === 1 ? u32(base + 20) : u64(base + 40);
+      if (!memorySize) continue;
+      const end = virtualAddress + memorySize;
+      if (!Number.isSafeInteger(virtualAddress) || !Number.isSafeInteger(end) || end <= virtualAddress) continue;
+      regions.push({ start: virtualAddress, end });
+    }
+
+    regions.sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged = [];
+    for (const region of regions) {
+      const previous = merged[merged.length - 1];
+      if (previous && region.start <= previous.end) {
+        previous.end = Math.max(previous.end, region.end);
+      } else {
+        merged.push({ ...region });
+      }
+    }
+    return merged;
+  } catch {
+    return [];
+  }
+}
+
+function codegripGdbMemorySetupCommands(elfPath) {
+  return elfExecutableMemoryRegions(elfPath).map((region) => {
+    const start = `0x${region.start.toString(16)}`;
+    const end = `0x${region.end.toString(16)}`;
+    return {
+      description: `Mark ELF executable region ${start}-${end} read-only`,
+      // CODEGRIP's GDB server does not currently provide GDB with a complete
+      // target memory map. GDB therefore cannot know that MCU flash is read-only.
+      // Mark ELF PT_LOAD+PF_X regions explicitly so GDB's *internal* temporary
+      // breakpoints used by next/finish/Step Out are converted to hardware
+      // breakpoints by `set breakpoint auto-hw on`. VS Code's
+      // hardwareBreakpoints.require only affects user/DAP breakpoints.
+      text: `-interpreter-exec console "mem ${start} ${end} ro"`,
+      ignoreFailures: true
+    };
+  });
+}
+
 function firstDefined(source, keys, fallback = undefined) {
   for (const key of keys) {
     if (source[key] !== undefined && source[key] !== null) return source[key];
@@ -599,6 +688,8 @@ module.exports = {
   eraseCodegrip,
   prepareCodegripDebug,
   discoverUsbCodegrips,
+  elfExecutableMemoryRegions,
+  codegripGdbMemorySetupCommands,
   _test: {
     asBoolean,
     asPort,
@@ -606,6 +697,8 @@ module.exports = {
     responseDescription,
     commandResponseFailed,
     nectoDefaultOptionValues,
-    flattenServerOptions
+    flattenServerOptions,
+    elfExecutableMemoryRegions,
+    codegripGdbMemorySetupCommands
   }
 };

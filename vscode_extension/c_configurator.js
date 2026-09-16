@@ -9,11 +9,12 @@ const packages = require('./c_package_manager');
 const compilerSupport = require('./c_compiler_support');
 const rfp = require('./c_rfp_backend');
 const tiXds110 = require('./c_ti_xds110_backend');
+const toshibaCmsisDap = require('./c_toshiba_cmsis_dap_backend');
 const microchip = require('./c_microchip_backend');
 
 const SUPPORTED_COMPILERS = compilerSupport.supportedCompilerUids();
 function isSupportedProgrammer(programmer = {}) {
-  return ['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID, tiXds110.TI_XDS110_PROGRAMMER_UID].includes(String(programmer.uid || '')) ||
+  return ['codegrip', 'segger_jlink', rfp.RFP_PROGRAMMER_UID, tiXds110.TI_XDS110_PROGRAMMER_UID, toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID].includes(String(programmer.uid || '')) ||
     microchip.isMicrochipProgrammer(programmer);
 }
 let cPanel;

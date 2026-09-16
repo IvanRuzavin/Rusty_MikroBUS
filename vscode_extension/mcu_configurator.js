@@ -11,7 +11,8 @@ const {
   programCodegrip,
   eraseCodegrip,
   prepareCodegripDebug,
-  stopCodegripServer
+  stopCodegripServer,
+  codegripGdbMemorySetupCommands
 } = require('./codegrip_backend');
 const codegripCatalog = require('./c_codegrip_catalog');
 const sharedProgrammerPackages = require('./c_package_manager');
@@ -33,6 +34,7 @@ const codegripRestartRequested = new Set();
 const probeRsGdbServers = new Map();
 let pendingProbeRsGdbLaunch;
 
+const RUST_SETUP_ARTIFACT_VERSION = 2;
 const PROBE_RS_PROGRAMMER_UID = 'PROBE_RS';
 const PROBE_RS_PROGRAMMER_NAME = 'probe-rs (Auto-detect)';
 
@@ -195,7 +197,7 @@ function saveConfiguredSetup(context, payload, result) {
     codegripCatalog: result.programmerUid === 'MIKROE_CODEGRIP' ? result.codegripCatalog : undefined,
     codegripRuntime: result.programmerUid === 'MIKROE_CODEGRIP' ? result.codegripRuntime : undefined,
     sdkRoot: path.relative(getConfiguredSetupPaths(context).root, result.sdkRoot).split(path.sep).join('/'),
-    artifactVersion: 1,
+    artifactVersion: RUST_SETUP_ARTIFACT_VERSION,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
     lastBuiltAt: now
@@ -630,6 +632,7 @@ function writeWorkspaceBinding(workspace, setup, generationResult) {
 
   const binding = {
     version: 1,
+    artifactVersion: Number(setup.artifactVersion || RUST_SETUP_ARTIFACT_VERSION),
     setupId: setup.id,
     mcuName: setup.mcuName,
     clockMhz: setup.clockMhz,
@@ -676,13 +679,17 @@ async function chooseSetupIfNeeded(context, setupId) {
 }
 
 async function useSetupWithCurrentWorkspace(context, setupId) {
-  const setup = await chooseSetupIfNeeded(context, setupId);
+  let setup = await chooseSetupIfNeeded(context, setupId);
   if (!setup) return undefined;
   const workspace = resolveCurrentWorkspaceTarget();
   if (!workspace.hasCargoToml) {
     throw new Error(`Cannot apply a setup because Cargo.toml is not present in the project root: ${workspace.openedRoot}`);
   }
+  const artifactWasCurrent = Number(setup?.artifactVersion || 0) >= RUST_SETUP_ARTIFACT_VERSION;
   const result = await ensurePortableSetupWorkspace(context, setup);
+  if (!artifactWasCurrent) {
+    setup = saveConfiguredSetup(context, { ...setup, setupId: setup.id, values: setup.values || {} }, result);
+  }
   const mikrobusSync = syncWorkspaceMikrobusFile(workspace, result);
   const binding = writeWorkspaceBinding(workspace, setup, result);
   const mikrobusMessage = mikrobusSync.copied
@@ -931,6 +938,34 @@ function requireWorkspaceBinding(context) {
   if (!binding.sdkRoot || !fs.existsSync(path.join(binding.sdkRoot, 'Cargo.toml'))) {
     throw new Error('The bound Rust SDK root is no longer available. Re-apply the setup to this workspace.');
   }
+  return { binding, setup };
+}
+
+async function requireCurrentWorkspaceBinding(context) {
+  let { binding, setup } = requireWorkspaceBinding(context);
+  if (Number(setup?.artifactVersion || 0) >= RUST_SETUP_ARTIFACT_VERSION) return { binding, setup };
+
+  const channel = getOutputChannel();
+  channel.appendLine(
+    `Rust setup ${setup.mcuName} uses artifact version ${Number(setup?.artifactVersion || 0)}; ` +
+    `rebuilding it with generator version ${RUST_SETUP_ARTIFACT_VERSION}.`
+  );
+
+  const result = await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: `Updating Rust setup for ${setup.mcuName}...`,
+    cancellable: false
+  }, async (progress) => ensurePortableSetupWorkspace(context, setup, progress));
+
+  // Persist the new artifact version so the setup is rebuilt exactly once,
+  // then refresh the existing workspace binding to the regenerated setup.
+  setup = saveConfiguredSetup(context, { ...setup, setupId: setup.id, values: setup.values || {} }, result);
+  const workspace = {
+    workspaceFolder: binding.workspaceFolder,
+    openedRoot: binding.workspaceFolder?.uri?.fsPath || path.dirname(binding.bindingPath || '')
+  };
+  if (workspace.workspaceFolder) syncWorkspaceMikrobusFile(workspace, result);
+  binding = writeWorkspaceBinding(workspace, setup, result);
   return { binding, setup };
 }
 
@@ -2163,6 +2198,7 @@ function rustCodegripCppDebugConfiguration(setup, binding, source, programBinary
         text: '-gdb-set mem inaccessible-by-default off',
         ignoreFailures: true
       },
+      ...codegripGdbMemorySetupCommands(programBinary),
       {
         description: 'Prefer hardware breakpoints for read-only target code',
         text: '-gdb-set breakpoint auto-hw on',
@@ -2186,7 +2222,7 @@ function rustCodegripCppDebugConfiguration(setup, binding, source, programBinary
 }
 
 async function debugCurrentRustFile(context, debugOptions = {}) {
-  const { binding, setup } = requireWorkspaceBinding(context);
+  const { binding, setup } = await requireCurrentWorkspaceBinding(context);
   const channel = getOutputChannel();
   channel.show(true);
   channel.appendLine(`\n=== ${setup.mcuName} · ${setup.clockMhz} MHz · Debug current Rust file ===`);
@@ -2426,7 +2462,7 @@ async function debugCurrentRustFile(context, debugOptions = {}) {
 }
 
 async function runBoundWorkspaceAction(context, action) {
-  const { binding, setup } = requireWorkspaceBinding(context);
+  const { binding, setup } = await requireCurrentWorkspaceBinding(context);
   const useCodegrip = isCodegripProgrammer(setup);
   const useJlink = shouldUseNativeJlink(setup);
 
@@ -3327,6 +3363,7 @@ function parseNumber(value) {
   if (typeof value !== 'string') return 0;
   const trimmed = value.trim();
   if (/^0x[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed.slice(2), 16);
+  if (/^\$[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed.slice(1), 16);
   // MCU definition JSON stores register values as bare hexadecimal strings
   // (for example "01000000" for RCC_CR.PLLON), not decimal strings.
   if (/^[0-9a-f]+$/i.test(trimmed)) return Number.parseInt(trimmed, 16);
@@ -3371,36 +3408,41 @@ function fieldSettings(field) {
   return settingsArrayOptions(field);
 }
 
+function configuredRegisterValue(register, regIndex, selectedValues = {}) {
+  // Keep Rust register generation bit-for-bit equivalent to the working C
+  // generator (c_setup.defaultRegisterValue). MCU JSON register defaults often
+  // contain required PLL/clock bits outside the user-visible field masks.
+  const defaultValue = parseNumber(register?.default) >>> 0;
+  const unused = parseNumber(register?.unused) >>> 0;
+  let allMasks = 0;
+  let allValues = 0;
+
+  for (let fieldIndex = 0; fieldIndex < (register?.fields || []).length; fieldIndex += 1) {
+    const field = register.fields[fieldIndex];
+    const mask = parseNumber(field?.mask) >>> 0;
+    const fieldId = `${regIndex}:${fieldIndex}`;
+    const hasSelectedValue = !field.hidden
+      && Object.prototype.hasOwnProperty.call(selectedValues || {}, fieldId)
+      && String(selectedValues[fieldId] ?? '').trim() !== '';
+    // Empty/missing UI values mean "keep the definition init value", exactly
+    // like the C configurator. Do not substitute the first dropdown option: it
+    // may be a legal choice but not the MCU definition's reset/PLL default.
+    const value = hasSelectedValue ? selectedValues[fieldId] : field?.init;
+
+    allMasks = (allMasks | mask) >>> 0;
+    allValues = (allValues | ((parseNumber(value) >>> 0) & mask)) >>> 0;
+  }
+
+  return ((allValues | (defaultValue & (~allMasks >>> 0))) & (~unused >>> 0)) >>> 0;
+}
+
 function buildRegisterHeader(definition, selectedValues, clockMhz) {
   const collected = new Map();
 
   for (let regIndex = 0; regIndex < (definition.config_registers || []).length; regIndex += 1) {
     const reg = definition.config_registers[regIndex];
     const combinedKey = `${reg.key}|${reg.address}`;
-    let registerValue = 0;
-
-    for (let fieldIndex = 0; fieldIndex < (reg.fields || []).length; fieldIndex += 1) {
-      const field = reg.fields[fieldIndex];
-      let value;
-
-      if (field.hidden) {
-        value = field.init ?? '0x0';
-      } else {
-        const fieldId = `${regIndex}:${fieldIndex}`;
-        const selected = selectedValues[fieldId];
-        const settings = fieldSettings(field);
-        const allowed = settings.map((setting) => String(setting.value));
-        if (selected !== undefined && allowed.includes(String(selected))) {
-          value = selected;
-        } else {
-          value = field.init ?? (settings[0] ? settings[0].value : '0x0');
-        }
-      }
-
-      registerValue |= parseNumber(value);
-    }
-
-    collected.set(combinedKey, registerValue >>> 0);
+    collected.set(combinedKey, configuredRegisterValue(reg, regIndex, selectedValues));
   }
 
   const lines = [];
@@ -3411,7 +3453,8 @@ function buildRegisterHeader(definition, selectedValues, clockMhz) {
     lines.push(`pub const ADDRESS_${regName}: u32 = 0x${String(address).replace(/^0x/i, '')};`);
     lines.push(`pub const VALUE_${regName}: u32 = 0x${registerValue.toString(16).toUpperCase().padStart(8, '0')};`);
   }
-  lines.push(`pub const FOSC_KHZ_VALUE: u32 = ${clockMhz * 1000};`);
+  const clockKhz = Math.round(Number(clockMhz) * 1000);
+  lines.push(`pub const FOSC_KHZ_VALUE: u32 = ${Number.isFinite(clockKhz) ? clockKhz : 0};`);
   return lines.join('\n');
 }
 
@@ -3539,7 +3582,8 @@ async function ensurePortableSetupWorkspace(context, setup) {
     fs.existsSync(setup.codegripRuntime.packsRoot)
   );
   const mikrobusReady = !shouldGenerateWorkspaceMikrobus(setup) || isMikrobusGenerationResolved(sdkRoot);
-  if (portableSetupIsComplete(sdkRoot) && codegripRuntimeReady && mikrobusReady) {
+  const artifactCurrent = Number(setup?.artifactVersion || 0) >= RUST_SETUP_ARTIFACT_VERSION;
+  if (portableSetupIsComplete(sdkRoot) && codegripRuntimeReady && mikrobusReady && artifactCurrent) {
     return {
       ...setup,
       sdkRoot,
@@ -3577,11 +3621,11 @@ async function generateMcuConfiguration(context, payload, progress, options = {}
   const managedPaths = getManagedPaths(context);
   const paths = { ...managedPaths, sdk: options.sdkRoot ? path.resolve(options.sdkRoot) : managedPaths.sdk };
   const mcuName = String(payload.mcuName || '').trim();
-  const clockMhz = Number.parseInt(String(payload.clockMhz || ''), 10);
+  const clockMhz = Number(String(payload.clockMhz || '').trim());
   const selectedValues = payload.values && typeof payload.values === 'object' ? payload.values : {};
 
   if (!mcuName) throw new Error('Select an MCU before generating the configuration.');
-  if (!Number.isInteger(clockMhz) || clockMhz <= 0) throw new Error('Clock must be a positive integer in MHz.');
+  if (!Number.isFinite(clockMhz) || clockMhz <= 0) throw new Error('Clock must be a positive number in MHz.');
 
   for (const required of [paths.database, paths.sdk]) {
     if (!fs.existsSync(required)) throw new Error(`Required managed package is missing: ${required}`);
@@ -4093,7 +4137,7 @@ function getMcuHtml(webview, extensionUri) {
           </div>
           <div class="clockControls">
             <label id="programmerField" class="clockInput">Programmer<select id="programmerSelect"></select></label>
-            <label id="clockField" class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="1" step="1"></label>
+            <label id="clockField" class="clockInput">Clock (MHz)<input id="clockMhz" type="number" min="0.001" step="0.001"></label>
           </div>
         </section>
 
@@ -4199,12 +4243,15 @@ module.exports = {
   getSetupDashboardState,
   useSetupWithCurrentWorkspace,
   _test: {
+    RUST_SETUP_ARTIFACT_VERSION,
+    requireCurrentWorkspaceBinding,
     getManagedPaths,
     readMcuList,
     readMcuMetadata,
     readFamilyImplementationMetadata,
     loadMcuDetail,
     buildRegisterHeader,
+    configuredRegisterValue,
     maskShift,
     settingsArrayOptions,
     generateMcuConfiguration,
