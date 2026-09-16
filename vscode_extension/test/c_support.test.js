@@ -908,13 +908,17 @@ try {
       CREATE TABLE MCUCard (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, BSP_PATH TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
       CREATE TABLE BoardToCard (BOARD_UID TEXT, CARD_UID TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (BOARD_UID, CARD_UID));
       CREATE TABLE CardToMCU (CARD_UID TEXT, DEVICE_NAME TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (CARD_UID, DEVICE_NAME));
+      CREATE TABLE Shield (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, BSP_PATH TEXT, MIKROBUS_COUNT INTEGER, CONFIG_JSON TEXT, ENABLED INTEGER);
+      CREATE TABLE BoardToShield (BOARD_UID TEXT, SHIELD_UID TEXT, IS_DEFAULT INTEGER, CONFIG_JSON TEXT, PRIMARY KEY (BOARD_UID, SHIELD_UID));
       CREATE TABLE Programmer (UID TEXT PRIMARY KEY, NAME TEXT, VENDOR TEXT, KIND TEXT, TRANSPORT TEXT, CONFIG_JSON TEXT, ENABLED INTEGER);
       CREATE TABLE DeviceToProgrammer (DEVICE_NAME TEXT, PROGRAMMER_UID TEXT, INTERFACE TEXT, PRIORITY INTEGER, PRIMARY KEY (DEVICE_NAME, PROGRAMMER_UID));
       INSERT INTO Board VALUES ('UNI_DS_V8','UNI-DS v8','MikroElektronika','bsp/boards/uni_ds_v8/board.cfg','{"mcuSelection":"card","mikrobusSource":"board-card"}',1);
+      INSERT INTO Board VALUES ('DISCOVERY_F407','Discovery F407','STMicroelectronics','bsp/boards/discovery_f407/board.cfg','{"hardwareDevice":"STM32F407ZG"}',1);
       INSERT INTO Family VALUES ('F4','STMicroelectronics','thumbv7em-none-eabihf');
       INSERT INTO Family VALUES ('F7','STMicroelectronics','thumbv7em-none-eabihf');
       INSERT INTO MCU VALUES ('STM32F407ZG','F4','system_stm32f_4xx');
       INSERT INTO MCU VALUES ('STM32F756ZG','F7','system_stm32f_7xx');
+      INSERT INTO BoardToDevice VALUES ('DISCOVERY_F407','STM32F407ZG',1,'{}');
       INSERT INTO MCUCard VALUES ('MCU_CARD_FOR_STM32','MCU CARD for STM32','MikroElektronika','bsp/cards/mcu_card_for_stm32/card.cfg','{"hardwareDevices":["STM32F407ZG","STM32F756ZG"]}',1);
       INSERT INTO BoardToCard VALUES ('UNI_DS_V8','MCU_CARD_FOR_STM32',0,'{}');
       INSERT INTO CardToMCU VALUES ('MCU_CARD_FOR_STM32','STM32F407ZG',1,'{}');
@@ -926,9 +930,26 @@ try {
     `);
     db.close();
     const boardRows = rustMcu.readBoardList(rustBoardDb);
-    assert.strictEqual(boardRows.length, 1);
-    assert.strictEqual(boardRows[0].hasMcuCards, true);
-    assert.strictEqual(boardRows[0].selectableMcuCount, 2);
+    assert.strictEqual(boardRows.length, 2);
+    const uniDsRow = boardRows.find((item) => item.uid === 'UNI_DS_V8');
+    assert.strictEqual(uniDsRow.hasMcuCards, true);
+    assert.strictEqual(uniDsRow.selectableMcuCount, 2);
+    const fixedBoardRow = boardRows.find((item) => item.uid === 'DISCOVERY_F407');
+    assert.strictEqual(fixedBoardRow.hasMcuCards, false);
+
+    // Regression: selecting a board with a soldered MCU must be able to resolve
+    // the board -> MCU relationship without touching the legacy managed core
+    // directory. The handler then resolves the split Core package and reloads
+    // the full MCU detail from that package.
+    const fixedBoardPreflight = rustMcu.loadBoardDetail(
+      { database: rustBoardDb, core: path.join(rustBoardDbRoot, 'missing-legacy-core') },
+      'DISCOVERY_F407',
+      undefined,
+      { deferCardMcuSelection: true, includeMcuDetail: false }
+    );
+    assert.strictEqual(fixedBoardPreflight.selectedMcuName, 'STM32F407ZG');
+    assert.strictEqual(fixedBoardPreflight.mcu, undefined);
+
     const boardOptions = rustMcu.readBoardMcuOptions(rustBoardDb, 'UNI_DS_V8');
     assert.deepStrictEqual(boardOptions.map((item) => item.mcuName), ['STM32F407ZG', 'STM32F756ZG']);
     assert.strictEqual(boardOptions[1].vendor, 'STMicroelectronics');

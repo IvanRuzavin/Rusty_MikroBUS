@@ -1,0 +1,8 @@
+# Portable MikroBUS Rust project marker.
+# The VS Code extension applies the reusable SDK/Core setup; this project
+# intentionally does not hard-code SDK paths or target dependencies.
+[workspace]
+resolver = "3"
+
+[workspace.metadata.mikrobus-rust]
+entry = "main.rs"

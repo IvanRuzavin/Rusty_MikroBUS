@@ -2682,7 +2682,33 @@ async function handleMcuMessage(message, panel, context) {
 
   if (message.type === 'selectBoard' && typeof message.uid === 'string') {
     const paths = getManagedPaths(context);
-    const boardDetail = loadBoardDetail(paths, message.uid, undefined, { deferCardMcuSelection: true });
+
+    // First resolve only the board -> MCU relationship. Boards with a soldered
+    // MCU can auto-select their single/default MCU here, but at this point
+    // paths.core still points at the legacy global core directory. With split
+    // Rust Core packages we must resolve the MCU's SYSTEM_LIB package before
+    // trying to read its mcu_definitions/<MCU>.json.
+    let boardDetail = loadBoardDetail(paths, message.uid, undefined, {
+      deferCardMcuSelection: true,
+      includeMcuDetail: false
+    });
+
+    if (boardDetail.selectedMcuName) {
+      const metadata = readMcuMetadata(paths.database, boardDetail.selectedMcuName);
+      const coreRoot = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Preparing Rust core for ${metadata.name}`,
+        cancellable: true
+      }, async (progress, token) => ensureRustCorePackage(context, metadata, progress, token));
+
+      boardDetail = loadBoardDetail(
+        { ...paths, core: coreRoot },
+        message.uid,
+        boardDetail.selectedMcuName,
+        { deferCardMcuSelection: true }
+      );
+    }
+
     void panel.webview.postMessage({
       type: 'boardDetail',
       ...boardDetail,
@@ -3151,7 +3177,7 @@ function loadBoardDetail(paths, boardUid, preferredMcuName, options = {}) {
     board: selectedBoard,
     mcuOptions,
     selectedMcuName: selected?.mcuName,
-    mcu: selected ? loadMcuDetail(paths, selected.mcuName) : undefined,
+    mcu: selected && options.includeMcuDetail !== false ? loadMcuDetail(paths, selected.mcuName) : undefined,
     shields: readShieldsForBoard(paths.database, boardUid),
     programmers: selected ? readProgrammersForDevice(paths.database, selected.mcuName) : []
   };
