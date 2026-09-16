@@ -1,8 +1,11 @@
 [package]
 name = "drv_port"
-version = "0.0.1"
-edition = "2024"
-author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
+version = "0.2.0"
+edition = "2026"
+author =  [
+    "Leon Besnie leon.besnie@reseau.eseo.fr",
+    "Ivan Ruzavin ivan.ruzavin98@gmail.com"
+    ]
 
 [profile.release]
 opt-level = 'z'

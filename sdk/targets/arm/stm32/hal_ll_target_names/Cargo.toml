@@ -1,8 +1,11 @@
 [package]
 name = "hal_ll_target_names"
 version = "0.1.1"
-edition = "2024"
-author =  ["Ivan Ruzavin ivan.ruzavin98@gmail.com"]
+edition = "2026"
+author =  [
+    "Leon Besnie leon.besnie@reseau.eseo.fr",
+    "Ivan Ruzavin ivan.ruzavin98@gmail.com"
+    ]
 
 
 [profile.release]
