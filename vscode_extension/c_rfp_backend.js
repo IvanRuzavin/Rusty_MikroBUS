@@ -259,7 +259,7 @@ async function configureProfile(setup, existing) {
   if (connection.value === 'uart') {
     const port = await vscode.window.showInputBox({
       title: 'RFP serial port',
-      value: base.connection === 'uart' && base.port ? String(base.port) : (process.platform === 'win32' ? 'COM3' : '/dev/ttyUSB0'),
+      value: base.connection === 'uart' && base.port ? String(base.port) : (process.platform === 'win32' ? 'COM3' : process.platform === 'darwin' ? '/dev/cu.usbserial' : '/dev/ttyUSB0'),
       prompt: 'Serial port passed with -port.',
       ignoreFocusOut: true
     });

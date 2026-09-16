@@ -1,0 +1,143 @@
+name: Demo Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'demos/**'
+      - 'scripts/package_example_release.py'
+      - 'scripts/get_all_click_indexes.py'
+      - '.github/workflows/demo-packages.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: demo-packages
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: demo-packages
+  RELEASE_TITLE: Demo Packages
+  OUTPUT_DIR: dist/demo-packages
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install packaging dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          if ! sudo apt-get install -y 7zip; then
+            sudo apt-get install -y p7zip-full
+          fi
+          python3 -m pip install --disable-pip-version-check 'elasticsearch==7.13.4'
+
+      - name: Validate Demo sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d demos
+
+      - name: Generate C Demo metadata from Elasticsearch
+        env:
+          C_METADATA_ELASTIC_INDEX: ${{ secrets.C_METADATA_ELASTIC_INDEX }}
+          ELASTICSEARCH_HOST: ${{ secrets.ELASTICSEARCH_HOST }}
+          ELASTICSEARCH_USER: ${{ secrets.ELASTICSEARCH_USER }}
+          ELASTICSEARCH_PASSWORD: ${{ secrets.ELASTICSEARCH_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ELASTICSEARCH_HOST" || { echo 'Missing secret ELASTICSEARCH_HOST' >&2; exit 1; }
+          test -n "$ELASTICSEARCH_USER" || { echo 'Missing secret ELASTICSEARCH_USER' >&2; exit 1; }
+          test -n "$ELASTICSEARCH_PASSWORD" || { echo 'Missing secret ELASTICSEARCH_PASSWORD' >&2; exit 1; }
+          python3 scripts/get_all_click_indexes.py \
+            "$C_METADATA_ELASTIC_INDEX" \
+            "$ELASTICSEARCH_HOST" \
+            "$ELASTICSEARCH_USER" \
+            "$ELASTICSEARCH_PASSWORD" \
+            --kind demos \
+            --output-dir "$OUTPUT_DIR"
+          test -s "$OUTPUT_DIR/metadata_demos_c.json"
+
+      - name: Build Rust Demo packages and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/package_example_release.py demos \
+            --source demos \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$RELEASE_TAG" \
+            --output "$OUTPUT_DIR"
+          test -s "$OUTPUT_DIR/metadata_demos_rust.json"
+          test -s "$OUTPUT_DIR/demo_packages_manifest.json"
+
+      - name: Show generated assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Generated Demo release assets:'
+          find "$OUTPUT_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Create Demo Packages release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes 'Automatically maintained C and Rust Demo metadata plus Rust Demo example archives.' \
+              --latest=false
+          fi
+
+      - name: Upload only changed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          remote_assets="$(gh api --paginate -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" | jq -s 'add // []')"
+          changed=0; unchanged=0
+          while IFS= read -r file; do
+            asset="$(basename "$file")"
+            local_sha="$(sha256sum "$file" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "$asset" '.[] | select(.name == $name) | (.digest // "")' <<<"$remote_assets" | head -n1)"
+            if [[ "$remote_digest" == "sha256:${local_sha}" ]]; then
+              echo "UNCHANGED  $asset"; unchanged=$((unchanged + 1)); continue
+            fi
+            echo "UPLOAD     $asset  sha256:$local_sha"
+            gh release upload "$RELEASE_TAG" "$file" --repo "$GITHUB_REPOSITORY" --clobber
+            changed=$((changed + 1))
+          done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -print | sort)
+          echo "Upload complete: $changed changed/new, $unchanged unchanged."
+
+      - name: Remove stale Rust Demo archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          gh api --paginate -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq -rs 'add // [] | .[] | select(.name | startswith("rust_demo_")) | [.id, .name] | @tsv' \
+            | while IFS=$'\t' read -r asset_id asset_name; do
+                if [[ ! -f "$OUTPUT_DIR/$asset_name" ]]; then
+                  echo "DELETE stale asset $asset_name"
+                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+                fi
+              done

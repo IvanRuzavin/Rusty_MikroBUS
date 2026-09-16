@@ -30,8 +30,10 @@ let demoMetadataLoadedAt = 0;
 const CORE_METADATA_URL = 'https://github.com/MikroElektronika/core_packages/releases/download/v2.0.0/metadata.json';
 const MIKROSDK_LATEST_API = 'https://api.github.com/repos/MikroElektronika/mikrosdk_v2/releases/latest';
 const RFP_DOWNLOAD_URL = 'https://www.renesas.com/en/software-tool/renesas-flash-programmer-programming-gui';
-const CLICK_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.1.0/metadata_clicks_c.json';
-const DEMO_METADATA_URL = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/v0.1.0/metadata_demos_c.json';
+const CLICK_RELEASE_TAG = 'click-packages';
+const DEMO_RELEASE_TAG = 'demo-packages';
+const CLICK_METADATA_URL = `https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/${CLICK_RELEASE_TAG}/metadata_clicks_c.json`;
+const DEMO_METADATA_URL = `https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/${DEMO_RELEASE_TAG}/metadata_demos_c.json`;
 
 
 

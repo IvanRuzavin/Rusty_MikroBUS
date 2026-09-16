@@ -48,6 +48,8 @@ try {
   const tiXds110Module = require('../c_ti_xds110_backend');
   const tiXds110 = tiXds110Module._test;
 
+  const extensionTest = require('../extension')._test;
+
   // config_registers settings_array fields must be materialized into real
   // register-bit values. STM32F756 PLLN=432 occupies bits 14:6 => 0x00006C00.
   const pllDefinition = {
@@ -721,6 +723,25 @@ try {
     assert.deepStrictEqual(setup.workspacePrefixArguments(visibilityRoot, { paths: { installPrefix } }), [
       '-DMIKROBUS_WORKSPACE_PREFIX_PATH=',
       `-DMikroC.Core_DIR=${coreConfigDir}`
+    ]);
+
+    // CMake cache values that carry filesystem paths must never expose native
+    // Windows backslashes to generated CMake code. In particular, C:\Users\...
+    // would otherwise make CMake parse \U as an invalid escape while resolving
+    // PREINIT_ROUTINE_PATH/preinit.h.
+    const windowsPreinit = 'C:\\Users\\Nikola\\AppData\\Roaming\\mikrobus\\preinit';
+    assert.strictEqual(
+      setup.cmakeDefinitionArgument('PREINIT_ROUTINE_PATH', windowsPreinit),
+      '-DPREINIT_ROUTINE_PATH=C:/Users/Nikola/AppData/Roaming/mikrobus/preinit'
+    );
+    assert.deepStrictEqual(setup.cmakeDefinitions({
+      CMAKE_TOOLCHAIN_FILE: 'C:\\Users\\Nikola\\setup\\toolchain.cmake',
+      PREINIT_ROUTINE_PATH: windowsPreinit,
+      TOOLCHAIN_LANGUAGE: 'GNU'
+    }), [
+      '-DCMAKE_TOOLCHAIN_FILE=C:/Users/Nikola/setup/toolchain.cmake',
+      '-DPREINIT_ROUTINE_PATH=C:/Users/Nikola/AppData/Roaming/mikrobus/preinit',
+      '-DTOOLCHAIN_LANGUAGE=GNU'
     ]);
 
     const sourceTreeArgs = setup.workspaceSourceTreeDefinitionArguments({ mode: 'full-sdk', applicationOutput: 'debug-terminal' });
@@ -2065,7 +2086,7 @@ endfunction()
   }
   assert.ok(cSetupSourceForXclm.includes('rebuilding ${setup.name} before Apply'));
 
-  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 65);
+  assert.strictEqual(setup.C_BUILD_SUPPORT_VERSION, 66);
 
   const armGdbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-arm-gdb-'));
   try {
@@ -2186,7 +2207,7 @@ endfunction()
   assert.ok(configuratorClientSource.includes('filteredBoardDevices'));
   assert.ok(configuratorClientSource.includes("type: 'selectCompiler'"));
   assert.ok(setupSource.includes('Workspace CMake install prefix:'));
-  assert.ok(setupSource.includes('`-DCMAKE_INSTALL_PREFIX=${workspaceInstallPrefix}`'));
+  assert.ok(setupSource.includes("cmakeDefinitionArgument('CMAKE_INSTALL_PREFIX', workspaceInstallPrefix)"));
   assert.ok(setupSource.includes('...preProjectDefinitions'));
   assert.ok(setupSource.includes('workspacePreProjectCmakeArguments'));
   assert.ok(setupSource.includes("'-DMSDK_BUILD_TFT_MODULES=FALSE'"));
@@ -2657,6 +2678,17 @@ endfunction()
   assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'x64').url, /ninja-win\.zip$/);
   assert.match(catalog.managedBuildToolAsset('ninja', 'win32', 'arm64').url, /ninja-winarm64\.zip$/);
   assert.match(catalog.managedBuildToolAsset('ninja', 'darwin', 'arm64').url, /ninja-mac\.zip$/);
+  assert.strictEqual(compilerSupport.compilerPackageAvailableOnHost('gcc_arm_compiler', 'darwin'), true);
+  assert.strictEqual(compilerSupport.compilerPackageAvailableOnHost('mikroc_arm', 'darwin'), true);
+  assert.strictEqual(compilerSupport.compilerPackageAvailableOnHost('microchip_xc32_compiler', 'darwin'), false);
+  assert.deepStrictEqual(
+    compilerSupport.filterCompilersForHost([
+      { uid: 'gcc_arm_none_eabi', installerPackage: 'gcc_arm_compiler' },
+      { uid: 'mchp_xc32', installerPackage: 'microchip_xc32_compiler' },
+      { uid: 'mikrocarm', installerPackage: 'mikroc_arm' }
+    ], 'darwin').map((item) => item.uid),
+    ['gcc_arm_none_eabi', 'mikrocarm']
+  );
   assert.throws(() => catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest' }), /latest release must be resolved/);
   assert.strictEqual(catalog.resolveDirect({ kind: 'sdk', name: 'mikrosdk', version: 'latest', downloadUrl: 'https://example/mikrosdk.7z' }).downloadUrl,
     'https://example/mikrosdk.7z');
@@ -2707,6 +2739,18 @@ endfunction()
   assert.ok(cPackageManagerSource.includes('programmerSpecsFromRows(db.listProgrammerInstallerPackages(context))'));
   assert.ok(!cPackageManagerSource.includes('general_packages_assets/${encodeURIComponent(packageName)}.7z'));
 
+  const macPackageIds = extensionTest.getPackageDefinitions('darwin').map((item) => item.id);
+  assert.ok(macPackageIds.includes('macBuild'));
+  assert.ok(macPackageIds.includes('rust'));
+  assert.ok(macPackageIds.includes('probeRs'));
+  assert.ok(macPackageIds.includes('jlink'));
+  assert.ok(!macPackageIds.includes('unsupportedHost'));
+  assert.match(extensionTest.getXpackAsset('openocd', 'darwin', 'arm64').file, /darwin-arm64\.tar\.gz$/);
+  assert.match(extensionTest.getXpackAsset('openocd', 'darwin', 'x64').file, /darwin-x64\.tar\.gz$/);
+  assert.match(extensionTest.getXpackAsset('armGcc', 'darwin', 'arm64').file, /darwin-arm64\.tar\.gz$/);
+  assert.match(extensionTest.getXpackAsset('armGcc', 'darwin', 'x64').file, /darwin-x64\.tar\.gz$/);
+  assert.ok(extensionTest.bundledSevenZip());
+
   const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
   assert.ok(extensionSource.includes('/Codegrip/live/codegrip_gdb_server/mac/codegrip_gdb_server.7z'));
   assert.ok(!extensionSource.includes('/NECTOStudio7/development/codegrip/'));
@@ -2719,10 +2763,12 @@ endfunction()
   assert.ok(extensionSource.includes("mikrobusRust.openClickExamples"));
   assert.ok(extensionSource.includes("mikrobusRust.openDemoExamples"));
   const rustExamplesSource = fs.readFileSync(path.join(__dirname, '..', 'rust_examples.js'), 'utf8');
+  assert.ok(rustExamplesSource.includes("CLICK_RELEASE_TAG = 'click-packages'"));
+  assert.ok(rustExamplesSource.includes("DEMO_RELEASE_TAG = 'demo-packages'"));
   assert.ok(rustExamplesSource.includes('metadata_clicks_rust.json'));
   assert.ok(rustExamplesSource.includes('metadata_demos_rust.json'));
-  assert.ok(cPackageManagerSource.includes('/releases/download/v0.1.0/metadata_clicks_c.json'));
-  assert.ok(cPackageManagerSource.includes('/releases/download/v0.1.0/metadata_demos_c.json'));
+  assert.ok(cPackageManagerSource.includes("CLICK_RELEASE_TAG = 'click-packages'"));
+  assert.ok(cPackageManagerSource.includes("DEMO_RELEASE_TAG = 'demo-packages'"));
   const cPackageCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_catalog.js'), 'utf8');
   assert.ok(cPackageCatalogSource.includes('/releases/download/v0.1.0/mikroc_cmake.7z'));
   assert.ok(cSetupSource.includes("managedBuildToolPackageSpec('cmake')"));

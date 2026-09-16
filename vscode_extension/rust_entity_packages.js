@@ -157,8 +157,13 @@ function findExecutableOnPath(names) {
 function sevenZipExecutable() {
   try {
     const sevenZipBin = require('7zip-bin');
-    if (sevenZipBin?.path7za && fs.existsSync(sevenZipBin.path7za)) return sevenZipBin.path7za;
-    if (sevenZipBin?.path7x && fs.existsSync(sevenZipBin.path7x)) return sevenZipBin.path7x;
+    for (const candidate of [sevenZipBin?.path7za, sevenZipBin?.path7x]) {
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      if (process.platform !== 'win32') {
+        try { fs.chmodSync(candidate, 0o755); } catch { continue; }
+      }
+      return candidate;
+    }
   } catch {}
   const fallback = findExecutableOnPath(process.platform === 'win32' ? ['7z', '7za'] : ['7zz', '7z', '7za']);
   if (!fallback) throw new Error('7-Zip executable is unavailable. Reinstall the extension package.');

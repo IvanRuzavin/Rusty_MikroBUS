@@ -41,7 +41,7 @@ function metadataMcuName(metadata = {}) {
 function setupMcuName(setup = {}) {
   return metadataMcuName(setup.metadata || {});
 }
-const C_BUILD_SUPPORT_VERSION = 65;
+const C_BUILD_SUPPORT_VERSION = 66;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
@@ -231,7 +231,7 @@ async function chooseSetupSelection(context) {
   })), { placeHolder: 'Select a C target MCU', emptyMessage: 'No supported C targets are present in the configured database.' });
   if (!devicePick) return;
 
-  const compilers = database.listCompilers(context, devicePick.value.uid, supportedCompilerUids());
+  const compilers = compilerSupport.filterCompilersForHost(database.listCompilers(context, devicePick.value.uid, supportedCompilerUids()));
   const compilerPick = await quickPick(compilers.map((compiler) => ({
     label: compiler.name,
     description: `${compiler.uid} ${compiler.version || ''}`.trim(),
@@ -1287,11 +1287,35 @@ function writeToolchain(filePath, setup, resolved, options) {
   fs.writeFileSync(filePath, text, 'utf8');
 }
 
+function isCmakePathDefinition(key) {
+  const name = String(key || '');
+  return name === 'CMAKE_MAKE_PROGRAM' ||
+    name === 'CMAKE_INSTALL_PREFIX' ||
+    name === 'CORE_LIB' ||
+    name === 'SEARCH_PATHS' ||
+    /(?:_PATH|_FILE|_DIR)$/.test(name);
+}
+
+function cmakeDefinitionValue(key, value) {
+  const text = cmakeValue(value);
+  // CMake treats backslashes in string values as escape introducers. Native
+  // Windows paths such as C:\Users\... therefore become invalid when a
+  // generated CMake module expands the cache variable (\U is not a valid
+  // CMake escape). CMake accepts forward slashes on Windows, so normalize only
+  // path-like cache definitions at the command-line boundary. Keep filesystem
+  // paths native everywhere else in the extension.
+  return isCmakePathDefinition(key) ? text.replace(/\\/g, '/') : text;
+}
+
+function cmakeDefinitionArgument(key, value) {
+  return `-D${key}=${cmakeDefinitionValue(key, value)}`;
+}
+
 function cmakeDefinitions(values) {
   const args = [];
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined || value === null || value === '') continue;
-    args.push(`-D${key}=${cmakeValue(value)}`);
+    args.push(cmakeDefinitionArgument(key, value));
   }
   return args;
 }
@@ -2492,7 +2516,7 @@ function isMikroSdkSourceProject(root) {
 }
 
 function workspacePrefixArguments(root, setup) {
-  if (!isMikroSdkSourceProject(root)) return [`-DCMAKE_PREFIX_PATH=${setup.paths.installPrefix}`];
+  if (!isMikroSdkSourceProject(root)) return [cmakeDefinitionArgument('CMAKE_PREFIX_PATH', setup.paths.installPrefix)];
   const coreConfig = findInstalledPackageConfig(setup.paths.installPrefix, 'MikroC.Core');
   if (!coreConfig) {
     throw new Error(`The selected setup does not contain MikroC.CoreConfig.cmake below ${setup.paths.installPrefix}. Rebuild the setup first.`);
@@ -2503,8 +2527,8 @@ function workspacePrefixArguments(root, setup) {
   // source. Use only the installed core package; every MikroSDK.* target then
   // comes from the checked-out source tree and its real CMake dependency graph.
   return [
-    '-DMIKROBUS_WORKSPACE_PREFIX_PATH=',
-    `-DMikroC.Core_DIR=${path.dirname(coreConfig)}`
+    cmakeDefinitionArgument('MIKROBUS_WORKSPACE_PREFIX_PATH', ''),
+    cmakeDefinitionArgument('MikroC.Core_DIR', path.dirname(coreConfig))
   ];
 }
 
@@ -2526,7 +2550,7 @@ function workspacePreProjectCmakeArguments(setup) {
   // configure command too, matching the SDK bootstrap/NECTO behavior.
   const compilerUid = setup?.metadata?.compiler?.uid || setup?.selection?.compilerUid;
   const variables = sdkPreProjectCmakeVariables({ adapter: compilerSupport.adapterFor(compilerUid) });
-  return Object.entries(variables).map(([key, value]) => `-D${key}=${cmakeValue(value)}`);
+  return Object.entries(variables).map(([key, value]) => cmakeDefinitionArgument(key, value));
 }
 
 async function configureWorkspaceProject(root, setup, cmake, ninja, token, options = {}) {
@@ -2542,10 +2566,10 @@ async function configureWorkspaceProject(root, setup, cmake, ninja, token, optio
   const sourceTreeDefinitions = sdkSourceMode ? workspaceSourceTreeDefinitionArguments(setup) : [];
   const preProjectDefinitions = workspacePreProjectCmakeArguments(setup);
   await runLogged(cmake, ['-S', root, '-B', build, '-G', 'Ninja',
-    `-DCMAKE_MAKE_PROGRAM=${ninja}`,
-    `-DCMAKE_TOOLCHAIN_FILE=${setup.paths.toolchainFile}`,
+    cmakeDefinitionArgument('CMAKE_MAKE_PROGRAM', ninja),
+    cmakeDefinitionArgument('CMAKE_TOOLCHAIN_FILE', setup.paths.toolchainFile),
     ...preProjectDefinitions,
-    `-DCMAKE_INSTALL_PREFIX=${workspaceInstallPrefix}`,
+    cmakeDefinitionArgument('CMAKE_INSTALL_PREFIX', workspaceInstallPrefix),
     ...workspacePrefixArguments(root, setup),
     ...sourceTreeDefinitions,
     `-DMIKROBUS_HARDWARE_DEBUG=${options.hardwareDebug ? 'TRUE' : 'FALSE'}`,
@@ -3675,7 +3699,9 @@ function renesasDebugCompRoots() {
   }
   roots.push(
     path.join(home, '.renesas', 'platform', 'DebugComp'),
-    path.join(home, '.config', 'Code', 'User', 'globalStorage', 'renesaselectronicscorporation.renesas-debug', 'DebugComp')
+    process.platform === 'darwin'
+      ? path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'renesaselectronicscorporation.renesas-debug', 'DebugComp')
+      : path.join(home, '.config', 'Code', 'User', 'globalStorage', 'renesaselectronicscorporation.renesas-debug', 'DebugComp')
   );
   return [...new Set(roots)].filter((candidate) => fs.existsSync(candidate));
 }
@@ -4551,6 +4577,10 @@ module.exports = {
     isPlainLldbExecutable,
     isUsableMiDebugger,
     findArmGdbInRoot,
+    isCmakePathDefinition,
+    cmakeDefinitionValue,
+    cmakeDefinitionArgument,
+    cmakeDefinitions,
     C_BUILD_SUPPORT_VERSION
   }
 };

@@ -8,10 +8,7 @@ on:
       - 'sdk/**'
       - 'database.db'
       - 'mikroc_cmake/**'
-      - 'clicks/**'
-      - 'demos/**'
       - 'scripts/package_general_release.py'
-      - 'scripts/get_all_click_indexes.py'
       - '.github/workflows/general-release.yml'
 
 permissions:
@@ -36,20 +33,14 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install packaging dependencies
+      - name: Install 7-Zip
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update
-
           if ! sudo apt-get install -y 7zip; then
             sudo apt-get install -y p7zip-full
           fi
-
-          python3 -m pip install \
-            --disable-pip-version-check \
-            'elasticsearch==7.13.4'
 
       - name: Validate required source folders/files
         shell: bash
@@ -59,8 +50,6 @@ jobs:
           test -s sdk/manifest.json
           test -s database.db
           test -d mikroc_cmake
-          test -d clicks
-          test -d demos
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -71,7 +60,7 @@ jobs:
           print(f'SDK version from sdk/manifest.json: {version}')
           PY
 
-      - name: Build SDK, mikroC CMake, Rust Click and Rust Demo assets
+      - name: Build shared General Release assets
         shell: bash
         run: |
           set -euo pipefail
@@ -79,33 +68,7 @@ jobs:
             --sdk sdk \
             --database database.db \
             --mikroc-cmake mikroc_cmake \
-            --clicks clicks \
-            --demos demos \
-            --repository "$GITHUB_REPOSITORY" \
-            --release-tag "$RELEASE_TAG" \
             --output "$OUTPUT_DIR"
-
-      - name: Generate C Click and Demo metadata from Elasticsearch
-        env:
-          C_METADATA_ELASTIC_INDEX: ${{ secrets.C_METADATA_ELASTIC_INDEX }}
-          ELASTICSEARCH_HOST: ${{ secrets.ELASTICSEARCH_HOST }}
-          ELASTICSEARCH_USER: ${{ secrets.ELASTICSEARCH_USER }}
-          ELASTICSEARCH_PASSWORD: ${{ secrets.ELASTICSEARCH_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$ELASTICSEARCH_HOST" || { echo 'Missing secret ELASTICSEARCH_HOST' >&2; exit 1; }
-          test -n "$ELASTICSEARCH_USER" || { echo 'Missing secret ELASTICSEARCH_USER' >&2; exit 1; }
-          test -n "$ELASTICSEARCH_PASSWORD" || { echo 'Missing secret ELASTICSEARCH_PASSWORD' >&2; exit 1; }
-
-          cd "$OUTPUT_DIR"
-          python3 "$GITHUB_WORKSPACE/scripts/get_all_click_indexes.py" \
-            "$C_METADATA_ELASTIC_INDEX" \
-            "$ELASTICSEARCH_HOST" \
-            "$ELASTICSEARCH_USER" \
-            "$ELASTICSEARCH_PASSWORD"
-          test -s metadata_clicks_c.json
-          test -s metadata_demos_c.json
 
       - name: Show generated assets
         shell: bash
@@ -125,7 +88,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_TITLE" \
-              --notes 'General Rusty_MikroBUS assets: Rust SDK, database, mikroC CMake module, Rust Click/Demo packages and C/Rust example metadata.' \
+              --notes 'Shared Rusty_MikroBUS assets: Rust SDK, database and mikroC CMake module. Click and Demo examples are maintained in dedicated releases.' \
               --latest=false
           fi
 
@@ -159,21 +122,3 @@ jobs:
           done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -print | sort)
 
           echo "Upload complete: $changed changed/new, $unchanged unchanged."
-
-      - name: Remove stale Rust Click/Demo archives
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_id="$(gh api -H 'Accept: application/vnd.github+json' \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
-          gh api --paginate -H 'Accept: application/vnd.github+json' \
-            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            | jq -rs 'add // [] | .[] | select(.name | startswith("rust_click_") or startswith("rust_demo_")) | [.id, .name] | @tsv' \
-            | while IFS=$'\t' read -r asset_id asset_name; do
-                if [[ ! -f "$OUTPUT_DIR/$asset_name" ]]; then
-                  echo "DELETE stale asset $asset_name"
-                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
-                fi
-              done

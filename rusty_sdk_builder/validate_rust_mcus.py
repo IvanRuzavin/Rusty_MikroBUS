@@ -2,14 +2,17 @@
 """
 validate_rust_mcus.py
 
-Zero-argument recursive validator for the published Rust MikroBUS environment.
+Recursive validator for the published Rust MikroBUS environment.
 
 Run:
-    python3 validate_rust_mcus.py
+    python3 validate_rust_mcus.py '^(STM32F4|STM32H7).*'
 
-The validator bootstraps everything needed from the same fixed GitHub release
-channels used by the VS Code extension:
+The single positional argument is a regular expression matched against MCU names
+from the downloaded database. There is no version/release argument: the validator
+uses the same fixed release channels as the VS Code extension and bootstraps its
+own build tools into a temporary workspace.
 
+Downloaded automatically:
     General Release v0.1.0 / tag v0.1.0
         - sdk.7z
         - database.db
@@ -17,19 +20,25 @@ channels used by the VS Code extension:
 
     Rust Core Packages / tag rust-core-packages
         - rust_core_packages.json
-        - every Core package required by MCU.SYSTEM_LIB in database.db
+        - Core archives required by the selected MCU.SYSTEM_LIB values
 
     Rust MCU Card Packages / tag rust-card-packages
         - rust_card_packages.json
-        - every enabled MCUCard package referenced by database.db
+        - MCU Card BSP archives required by selected MCU setups
 
     Rust Board Packages / tag rust-board-packages
         - rust_board_packages.json
-        - every enabled Board package referenced by database.db
+        - Board BSP archives required by selected MCU setups
 
-The MCU list is also read from database.db, so no SDK/core/MCU-list arguments
-are necessary. Package catalogs, package SHA-256 values, database availability,
-and archive contents are validated before recursive builds start.
+    Build tools
+        - portable 7-Zip (7zip-bin) unless explicitly overridden
+        - isolated rustup/rustc/cargo stable toolchain unless explicitly overridden
+        - every Rust compilation target required by the selected MCUs
+
+For each direct MCU setup and every applicable Board + MCU Card setup the tool:
+    1. generates the setup using the same database/Core/BSP inputs as the extension;
+    2. performs a real Cargo build of the generated setup;
+    3. injects a blank minimal no_std project and performs a second Cargo build.
 
 Optional environment overrides:
     MIKROBUS_RUST_REPOSITORY=owner/repository
@@ -53,6 +62,7 @@ import csv
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -61,6 +71,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 import tomllib
 import urllib.parse
 import urllib.request
@@ -70,7 +81,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCRIPT_VERSION = "1.3.1"
+SCRIPT_VERSION = "2.0.0"
 BLANK_BIN_NAME = "mikrobus_validation_blank"
 SETUP_STAGING_NAME = ".setup.__mikrobus_staging"
 
@@ -101,6 +112,8 @@ DEFAULT_GENERAL_RELEASE_TAG = "v0.1.0"
 CORE_PACKAGES_RELEASE = "rust-core-packages"
 CORE_PACKAGES_CATALOG = "rust_core_packages.json"
 GENERAL_RELEASE_MANIFEST = "general_release_manifest.json"
+SEVENZIP_BIN_VERSION = "5.2.0"
+SEVENZIP_BIN_URL = f"https://registry.npmjs.org/7zip-bin/-/7zip-bin-{SEVENZIP_BIN_VERSION}.tgz"
 
 
 class ValidationError(RuntimeError):
@@ -150,7 +163,7 @@ class ValidationResult:
     clock_mhz: int | None = None
     setup_generated: bool = False
     mikrobus_generated: bool = False
-    setup_check: bool = False
+    setup_build: bool = False
     blank_build: bool = False
     status: str = "FAILED"
     failed_stage: str = ""
@@ -198,14 +211,23 @@ def safe_name(value: str) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Download the published Rust SDK/database/Core/Board/Card packages "
-            "and recursively validate every MCU/setup. No positional arguments are required."
+            "Download the published Rust environment and recursively build every "
+            "MCU/setup whose MCU name matches the supplied regular expression."
         )
     )
     parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {SCRIPT_VERSION}"
+        "mcu_regex",
+        help=(
+            "Regular expression matched against MCU names from database.db. "
+            "Example: '^(STM32F4|STM32H7).*'"
+        ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        re.compile(args.mcu_regex)
+    except re.error as exc:
+        parser.error(f"invalid MCU regular expression: {exc}")
+    return args
 
 
 def require_directory(value: str, label: str) -> Path:
@@ -252,6 +274,161 @@ def _download_file(url: str, destination: Path) -> None:
             shutil.copyfileobj(response, handle)
     except Exception as exc:
         raise ValidationError(f"Failed to download required release asset {url}: {exc}") from exc
+
+
+def _host_platform_arch() -> tuple[str, str]:
+    if sys.platform.startswith("win"):
+        host = "win"
+    elif sys.platform == "darwin":
+        host = "mac"
+    elif sys.platform.startswith("linux"):
+        host = "linux"
+    else:
+        raise ValidationError(f"Unsupported host platform for managed tools: {sys.platform}")
+
+    machine = platform.machine().strip().lower()
+    arch_map = {
+        "x86_64": "x64",
+        "amd64": "x64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "i386": "ia32",
+        "i686": "ia32",
+        "x86": "ia32",
+    }
+    arch = arch_map.get(machine)
+    if not arch:
+        raise ValidationError(f"Unsupported host architecture for managed tools: {machine or '<unknown>'}")
+    return host, arch
+
+
+def bootstrap_sevenzip(temp_root: Path) -> str:
+    configured = os.environ.get(ENV_7ZIP, "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if not candidate.is_file():
+            raise ValidationError(f"{ENV_7ZIP} points to a missing executable: {candidate}")
+        return str(candidate)
+
+    host, arch = _host_platform_arch()
+    archive = temp_root / ".managed-tools" / f"7zip-bin-{SEVENZIP_BIN_VERSION}.tgz"
+    extract_root = temp_root / ".managed-tools" / "7zip-bin"
+    executable_name = "7za.exe" if host == "win" else "7za"
+    relative = Path("package") / host / arch / executable_name
+    target = extract_root / host / arch / executable_name
+
+    if not target.is_file():
+        print(f"Downloading portable 7-Zip {SEVENZIP_BIN_VERSION} for {host}/{arch}...", flush=True)
+        _download_file(SEVENZIP_BIN_URL, archive)
+        try:
+            with tarfile.open(archive, "r:gz") as bundle:
+                try:
+                    member = bundle.getmember(relative.as_posix())
+                except KeyError as exc:
+                    raise ValidationError(
+                        f"7zip-bin {SEVENZIP_BIN_VERSION} does not contain {relative.as_posix()}"
+                    ) from exc
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = bundle.extractfile(member)
+                if source is None:
+                    raise ValidationError(f"Could not extract {relative.as_posix()} from 7zip-bin.")
+                with target.open("wb") as handle:
+                    shutil.copyfileobj(source, handle)
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError(f"Failed to unpack portable 7-Zip: {exc}") from exc
+
+    if host != "win":
+        target.chmod(0o755)
+    os.environ[ENV_7ZIP] = str(target)
+    return str(target)
+
+
+def _rustup_host_triple() -> tuple[str, str]:
+    host, arch = _host_platform_arch()
+    if arch not in {"x64", "arm64"}:
+        raise ValidationError(f"Managed Rust bootstrap supports x64/arm64 hosts, got {host}/{arch}.")
+    cpu = "x86_64" if arch == "x64" else "aarch64"
+    if host == "win":
+        return f"{cpu}-pc-windows-msvc", "rustup-init.exe"
+    if host == "mac":
+        return f"{cpu}-apple-darwin", "rustup-init"
+    return f"{cpu}-unknown-linux-gnu", "rustup-init"
+
+
+def _run_bootstrap_command(args: list[str], cwd: Path, env: dict[str, str], label: str) -> None:
+    result = subprocess.run(
+        args,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode != 0:
+        raise ValidationError(f"{label} failed with exit code {result.returncode}:\n{result.stdout}")
+
+
+def bootstrap_rust_toolchain(temp_root: Path) -> tuple[str, str]:
+    configured_cargo = os.environ.get(ENV_CARGO, "").strip()
+    configured_rustup = os.environ.get(ENV_RUSTUP, "").strip()
+    if configured_cargo or configured_rustup:
+        if not (configured_cargo and configured_rustup):
+            raise ValidationError(
+                f"Set both {ENV_CARGO} and {ENV_RUSTUP}, or neither, so the validator uses one Rust installation."
+            )
+        return (
+            resolve_executable(ENV_CARGO, "cargo"),
+            resolve_executable(ENV_RUSTUP, "rustup"),
+        )
+
+    triple, installer_name = _rustup_host_triple()
+    tools_root = temp_root / ".managed-tools" / "rust"
+    cargo_home = tools_root / "cargo"
+    rustup_home = tools_root / "rustup"
+    cargo_bin = cargo_home / "bin"
+    executable_suffix = ".exe" if sys.platform.startswith("win") else ""
+    cargo = cargo_bin / f"cargo{executable_suffix}"
+    rustup = cargo_bin / f"rustup{executable_suffix}"
+
+    env = os.environ.copy()
+    env["CARGO_HOME"] = str(cargo_home)
+    env["RUSTUP_HOME"] = str(rustup_home)
+    env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
+
+    if not cargo.is_file() or not rustup.is_file():
+        installer = tools_root / installer_name
+        url = f"https://static.rust-lang.org/rustup/dist/{triple}/{installer_name}"
+        print(f"Downloading isolated Rust toolchain bootstrap for {triple}...", flush=True)
+        _download_file(url, installer)
+        if not sys.platform.startswith("win"):
+            installer.chmod(0o755)
+        _run_bootstrap_command(
+            [
+                str(installer),
+                "-y",
+                "--no-modify-path",
+                "--profile",
+                "minimal",
+                "--default-toolchain",
+                "stable",
+            ],
+            tools_root,
+            env,
+            "rustup-init",
+        )
+
+    if not cargo.is_file() or not rustup.is_file():
+        raise ValidationError(f"Managed Rust installation is incomplete under {tools_root}.")
+
+    # All later rustup/cargo subprocesses inherit this isolated environment.
+    os.environ["CARGO_HOME"] = str(cargo_home)
+    os.environ["RUSTUP_HOME"] = str(rustup_home)
+    os.environ["PATH"] = str(cargo_bin) + os.pathsep + os.environ.get("PATH", "")
+    os.environ[ENV_CARGO] = str(cargo)
+    os.environ[ENV_RUSTUP] = str(rustup)
+    return str(cargo), str(rustup)
 
 
 def _file_sha256(path: Path) -> str:
@@ -342,17 +519,36 @@ def load_all_mcus(database: Path) -> list[str]:
     return result
 
 
-def _required_system_libs(database: Path) -> list[str]:
+def select_mcus(database: Path, pattern: str) -> list[str]:
+    try:
+        matcher = re.compile(pattern)
+    except re.error as exc:
+        raise ValidationError(f"Invalid MCU regular expression {pattern!r}: {exc}") from exc
+    matches = [name for name in load_all_mcus(database) if matcher.search(name)]
+    if not matches:
+        raise ValidationError(f"MCU regex {pattern!r} matched no Rust MCU rows in {database.name}.")
+    return matches
+
+
+def _required_system_libs(database: Path, mcus: Iterable[str]) -> list[str]:
+    wanted = {str(name).casefold() for name in mcus}
     with sqlite3.connect(database) as db:
         rows = db.execute(
             """
-            SELECT DISTINCT SYSTEM_LIB
+            SELECT NAME, SYSTEM_LIB
             FROM MCU
             WHERE trim(coalesce(SYSTEM_LIB, '')) <> ''
-            ORDER BY SYSTEM_LIB COLLATE NOCASE
+            ORDER BY SYSTEM_LIB COLLATE NOCASE, NAME COLLATE NOCASE
             """
         ).fetchall()
-    return [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
+    libraries = {
+        str(system_lib).strip()
+        for name, system_lib in rows
+        if str(name or "").casefold() in wanted and str(system_lib or "").strip()
+    }
+    if not libraries:
+        raise ValidationError("Selected MCUs do not reference any Rust Core SYSTEM_LIB packages.")
+    return sorted(libraries, key=str.casefold)
 
 
 def _merge_tree(source: Path, destination: Path) -> None:
@@ -421,12 +617,12 @@ class PublishedEnvironmentBootstrap:
             raise ValidationError(f"{CORE_PACKAGES_CATALOG} has an unsupported schema.")
         return data
 
-    def _bootstrap_core(self, database: Path) -> tuple[Path, int]:
+    def _bootstrap_core(self, database: Path, mcus: Iterable[str]) -> tuple[Path, int]:
         catalog = self._core_catalog()
         merged_root = self.temp_root / "core"
         merged_root.mkdir(parents=True, exist_ok=True)
         package_count = 0
-        for system_lib in _required_system_libs(database):
+        for system_lib in _required_system_libs(database, mcus):
             matches = [
                 item for item in catalog["packages"]
                 if isinstance(item, dict)
@@ -468,16 +664,9 @@ class PublishedEnvironmentBootstrap:
             package_count += 1
         return merged_root, package_count
 
-    def bootstrap(self) -> tuple[Path, Path, Path, int]:
+    def bootstrap(self, mcu_regex: str) -> tuple[Path, Path, Path, int, list[str]]:
         manifest = self._general_manifest()
         general_root = self.download_root / "general"
-        sdk_archive = _download_manifest_asset(
-            self.repository,
-            self.general_tag,
-            manifest,
-            "sdk.7z",
-            general_root / "sdk.7z",
-        )
         database = _download_manifest_asset(
             self.repository,
             self.general_tag,
@@ -485,46 +674,45 @@ class PublishedEnvironmentBootstrap:
             "database.db",
             general_root / "database.db",
         )
+        mcus = select_mcus(database, mcu_regex)
+        sdk_archive = _download_manifest_asset(
+            self.repository,
+            self.general_tag,
+            manifest,
+            "sdk.7z",
+            general_root / "sdk.7z",
+        )
         sdk_root = self.temp_root / "published-sdk"
         _extract_7z(sdk_archive, sdk_root, self.sevenzip)
         if not (sdk_root / "Cargo.toml").is_file():
             raise ValidationError(f"Published sdk.7z does not contain Cargo.toml at its root: {sdk_root}")
-        core_root, core_count = self._bootstrap_core(database)
-        return sdk_root, core_root, database, core_count
+        core_root, core_count = self._bootstrap_core(database, mcus)
+        return sdk_root, core_root, database, core_count, mcus
 
 
-def preflight_bsp_packages(database: Path, resolver: "BspPackageResolver") -> tuple[int, int]:
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
-        boards = db.execute(
-            """
-            SELECT UID, NAME, BSP_PATH
-            FROM Board
-            WHERE ENABLED = 1 AND trim(coalesce(BSP_PATH, '')) <> ''
-            ORDER BY NAME COLLATE NOCASE, UID
-            """
-        ).fetchall()
-        cards = db.execute(
-            """
-            SELECT UID, NAME, BSP_PATH
-            FROM MCUCard
-            WHERE ENABLED = 1 AND trim(coalesce(BSP_PATH, '')) <> ''
-            ORDER BY NAME COLLATE NOCASE, UID
-            """
-        ).fetchall()
+def preflight_bsp_packages(
+    database: Path,
+    resolver: "BspPackageResolver",
+    mcus: Iterable[str],
+) -> tuple[int, int]:
+    boards: dict[str, tuple[str, str]] = {}
+    cards: dict[str, tuple[str, str]] = {}
 
-    for row in boards:
-        uid = str(row["UID"] or "").strip()
-        path = str(row["BSP_PATH"] or "").strip()
-        if not uid or not path:
-            raise ValidationError(f"Enabled Board '{row['NAME']}' is missing UID or BSP_PATH in database.db.")
+    for mcu in mcus:
+        combinations, _cards_without_boards = read_board_card_combinations(database, mcu)
+        for combination in combinations:
+            boards.setdefault(
+                combination.board_uid.casefold(),
+                (combination.board_uid, combination.board_bsp_path),
+            )
+            cards.setdefault(
+                combination.card_uid.casefold(),
+                (combination.card_uid, combination.card_bsp_path),
+            )
+
+    for uid, path in boards.values():
         resolver.resolve("board", uid, path)
-
-    for row in cards:
-        uid = str(row["UID"] or "").strip()
-        path = str(row["BSP_PATH"] or "").strip()
-        if not uid or not path:
-            raise ValidationError(f"Enabled MCUCard '{row['NAME']}' is missing UID or BSP_PATH in database.db.")
+    for uid, path in cards.values():
         resolver.resolve("card", uid, path)
 
     return len(boards), len(cards)
@@ -606,8 +794,8 @@ class BspPackageResolver:
       2. a raw legacy bsp/ tree (useful when validating directly in the repo);
       3. the fixed GitHub Board/Card package releases, downloaded into a temp cache.
 
-    This mirrors the VS Code extension's split package model while keeping the
-    validator's original three positional arguments unchanged.
+    This mirrors the VS Code extension's split package model while the validator
+    keeps a single MCU-regex positional argument.
     """
 
     DEFAULT_REPOSITORY = "IvanRuzavin/Rusty_MikroBUS"
@@ -1860,7 +2048,7 @@ def run_command(
     return int(process.returncode or 0)
 
 
-def cargo_setup_check(
+def cargo_setup_build(
     cargo: str,
     working_sdk: Path,
     target: str,
@@ -1868,11 +2056,11 @@ def cargo_setup_check(
     logger: Logger,
     timeout: int,
 ) -> None:
-    logger.section("SETUP CARGO CHECK")
+    logger.section("GENERATED SETUP BUILD")
     code = run_command(
         [
             cargo,
-            "check",
+            "build",
             "--manifest-path",
             str(working_sdk / "Cargo.toml"),
             "--target",
@@ -1884,7 +2072,7 @@ def cargo_setup_check(
         extra_env={"CARGO_TARGET_DIR": str(cargo_target_dir)},
     )
     if code != 0:
-        raise ValidationError(f"Cargo setup check failed with exit code {code}.")
+        raise ValidationError(f"Generated setup build failed with exit code {code}.")
 
 
 def collect_local_setup_dependencies(cargo_toml: Path) -> list[str]:
@@ -2338,8 +2526,8 @@ def run_configuration_check(
         result.setup_generated = True
         result.mikrobus_generated = mikrobus_generated
 
-        result.failed_stage = "setup-check"
-        cargo_setup_check(
+        result.failed_stage = "setup-build"
+        cargo_setup_build(
             cargo,
             working_sdk,
             metadata.target,
@@ -2347,7 +2535,7 @@ def run_configuration_check(
             logger,
             timeout,
         )
-        result.setup_check = True
+        result.setup_build = True
 
         result.failed_stage = "blank-project-build"
         cargo_blank_build(
@@ -2422,7 +2610,7 @@ def metadata_failure_result(
 
 
 def main() -> int:
-    parse_args()
+    args = parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_root = Path.cwd() / f"rust_mcu_validation_{timestamp}"
@@ -2434,19 +2622,26 @@ def main() -> int:
     cargo_target_dir = temp_root / CARGO_TARGET_DIR_NAME
 
     try:
-        print("Rust MCU bulk validator")
-        print(f"  Version:  {SCRIPT_VERSION}")
-        print("  Mode:     zero-argument published-environment bootstrap")
-        print(f"  Temp:     {temp_root}")
+        print("Rust MCU recursive build validator")
+        print(f"  Internal version: {SCRIPT_VERSION}")
+        print(f"  MCU regex:        {args.mcu_regex}")
+        print("  Mode:             one-argument managed bootstrap")
+        print(f"  Temp:             {temp_root}")
         print()
-        print("Bootstrapping General Release, Core packages and database...", flush=True)
+
+        print("Bootstrapping build tools...", flush=True)
+        sevenzip = bootstrap_sevenzip(temp_root)
+        cargo, rustup = bootstrap_rust_toolchain(temp_root)
+        print(f"Portable 7-Zip:     {sevenzip}")
+        print(f"Cargo:              {cargo}")
+        print(f"Rustup:             {rustup}")
+        print()
+
+        print("Bootstrapping General Release, selected Core packages and database...", flush=True)
         bootstrap = PublishedEnvironmentBootstrap(temp_root)
-        sdk_root, core_root, database, core_package_count = bootstrap.bootstrap()
+        sdk_root, core_root, database, core_package_count, mcus = bootstrap.bootstrap(args.mcu_regex)
 
         validate_database_schema(database)
-        mcus = load_all_mcus(database)
-        cargo = resolve_executable(ENV_CARGO, "cargo")
-        rustup = resolve_executable(ENV_RUSTUP, "rustup")
         try:
             timeout = int(os.environ.get(ENV_TIMEOUT, "900"))
         except ValueError:
@@ -2461,7 +2656,7 @@ def main() -> int:
         print(f"Published SDK:      {sdk_root}")
         print(f"Published database: {database}")
         print(f"Core packages:      {core_package_count} downloaded/verified")
-        print(f"MCUs from database: {len(mcus)}")
+        print(f"Selected MCUs:      {len(mcus)}")
         print()
 
         print("Creating one disposable SDK working copy...", flush=True)
@@ -2471,10 +2666,10 @@ def main() -> int:
         bsp_resolver = BspPackageResolver(
             sdk_root, core_root, temp_root / ".rust-bsp-package-cache"
         )
-        print("Preflighting every enabled Board and MCU Card package...", flush=True)
-        board_package_count, card_package_count = preflight_bsp_packages(database, bsp_resolver)
+        print("Preflighting Board and MCU Card packages required by selected setups...", flush=True)
+        board_package_count, card_package_count = preflight_bsp_packages(database, bsp_resolver, mcus)
         bsp_description = (
-            f"{bsp_resolver.description()}; preflight verified "
+            f"{bsp_resolver.description()}; selected-setup preflight verified "
             f"{board_package_count} board package(s), {card_package_count} card package(s)"
         )
         print(f"Board packages:     {board_package_count} downloaded/verified")
@@ -2490,9 +2685,7 @@ def main() -> int:
         shutil.rmtree(temp_root, ignore_errors=True)
         return 2
 
-    print(f"  Cargo:    {cargo}")
-    print(f"  Rustup:   {rustup}")
-    print(f"  Reports:  {report_root}")
+    print(f"Reports:             {report_root}")
     print()
 
     results: list[ValidationResult] = []

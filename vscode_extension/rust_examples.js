@@ -8,10 +8,11 @@ const path = require('path');
 const vscode = require('vscode');
 const packages = require('./c_package_manager');
 
-const GENERAL_RELEASE_TAG = 'v0.1.0';
-const RELEASE_BASE = `https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download/${GENERAL_RELEASE_TAG}`;
-const CLICK_METADATA_URL = `${RELEASE_BASE}/metadata_clicks_rust.json`;
-const DEMO_METADATA_URL = `${RELEASE_BASE}/metadata_demos_rust.json`;
+const CLICK_RELEASE_TAG = 'click-packages';
+const DEMO_RELEASE_TAG = 'demo-packages';
+const RELEASE_BASE = 'https://github.com/IvanRuzavin/Rusty_MikroBUS/releases/download';
+const CLICK_METADATA_URL = `${RELEASE_BASE}/${CLICK_RELEASE_TAG}/metadata_clicks_rust.json`;
+const DEMO_METADATA_URL = `${RELEASE_BASE}/${DEMO_RELEASE_TAG}/metadata_demos_rust.json`;
 
 let clickPanel;
 let demoPanel;

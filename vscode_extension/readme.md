@@ -53,6 +53,8 @@ Rust MCU availability is intentionally **database-driven rather than hard-coded 
 
 The vendor filter in **Configure MCU or Board** always reflects the vendors that are actually available in the installed Rust database, so the UI remains accurate as device coverage grows.
 
+Click and Demo examples are released independently from the shared SDK/database assets. The fixed **Click Packages** release (`click-packages`) contains both C and Rust Click metadata plus the Rust Click archives, while the fixed **Demo Packages** release (`demo-packages`) contains the corresponding C/Rust Demo metadata and Rust Demo archives. This allows examples to be updated without rebuilding the General Release.
+
 ---
 
 # C support
@@ -171,6 +173,8 @@ The extension can manage the packages needed by a setup rather than requiring ev
 | **Linux** | ✅ Supported |
 | **Windows** | ✅ Supported |
 | **macOS** | ✅ Supported |
+
+macOS support covers both Intel (`x64`) and Apple Silicon (`arm64`) for the extension-managed Rust OpenOCD/ARM GNU packages. The Rust environment supports rustup, probe-rs, CODEGRIP and SEGGER J-Link discovery. The C environment uses managed CMake/Ninja plus the host packages that currently provide macOS payloads; ARM GNU and the bundled mikroC families are offered automatically on macOS. Compiler choices without a managed Darwin payload are hidden instead of failing later during setup creation.
 
 Some vendor tools are distributed separately and may still require their normal vendor installer, USB driver or license on the host system.
 

@@ -200,7 +200,7 @@ function environmentState(context) {
 }
 
 async function loadDeviceDetail(context, deviceUid, compilerUid, boardUid) {
-  const compilers = database.listCompilers(context, deviceUid, SUPPORTED_COMPILERS);
+  const compilers = compilerSupport.filterCompilersForHost(database.listCompilers(context, deviceUid, SUPPORTED_COMPILERS));
   if (!compilers.length) throw new Error(`No supported C compiler is mapped to ${deviceUid}.`);
   const compiler = compilerSupport.preferredCompiler(compilers, compilerUid);
   const info = database.getDeviceCoreInfo(context, deviceUid, compiler.uid);

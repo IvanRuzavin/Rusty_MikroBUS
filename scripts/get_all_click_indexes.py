@@ -1,302 +1,166 @@
-import time
+#!/usr/bin/env python3
+"""Generate C Click and/or Demo metadata JSON from the package Elasticsearch index."""
+
+from __future__ import annotations
+
 import argparse
 import json
+import time
+from pathlib import Path
 
-from datetime import datetime
 from elasticsearch import Elasticsearch
 
 
 def fetch_current_indexed_packages(es: Elasticsearch, index_name: str):
-    query_search = {
-        "size": 5000,
-        "query": {
-            "match_all": {}
-        }
-    }
-
+    query_search = {"size": 5000, "query": {"match_all": {}}}
     response = None
 
     for retry in range(1, 11):
         try:
-            response = es.search(
-                index=index_name,
-                body=query_search
-            )
-
+            response = es.search(index=index_name, body=query_search)
             if not response.get("timed_out", False):
                 break
-
             print(f"Search query timed out - retry number {retry}")
-
-        except Exception as e:
-            print(
-                f"Executing search query - retry number {retry}: {e}"
-            )
-
+        except Exception as exc:
+            print(f"Executing search query - retry number {retry}: {exc}")
         time.sleep(1)
 
     if response is None:
         raise RuntimeError(
-            f"Failed to retrieve packages from Elasticsearch index "
-            f"'{index_name}' after 10 attempts."
+            f"Failed to retrieve packages from Elasticsearch index '{index_name}' after 10 attempts."
         )
-
     if response.get("timed_out", False):
         raise RuntimeError(
-            f"Elasticsearch search on index '{index_name}' "
-            f"timed out after 10 attempts."
+            f"Elasticsearch search on index '{index_name}' timed out after 10 attempts."
         )
 
     all_packages = []
-
     for hit in response.get("hits", {}).get("hits", []):
         source = hit.get("_source", {})
+        if "name" in source:
+            all_packages.append(source)
 
-        if "name" not in source:
-            continue
-
-        all_packages.append(source)
-
-    # Sort alphabetically by package name
-    all_packages.sort(
-        key=lambda x: x.get("name", "").lower()
-    )
-
+    all_packages.sort(key=lambda item: item.get("name", "").lower())
     return all_packages
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Create Click and Demo metadata JSON from Elasticsearch."
-    )
+def build_click_metadata(all_packages):
+    metadata_clicks = {}
+    click_count = 0
 
+    for item in all_packages:
+        if item.get("type") != "click":
+            continue
+        link = item.get("link")
+        name = item.get("display_name")
+        if not link:
+            print(f"Skipping Click '{item.get('name', 'UNKNOWN')}' because it has no link.")
+            continue
+
+        categories = item.get("categories", [])
+        if not categories:
+            print(f"Skipping Click '{item.get('name', 'UNKNOWN')}' because it has no categories.")
+            continue
+        category = categories[0].get("slug")
+        if not category:
+            print(
+                f"Skipping Click '{item.get('name', 'UNKNOWN')}' because its first category has no slug."
+            )
+            continue
+
+        metadata_clicks.setdefault(category, []).append({"name": name, "download_link": link})
+        click_count += 1
+
+    for category in metadata_clicks:
+        metadata_clicks[category].sort(key=lambda item: (item.get("name") or "").lower())
+    metadata_clicks = dict(sorted(metadata_clicks.items(), key=lambda item: item[0].lower()))
+    return metadata_clicks, click_count
+
+
+def build_demo_metadata(all_packages):
+    metadata_demos = []
+    demo_count = 0
+
+    for item in all_packages:
+        if item.get("type") != "project":
+            continue
+        link = item.get("link")
+        name = item.get("display_name")
+        if not link:
+            print(f"Skipping Demo '{item.get('name', 'UNKNOWN')}' because it has no link.")
+            continue
+        metadata_demos.append({"name": name, "download_link": link})
+        demo_count += 1
+
+    metadata_demos.sort(key=lambda item: (item.get("name") or "").lower())
+    return metadata_demos, demo_count
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("index", help="Click and Demo packages Elasticsearch index.")
+    parser.add_argument("es_host", help="Elasticsearch host.")
+    parser.add_argument("es_user", help="Elasticsearch user.")
+    parser.add_argument("es_password", help="Elasticsearch password.")
     parser.add_argument(
-        "index",
-        help="Click and Demo packages Elasticsearch index."
+        "--kind",
+        choices=("all", "clicks", "demos"),
+        default="all",
+        help="Metadata family to write. Defaults to both for backwards compatibility.",
     )
-
     parser.add_argument(
-        "es_host",
-        help="Elasticsearch host.",
-        type=str
+        "--output-dir",
+        default=".",
+        help="Destination directory for generated metadata JSON.",
     )
+    return parser.parse_args()
 
-    parser.add_argument(
-        "es_user",
-        help="Elasticsearch user.",
-        type=str
-    )
 
-    parser.add_argument(
-        "es_password",
-        help="Elasticsearch password.",
-        type=str
-    )
+def main() -> int:
+    args = parse_args()
 
-    args = parser.parse_args()
-
-    # Connect to Elasticsearch
     es = None
-
     for retry in range(1, 11):
         try:
-            # Elasticsearch Python client 7.x compatible
-            es = Elasticsearch(
-                [args.es_host],
-                http_auth=(args.es_user, args.es_password)
-            )
-
+            es = Elasticsearch([args.es_host], http_auth=(args.es_user, args.es_password))
             if es.ping():
                 print("Connected to Elasticsearch.")
                 break
-
-        except Exception as e:
-            print(
-                f"Elasticsearch connection attempt {retry} failed: {e}"
-            )
-
+        except Exception as exc:
+            print(f"Elasticsearch connection attempt {retry} failed: {exc}")
         if retry == 10:
             raise RuntimeError("Connection to Elasticsearch failed!")
-
         time.sleep(1)
 
-    current_date = datetime.now().strftime("%Y-%m-%d")
-
-    # Get all indexed packages
-    all_packages = fetch_current_indexed_packages(
-        es,
-        args.index
-    )
-
+    all_packages = fetch_current_indexed_packages(es, args.index)
     print(f"Found {len(all_packages)} indexed packages.")
 
-    # ---------------------------------------------------------
-    # Click metadata
-    # ---------------------------------------------------------
+    output = Path(args.output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
 
-    # Dictionary where each category contains a list of Clicks
-    metadata_clicks = {}
-
-    click_count = 0
-
-    # ---------------------------------------------------------
-    # Demo metadata
-    # ---------------------------------------------------------
-
-    # Projects/demos have no category, so keep them in a flat list
-    metadata_demos = []
-
-    demo_count = 0
-
-    # ---------------------------------------------------------
-    # Process all packages
-    # ---------------------------------------------------------
-
-    for item in all_packages:
-        item_type = item.get("type")
-
-        # =====================================================
-        # CLICK
-        # =====================================================
-
-        if item_type == "click":
-            link = item.get("link")
-            name = item.get("display_name")
-
-            if not link:
-                print(
-                    f"Skipping Click '{item.get('name', 'UNKNOWN')}' "
-                    f"because it has no link."
-                )
-                continue
-
-            categories = item.get("categories", [])
-
-            if not categories:
-                print(
-                    f"Skipping Click '{item.get('name', 'UNKNOWN')}' "
-                    f"because it has no categories."
-                )
-                continue
-
-            category = categories[0].get("slug")
-
-            if not category:
-                print(
-                    f"Skipping Click '{item.get('name', 'UNKNOWN')}' "
-                    f"because its first category has no slug."
-                )
-                continue
-
-            metadata_item = {
-                "name": name,
-                "download_link": link
-            }
-
-            # Create category array if it doesn't exist yet
-            if category not in metadata_clicks:
-                metadata_clicks[category] = []
-
-            # Add Click to its category
-            metadata_clicks[category].append(metadata_item)
-
-            click_count += 1
-
-        # =====================================================
-        # PROJECT / DEMO
-        # =====================================================
-
-        elif item_type == "project":
-            link = item.get("link")
-            name = item.get("display_name")
-            clicks = item.get("clicks")
-            # click_names = []
-            # for click in clicks:
-            #     click_names.append(click['name'])
-
-            if not link:
-                print(
-                    f"Skipping Demo '{item.get('name', 'UNKNOWN')}' "
-                    f"because it has no link."
-                )
-                continue
-
-            metadata_item = {
-                "name": name,
-                "download_link": link,
-                # "clicks": click_names
-            }
-
-            metadata_demos.append(metadata_item)
-
-            demo_count += 1
-
-    # ---------------------------------------------------------
-    # Sort entries
-    # ---------------------------------------------------------
-
-    # Sort Clicks inside every category by display name
-    for category in metadata_clicks:
-        metadata_clicks[category].sort(
-            key=lambda x: (x.get("name") or "").lower()
+    if args.kind in {"all", "clicks"}:
+        metadata_clicks, click_count = build_click_metadata(all_packages)
+        click_path = output / "metadata_clicks_c.json"
+        click_path.write_text(
+            json.dumps(metadata_clicks, indent=4, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            f"Created {click_path.name} with {click_count} Click entries in "
+            f"{len(metadata_clicks)} categories."
         )
 
-    # Sort categories alphabetically
-    metadata_clicks = dict(
-        sorted(
-            metadata_clicks.items(),
-            key=lambda x: x[0].lower()
+    if args.kind in {"all", "demos"}:
+        metadata_demos, demo_count = build_demo_metadata(all_packages)
+        demo_path = output / "metadata_demos_c.json"
+        demo_path.write_text(
+            json.dumps(metadata_demos, indent=4, ensure_ascii=False) + "\n",
+            encoding="utf-8",
         )
-    )
+        print(f"Created {demo_path.name} with {demo_count} Demo entries.")
 
-    # Sort demos alphabetically
-    metadata_demos.sort(
-        key=lambda x: (x.get("name") or "").lower()
-    )
+    return 0
 
-    # ---------------------------------------------------------
-    # Write Click metadata
-    # ---------------------------------------------------------
 
-    with open(
-        "metadata_clicks_c.json",
-        "w",
-        encoding="utf-8"
-    ) as metadata_json_file:
-        json.dump(
-            metadata_clicks,
-            metadata_json_file,
-            indent=4,
-            ensure_ascii=False
-        )
-
-    # ---------------------------------------------------------
-    # Write Demo metadata
-    # ---------------------------------------------------------
-
-    with open(
-        "metadata_demos_c.json",
-        "w",
-        encoding="utf-8"
-    ) as metadata_json_file:
-        json.dump(
-            metadata_demos,
-            metadata_json_file,
-            indent=4,
-            ensure_ascii=False
-        )
-
-    # ---------------------------------------------------------
-    # Summary
-    # ---------------------------------------------------------
-
-    print(
-        f"Created metadata_clicks_c.json with "
-        f"{click_count} Click entries in "
-        f"{len(metadata_clicks)} categories."
-    )
-
-    print(
-        f"Created metadata_demos_c.json with "
-        f"{demo_count} Demo entries."
-    )
+if __name__ == "__main__":
+    raise SystemExit(main())

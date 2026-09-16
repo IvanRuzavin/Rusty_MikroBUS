@@ -456,7 +456,7 @@ function scanPackages(context) {
   });
 }
 
-function getPackageDefinitions() {
+function getPackageDefinitions(platform = process.platform) {
   const commonManaged = [
     {
       id: 'codegrip',
@@ -490,7 +490,7 @@ function getPackageDefinitions() {
     }
   ];
 
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     return [
       {
         id: 'msvc',
@@ -526,7 +526,7 @@ function getPackageDefinitions() {
     ];
   }
 
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     return [
       {
         id: 'linuxBuild',
@@ -562,11 +562,41 @@ function getPackageDefinitions() {
     ];
   }
 
+  if (platform === 'darwin') {
+    return [
+      {
+        id: 'macBuild',
+        name: 'macOS Build Prerequisites',
+        description: 'Xcode Command Line Tools plus the standard Git/curl/archive utilities used by the Rust embedded tooling.',
+        kind: 'system'
+      },
+      {
+        id: 'rust',
+        name: 'Rust Toolchain',
+        description: 'rustup, rustc and cargo.',
+        kind: 'system'
+      },
+      {
+        id: 'probeRs',
+        name: 'probe-rs',
+        description: `probe-rs tools ${VERSIONS.probeRs}, used for programming and debugging.`,
+        kind: 'system'
+      },
+      {
+        id: 'jlink',
+        name: 'SEGGER J-Link / J-Flash',
+        description: 'SEGGER macOS software package; detection checks PATH and common /Applications/SEGGER locations.',
+        kind: 'system'
+      },
+      ...commonManaged
+    ];
+  }
+
   return [
     {
       id: 'unsupportedHost',
       name: 'Host Platform',
-      description: 'This prototype currently provides installation profiles for Windows and Linux.',
+      description: 'This extension provides installation profiles for Windows, Linux and macOS.',
       kind: 'system'
     },
     ...commonManaged
@@ -596,6 +626,7 @@ function getExpectedPaths(context) {
     cargoBin: path.join(home, '.cargo', 'bin'),
     jlinkWindowsRoot: path.join(programFiles, 'SEGGER'),
     jlinkLinuxRoot: '/opt/SEGGER',
+    jlinkMacRoot: '/Applications/SEGGER',
     stlinkDriverRoot: path.join(windowsDir, 'System32', 'DriverStore', 'FileRepository'),
     udevRules: '/etc/udev/rules.d/69-probe-rs.rules',
     // Programmer packages are shared between the Rust and C environments.
@@ -615,6 +646,8 @@ function detectPackage(id, expected) {
       return detectMsvc(expected);
     case 'linuxBuild':
       return detectLinuxBuildPrerequisites();
+    case 'macBuild':
+      return detectMacBuildPrerequisites();
     case 'rust':
       return detectRust(expected);
     case 'probeRs':
@@ -697,6 +730,29 @@ function detectLinuxBuildPrerequisites() {
   };
 }
 
+function detectMacBuildPrerequisites() {
+  if (process.platform !== 'darwin') {
+    return unsupportedResult('macOS prerequisites are only used by the macOS profile.', 'Xcode Command Line Tools');
+  }
+
+  const checks = [
+    { name: 'Xcode Command Line Tools', ok: commandVersion('xcode-select', ['-p']).ok },
+    { name: 'Git', ok: commandVersion('git', ['--version']).ok },
+    { name: 'curl', ok: commandVersion('curl', ['--version']).ok },
+    { name: 'tar', ok: Boolean(findOnPath(['tar'])) },
+    { name: 'unzip', ok: Boolean(findOnPath(['unzip'])) }
+  ];
+  const missing = checks.filter((item) => !item.ok).map((item) => item.name);
+  return {
+    status: missing.length === 0 ? 'installed' : 'missing',
+    detail: missing.length === 0
+      ? 'Xcode Command Line Tools, Git, curl, tar and unzip are available.'
+      : `Missing: ${missing.join(', ')}.`,
+    expectedPath: 'Xcode Command Line Tools (xcode-select --install)',
+    version: ''
+  };
+}
+
 function detectRust(expected) {
   const exeSuffix = process.platform === 'win32' ? '.exe' : '';
   const rustup = commandVersionWithFallback('rustup', ['--version'], path.join(expected.cargoBin, `rustup${exeSuffix}`));
@@ -727,7 +783,7 @@ function detectProbeRs(expected) {
 
 function detectStLinkDriver(expected) {
   if (process.platform !== 'win32') {
-    return unsupportedResult('Linux does not require the Windows ST-Link driver.', expected.stlinkDriverRoot);
+    return unsupportedResult('This host does not require the Windows ST-Link driver.', expected.stlinkDriverRoot);
   }
 
   const found = findFile(
@@ -789,7 +845,19 @@ function detectJLink(expected) {
     };
   }
 
-  return unsupportedResult('J-Link detection is currently defined for Windows and Linux.', 'SEGGER J-Link installation');
+  if (process.platform === 'darwin') {
+    const onPath = findOnPath(['JFlashExe', 'JFlash']);
+    const fromApplications = findFirstNamedFile(expected.jlinkMacRoot, ['JFlashExe', 'JFlash'], 6);
+    const found = onPath || fromApplications;
+    return {
+      status: found ? 'installed' : 'missing',
+      detail: found ? 'SEGGER J-Flash executable found.' : 'J-Flash was not found on PATH or below /Applications/SEGGER.',
+      expectedPath: found || '/Applications/SEGGER/JLink/JFlashExe',
+      version: ''
+    };
+  }
+
+  return unsupportedResult('J-Link detection is not defined for this host.', 'SEGGER J-Link installation');
 }
 
 function detectManaged(id, expected) {
@@ -901,6 +969,31 @@ function getInstallAction(id, context) {
     if (id === 'jlink') return externalAction('Open SEGGER download', URLS.jlink);
   }
 
+  if (process.platform === 'darwin') {
+    if (id === 'macBuild') {
+      return terminalAction(
+        'Install Command Line Tools',
+        'xcode-select --install',
+        'MikroBUS Rust - macOS prerequisites'
+      );
+    }
+    if (id === 'rust') {
+      return terminalAction(
+        'Install Rust',
+        `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`,
+        'MikroBUS Rust - Rust'
+      );
+    }
+    if (id === 'probeRs') {
+      return terminalAction(
+        'Install probe-rs',
+        `curl --proto '=https' --tlsv1.2 -LsSf ${URLS.probeRsShell} | sh`,
+        'MikroBUS Rust - probe-rs'
+      );
+    }
+    if (id === 'jlink') return externalAction('Open SEGGER download', URLS.jlink);
+  }
+
   if (id === 'codegrip') {
     return URLS.codegrip[process.platform]
       ? managedAction('Install automatically')
@@ -967,6 +1060,21 @@ function getUpdateAction(id, context) {
     if (id === 'jlink') return externalAction('Update', URLS.jlink);
   }
 
+  if (process.platform === 'darwin') {
+    if (id === 'macBuild') {
+      return { type: 'guidance', label: 'Update', message: 'Xcode Command Line Tools are updated through macOS Software Update. Install any available Command Line Tools/Xcode updates, then return to VS Code.' };
+    }
+    if (id === 'rust') return terminalAction('Update', 'rustup update', 'MikroBUS Rust - Rust update');
+    if (id === 'probeRs') {
+      return terminalAction(
+        'Update / reinstall',
+        `curl --proto '=https' --tlsv1.2 -LsSf ${URLS.probeRsShell} | sh`,
+        'MikroBUS Rust - probe-rs update'
+      );
+    }
+    if (id === 'jlink') return externalAction('Update', URLS.jlink);
+  }
+
   return undefined;
 }
 
@@ -992,7 +1100,7 @@ function getUninstallAction(id, context) {
         'powershell.exe'
       );
     }
-    if (process.platform === 'linux') {
+    if (process.platform === 'linux' || process.platform === 'darwin') {
       return terminalAction(
         'Uninstall',
         `rm -f ${quoteShellArg(path.join(expected.cargoBin, 'probe-rs'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-flash'))} ${quoteShellArg(path.join(expected.cargoBin, 'cargo-embed'))}`,
@@ -1013,6 +1121,10 @@ function getUninstallAction(id, context) {
     return { type: 'guidance', label: 'Uninstall', message: 'Linux build prerequisites are shared system packages. MikroBUS Rust will not remove them automatically because other development environments may depend on them. Remove only the packages you no longer need using your distribution package manager.' };
   }
 
+  if (id === 'macBuild') {
+    return { type: 'guidance', label: 'Uninstall', message: 'Xcode Command Line Tools are shared system developer tools. MikroBUS Rust will not remove them automatically because Xcode and other development environments may depend on them.' };
+  }
+
   if (id === 'msvc' || id === 'stlink') {
     return { type: 'system-uninstall', label: 'Uninstall', command: 'appwiz.cpl' };
   }
@@ -1021,7 +1133,7 @@ function getUninstallAction(id, context) {
     if (process.platform === 'win32') {
       return { type: 'system-uninstall', label: 'Uninstall', command: 'appwiz.cpl' };
     }
-    return { type: 'guidance', label: 'Uninstall', message: 'SEGGER J-Link is system-managed. Use the package/uninstaller method you used to install J-Link. MikroBUS Rust will not delete /opt/SEGGER automatically.' };
+    return { type: 'guidance', label: 'Uninstall', message: process.platform === 'darwin' ? 'SEGGER J-Link is system-managed. Use the SEGGER macOS uninstaller/package method you used to install it. MikroBUS Rust will not delete /Applications/SEGGER automatically.' : 'SEGGER J-Link is system-managed. Use the package/uninstaller method you used to install J-Link. MikroBUS Rust will not delete /opt/SEGGER automatically.' };
   }
 
   return undefined;
@@ -1687,6 +1799,19 @@ function openHttpResponse(url, token, headers = {}, redirectCount = 0) {
   });
 }
 
+function bundledSevenZip() {
+  try {
+    const candidate = require('7zip-bin').path7za;
+    if (!candidate || !fs.existsSync(candidate)) return undefined;
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(candidate, 0o755); } catch { return undefined; }
+    }
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
 async function extractArchive(archivePath, destination, token) {
   await fs.promises.mkdir(destination, { recursive: true });
   const lower = archivePath.toLowerCase();
@@ -1712,13 +1837,20 @@ async function extractArchive(archivePath, destination, token) {
       return;
     }
     const unzip = findOnPath(['unzip']);
-    if (!unzip) throw new Error('unzip was not found on PATH.');
-    await runCommand(unzip, ['-o', archivePath, '-d', destination], token);
+    if (unzip) {
+      await runCommand(unzip, ['-o', archivePath, '-d', destination], token);
+      return;
+    }
+    const sevenZip = bundledSevenZip();
+    if (!sevenZip) throw new Error('Neither unzip nor the bundled 7-Zip extractor is available.');
+    await runCommand(sevenZip, ['x', '-y', archivePath, `-o${destination}`], token);
     return;
   }
 
   if (lower.endsWith('.7z')) {
     const candidates = [];
+    const bundled = bundledSevenZip();
+    if (bundled) candidates.push({ executable: bundled, args: ['x', '-y', archivePath, `-o${destination}`] });
     for (const name of ['7zz', '7z', '7za']) {
       const executable = findOnPath([name]);
       if (executable) candidates.push({ executable, args: ['x', '-y', archivePath, `-o${destination}`] });
@@ -1738,9 +1870,7 @@ async function extractArchive(archivePath, destination, token) {
     }
 
     if (candidates.length === 0) {
-      throw new Error(process.platform === 'linux'
-        ? `A 7-Zip extractor is required for ${path.basename(archivePath)}. Install the Linux Build Prerequisites card first.`
-        : 'A 7-Zip-capable extractor was not found. Install 7-Zip or use a Windows version that provides tar.exe with 7z support.');
+      throw new Error(`A 7-Zip-capable extractor was not found for ${path.basename(archivePath)}. Reinstall the extension so its bundled 7zip-bin executable is available.`);
     }
 
     let lastError;
@@ -1830,10 +1960,9 @@ function ensureNotCancelled(token) {
   }
 }
 
-function getXpackAsset(kind) {
-  const arch = os.arch();
+function getXpackAsset(kind, platform = process.platform, arch = os.arch()) {
 
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     if (arch !== 'x64') {
       return undefined;
     }
@@ -1853,7 +1982,7 @@ function getXpackAsset(kind) {
     }
   }
 
-  if (process.platform === 'linux' && ['x64', 'arm64'].includes(arch)) {
+  if (platform === 'linux' && ['x64', 'arm64'].includes(arch)) {
     const assetArch = arch === 'x64' ? 'x64' : 'arm64';
     if (kind === 'openocd') {
       const file = `xpack-openocd-${VERSIONS.openocd}-linux-${assetArch}.tar.gz`;
@@ -1864,6 +1993,24 @@ function getXpackAsset(kind) {
     }
     if (kind === 'armGcc') {
       const file = `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}-linux-${assetArch}.tar.gz`;
+      return {
+        file,
+        url: `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${VERSIONS.armGcc}/${file}`
+      };
+    }
+  }
+
+  if (platform === 'darwin' && ['x64', 'arm64'].includes(arch)) {
+    const assetArch = arch === 'x64' ? 'x64' : 'arm64';
+    if (kind === 'openocd') {
+      const file = `xpack-openocd-${VERSIONS.openocd}-darwin-${assetArch}.tar.gz`;
+      return {
+        file,
+        url: `https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${VERSIONS.openocd}/${file}`
+      };
+    }
+    if (kind === 'armGcc') {
+      const file = `xpack-arm-none-eabi-gcc-${VERSIONS.armGcc}-darwin-${assetArch}.tar.gz`;
       return {
         file,
         url: `https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v${VERSIONS.armGcc}/${file}`
@@ -1902,13 +2049,16 @@ function expectedPathFor(id, expected) {
   const map = {
     msvc: expected.msvc,
     linuxBuild: getLinuxPackageHint(),
+    macBuild: 'Xcode Command Line Tools (xcode-select --install)',
     rust: expected.rustup,
     probeRs: path.join(expected.cargoBin, process.platform === 'win32' ? 'probe-rs.exe' : 'probe-rs'),
     stlink: expected.stlinkDriverRoot,
     udev: expected.udevRules,
     jlink: process.platform === 'win32'
       ? path.join(expected.jlinkWindowsRoot, 'JLink*', 'JFlash.exe')
-      : '/opt/SEGGER/JLink/JFlashExe',
+      : process.platform === 'darwin'
+        ? '/Applications/SEGGER/JLink/JFlashExe'
+        : '/opt/SEGGER/JLink/JFlashExe',
     codegrip: expected.codegrip,
     openocd: expected.openocd,
     armGcc: expected.armGcc,
@@ -2198,4 +2348,4 @@ function getNonce() {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, _test: { getPackageDefinitions, getXpackAsset, bundledSevenZip } };

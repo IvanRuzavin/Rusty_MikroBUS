@@ -233,6 +233,24 @@ function preferredCompiler(compilers, requestedUid) {
   return items.find(isGccCompiler) || items[0];
 }
 function supportedCompilerUids() { return Object.keys(COMPILER_ADAPTERS); }
+
+function compilerPackageAvailableOnHost(compilerOrPackage, platform = process.platform) {
+  // The current macOS package catalog can install ARM GNU and the bundled
+  // mikroC families. Do not offer compiler rows whose installer package has no
+  // Darwin payload; selecting one would otherwise fail only after the user has
+  // created the setup. Keep existing Windows/Linux behavior unchanged.
+  if (String(platform || '') !== 'darwin') return true;
+  const packageName = typeof compilerOrPackage === 'string'
+    ? compilerOrPackage
+    : String(compilerOrPackage?.installerPackage || compilerOrPackage?.packageName || '').trim();
+  return packageName === 'gcc_arm_compiler' || Boolean(MIKROC_BUNDLE_ASSETS[packageName]);
+}
+
+function filterCompilersForHost(compilers, platform = process.platform) {
+  const items = Array.isArray(compilers) ? compilers : [];
+  return items.filter((compiler) => compilerPackageAvailableOnHost(compiler, platform));
+}
+
 function coreMetadataCompilerLabel(compilerUid) { return CORE_METADATA_COMPILER_LABEL[String(compilerUid || '')]; }
 
 function riscvArchitectureFlags() { return ['-march=rv32imac', '-mabi=ilp32']; }
@@ -418,6 +436,8 @@ module.exports = {
   isGccCompiler,
   preferredCompiler,
   supportedCompilerUids,
+  compilerPackageAvailableOnHost,
+  filterCompilersForHost,
   coreMetadataCompilerLabel,
   compilerSpecificFlags,
   rxArchitectureFlags,
