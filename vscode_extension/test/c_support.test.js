@@ -41,6 +41,7 @@ try {
   const rustCorePackages = require('../rust_core_packages')._test;
   const rustBoardPackages = require('../rust_board_packages')._test;
   const rustCardPackages = require('../rust_card_packages')._test;
+  const rustExamples = require('../rust_examples')._test;
   const cConfigurator = require('../c_configurator')._test;
   const rfp = require('../c_rfp_backend')._test;
   const cmakeVisibility = require('../c_cmake_visibility')._test;
@@ -2250,6 +2251,9 @@ endfunction()
   assert.ok(packageManagerSource.includes('metadata_demos_c.json'));
   assert.ok(packageManagerSource.includes("kind: 'demo-example'"));
   assert.ok(packageManagerSource.includes('Demo Examples'));
+  assert.ok(packageManagerSource.includes('Show only installed examples'));
+  assert.ok(packageManagerSource.includes("let installedOnly=false"));
+  assert.ok(packageManagerSource.includes("installedChip.addEventListener('click',()=>{installedOnly=!installedOnly;render();})"));
   const demoSpec = packageManager.demoExampleSpec({
     name: 'Analog Input Demo',
     download_link: 'https://example.invalid/mikroe-demo-sdk-analogin.zip'
@@ -2767,6 +2771,30 @@ endfunction()
   assert.ok(rustExamplesSource.includes("DEMO_RELEASE_TAG = 'demo-packages'"));
   assert.ok(rustExamplesSource.includes('metadata_clicks_rust.json'));
   assert.ok(rustExamplesSource.includes('metadata_demos_rust.json'));
+  assert.ok(rustExamplesSource.includes('Show only installed examples'));
+  assert.ok(rustExamplesSource.includes("let installedOnly=false"));
+  assert.ok(rustExamplesSource.includes("installedChip.addEventListener('click',()=>{installedOnly=!installedOnly;render();})"));
+  const exampleBrowserHtml = [
+    packageManager.clickExamplesHtml(),
+    packageManager.demoExamplesHtml(),
+    rustExamples.examplesHtml('click'),
+    rustExamples.examplesHtml('demo')
+  ];
+  const exampleScriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-example-filter-script-'));
+  try {
+    for (const [index, html] of exampleBrowserHtml.entries()) {
+      assert.ok(html.includes('title="Show only installed examples"'));
+      assert.ok(html.includes("let installedOnly=false"));
+      assert.ok(html.includes("installedChip.addEventListener('click',()=>{installedOnly=!installedOnly;render();})"));
+      const match = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/);
+      assert.ok(match, `Example browser ${index} must contain an inline script.`);
+      const scriptPath = path.join(exampleScriptRoot, `browser-${index}.js`);
+      fs.writeFileSync(scriptPath, match[1]);
+      childProcess.execFileSync(process.execPath, ['--check', scriptPath], { stdio: 'pipe' });
+    }
+  } finally {
+    fs.rmSync(exampleScriptRoot, { recursive: true, force: true });
+  }
   assert.ok(cPackageManagerSource.includes("CLICK_RELEASE_TAG = 'click-packages'"));
   assert.ok(cPackageManagerSource.includes("DEMO_RELEASE_TAG = 'demo-packages'"));
   const cPackageCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'c_package_catalog.js'), 'utf8');
