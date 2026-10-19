@@ -302,15 +302,17 @@ try {
     true
   );
 
-  // Toshiba CMSIS-DAP is a C-only synthetic programmer. It is exposed for the
-  // TMPM3/TMPM4 Cortex-M families, uses the CMSIS pack from the C Core package,
-  // and relies only on Cortex-Debug at the VS Code extension layer.
+  // Toshiba CMSIS-DAP is a C-only synthetic programmer. The C Core package
+  // remains a build dependency only. The programmer backend resolves the
+  // selected TMPM MCU to an official Toshiba DFP, downloads the exact .pack,
+  // and keeps it permanently cached under c-runtime/tools.
   assert.strictEqual(toshibaCmsisDapModule.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID, 'toshiba_cmsis_dap');
   assert.strictEqual(toshibaCmsisDapModule.PY_OCD_VERSION, '0.45.1');
   assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4KNF10AFG', familyUid: 'TMPM4K' }), true);
   assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4L4A' }), true);
   assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM3H2' }), true);
-  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4G9' }), false);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM4G9' }), true);
+  assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMPM3U0' }), true);
   assert.strictEqual(toshibaCmsisDapModule.isToshibaDevice({ vendor: 'Toshiba', uid: 'TMP19A' }), false);
   assert.strictEqual(setup.isSupportedProgrammer(toshibaCmsisDapModule.syntheticProgrammer()), true);
   assert.strictEqual(cConfigurator.isSupportedProgrammer(toshibaCmsisDapModule.syntheticProgrammer()), true);
@@ -318,40 +320,99 @@ try {
     setup.cSetupExtensionRequirements({ metadata: { programmer: { uid: 'toshiba_cmsis_dap' } } }),
     [optionalExtensions.EXTENSIONS.CORTEX_DEBUG]
   );
-  const toshibaPackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrobus-toshiba-pack-'));
-  try {
-    const expandedPack = path.join(toshibaPackRoot, 'Toshiba.TMPM4K_DFP');
-    fs.mkdirSync(path.join(expandedPack, 'Flash'), { recursive: true });
-    fs.writeFileSync(
-      path.join(expandedPack, 'Toshiba.TMPM4K_DFP.pdsc'),
-      '<package><devices><family Dfamily="TMPM4K"><device Dname="TMPM4KNF10AFG"/></family></devices></package>'
-    );
-    fs.writeFileSync(path.join(expandedPack, 'Flash', 'TMPM4K.FLM'), 'flash-algo');
-    const resolvedPack = toshibaCmsisDapModule.resolveCmsisPackPath({
-      metadata: { device: { vendor: 'Toshiba', mcuName: 'TMPM4KNF10AFG' } },
-      paths: { corePackageRoot: toshibaPackRoot }
-    });
-    assert.strictEqual(resolvedPack, expandedPack);
-    const runtime = { pyocd: '/tmp/pyocd', cmsisPack: expandedPack, target: 'TMPM4KNF10AFG', probeArgs: ['--uid', 'cmsisdap:'] };
-    const args = toshibaCmsisDap.commandArgs(runtime, 'load', ['/tmp/app.elf']);
-    assert.deepStrictEqual(args, ['load', '--target', 'TMPM4KNF10AFG', '--pack', expandedPack, '--uid', 'cmsisdap:', '/tmp/app.elf']);
-    const debugConfig = toshibaCmsisDapModule.debugConfiguration(
-      { name: 'TMPM4K test', tools: { gdb: '/tmp/arm-none-eabi-gdb' } },
-      '/tmp/project',
-      '/tmp/project/app.elf',
-      runtime,
-      'toshiba-debug'
-    );
-    assert.strictEqual(debugConfig.type, 'cortex-debug');
-    assert.strictEqual(debugConfig.servertype, 'pyocd');
-    assert.strictEqual(debugConfig.serverpath, '/tmp/pyocd');
-    assert.strictEqual(debugConfig.targetId, 'TMPM4KNF10AFG');
-    assert.strictEqual(debugConfig.cmsisPack, expandedPack);
-    assert.deepStrictEqual(debugConfig.serverArgs, ['--uid', 'cmsisdap:']);
-    assert.strictEqual(debugConfig.__mikrobusToshibaCmsisDap, true);
-  } finally {
-    fs.rmSync(toshibaPackRoot, { recursive: true, force: true });
-  }
+
+  const packIndexFixture = `
+  <index><pindex>
+    <pdsc url="https://example.invalid/toshiba/" vendor="Toshiba" name="TXZ4Aplus-M4K2_DFP" version="1.0.1" />
+    <pdsc url="https://example.invalid/toshiba/" vendor="Toshiba" name="TXZplus3A-M3H2_DFP" version="2.0.0" />
+    <pdsc url="https://example.invalid/toshiba/" vendor="Toshiba" name="TC35678_ROM002" version="0.0.3" />
+    <pdsc url="https://example.invalid/other/" vendor="Other" name="Something_DFP" version="1.0.0" />
+  </pindex></index>`;
+  assert.deepStrictEqual(toshibaCmsisDap.parseToshibaPackIndex(packIndexFixture), [
+    { vendor: 'Toshiba', name: 'TXZ4Aplus-M4K2_DFP', url: 'https://example.invalid/toshiba/', indexVersion: '1.0.1' },
+    { vendor: 'Toshiba', name: 'TXZplus3A-M3H2_DFP', url: 'https://example.invalid/toshiba/', indexVersion: '2.0.0' }
+  ]);
+  const m4kPdscFixture = `
+  <package>
+    <vendor>Toshiba</vendor><name>TXZ4Aplus-M4K2_DFP</name><url>https://downloads.invalid/toshiba/</url>
+    <releases><release version="1.0.2" date="2026-01-01"/><release version="1.0.1" date="2025-01-01"/></releases>
+    <devices><family Dfamily="M4K"><device Dname="TMPM4KNFYAFG"/><device Dname="TMPM4KNF10AFG"/></family></devices>
+  </package>`;
+  const m4kRef = toshibaCmsisDap.parseToshibaPackIndex(packIndexFixture)[0];
+  assert.strictEqual(toshibaCmsisDap.pdscContainsTarget(m4kPdscFixture, 'TMPM4KNFYAFG'), true);
+  assert.strictEqual(toshibaCmsisDap.pdscContainsTarget(m4kPdscFixture, 'TMPM4L4A'), false);
+  assert.strictEqual(toshibaCmsisDap.latestPdscReleaseVersion(m4kPdscFixture, '1.0.1'), '1.0.2');
+  assert.strictEqual(
+    toshibaCmsisDap.packUrlFor(m4kRef, '1.0.2', m4kPdscFixture),
+    'https://downloads.invalid/toshiba/Toshiba.TXZ4Aplus-M4K2_DFP.1.0.2.pack'
+  );
+  assert.strictEqual(
+    toshibaCmsisDap.pdscUrlForRef(m4kRef),
+    'https://example.invalid/toshiba/Toshiba.TXZ4Aplus-M4K2_DFP.pdsc'
+  );
+
+  const probeListing = `
+  #   Probe/Board                       Unique ID                                          Target
+  --------------------------------------------------------------------------------------------------------------------
+  0   TOSHIBA\0\0\0 TMPM CMSIS-DAP\0\0   180402001479\0                                    n/a
+  1   SEGGER J-Link                     123456789                                          n/a
+  `;
+  const parsedProbes = toshibaCmsisDap.parseProbeList(probeListing);
+  assert.strictEqual(parsedProbes[0].name, 'TOSHIBA TMPM CMSIS-DAP');
+  assert.strictEqual(parsedProbes[0].uniqueId, '180402001479');
+  assert.deepStrictEqual(toshibaCmsisDap.toshibaTmpmProbesFromList(probeListing), [parsedProbes[0]]);
+  assert.strictEqual(toshibaCmsisDap.sanitizeProbeUid('cmsisdap:180402001479\0'), '180402001479');
+
+  const automaticRuntime = {
+    pyocd: '/tmp/pyocd',
+    cmsisPack: '/tmp/Toshiba.TXZ4Aplus-M4K2_DFP.1.0.2.pack',
+    target: 'TMPM4KNFYAFG',
+    probeArgs: []
+  };
+  assert.deepStrictEqual(
+    toshibaCmsisDap.commandArgs(automaticRuntime, 'load', ['--format', 'elf', '/tmp/app.elf']),
+    ['load', '--target', 'TMPM4KNFYAFG', '--pack', automaticRuntime.cmsisPack, '--no-wait', '--format', 'elf', '/tmp/app.elf']
+  );
+  const externalDebugRuntime = { ...automaticRuntime, host: '127.0.0.1', gdbPort: 52341 };
+  const externalDebugConfig = toshibaCmsisDapModule.debugConfiguration(
+    { name: 'TMPM4K automatic test', tools: { gdb: '/tmp/arm-none-eabi-gdb' } },
+    '/tmp/project',
+    '/tmp/project/app.elf',
+    externalDebugRuntime,
+    'toshiba-debug-auto'
+  );
+  assert.strictEqual(externalDebugConfig.type, 'cortex-debug');
+  assert.strictEqual(externalDebugConfig.servertype, 'external');
+  assert.strictEqual(externalDebugConfig.gdbTarget, '127.0.0.1:52341');
+  assert.deepStrictEqual(externalDebugConfig.overrideLaunchCommands, ['monitor reset halt', 'load', 'monitor reset halt']);
+  assert.deepStrictEqual(externalDebugConfig.overrideResetCommands, ['monitor reset halt']);
+  assert.strictEqual(externalDebugConfig.__mikrobusToshibaCmsisDap, true);
+
+  const toshibaBackendSource = fs.readFileSync(path.join(__dirname, '..', 'c_toshiba_cmsis_dap_backend.js'), 'utf8');
+  assert.ok(toshibaBackendSource.includes('ARM_PACK_INDEX_URL'));
+  assert.ok(toshibaBackendSource.includes('Toshiba CMSIS Device Family Pack'));
+  assert.ok(toshibaBackendSource.includes("'--pack', runtime.cmsisPack"));
+  assert.ok(!toshibaBackendSource.includes("['pack', 'install', target]"));
+  assert.ok(!toshibaBackendSource.includes("['pack', 'clean']"));
+  assert.ok(!toshibaBackendSource.includes('removeManagedPyocd'));
+  assert.ok(!toshibaBackendSource.includes('detectToshibaProbe(pyocd, options);'));
+  assert.ok(toshibaBackendSource.includes('Do not pre-scan/open the CMSIS-DAP probe here'));
+  assert.ok(toshibaBackendSource.includes('GDB server listening on port'));
+  assert.ok(toshibaBackendSource.includes("servertype: 'external'"));
+  assert.ok(toshibaBackendSource.includes("overrideLaunchCommands: ['monitor reset halt', 'load', 'monitor reset halt']"));
+  const toshibaCSetupSource = fs.readFileSync(path.join(__dirname, '..', 'c_setup.js'), 'utf8');
+  assert.ok(!toshibaCSetupSource.includes('missingToshibaPack'));
+  assert.ok(toshibaCSetupSource.includes('exact MCU-specific Toshiba CMSIS Device Family Pack will be downloaded automatically'));
+  assert.ok(!toshibaCSetupSource.includes('Show cached Toshiba CMSIS packs'));
+  assert.ok(!toshibaCSetupSource.includes('Clear pyOCD CMSIS-Pack cache'));
+  assert.ok(!toshibaCSetupSource.includes('Remove managed pyOCD'));
+  const setupViewSourceForToshiba = fs.readFileSync(path.join(__dirname, '..', 'media', 'setups.js'), 'utf8');
+  assert.ok(!setupViewSourceForToshiba.includes('cProgrammerTools'));
+  assert.ok(!setupViewSourceForToshiba.includes('Programmer tools'));
+  const packageJsonForToshiba = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8');
+  assert.ok(!packageJsonForToshiba.includes('mikrobusC.manageToshibaProgrammer'));
+  const extensionSourceForToshiba = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
+  assert.ok(!extensionSourceForToshiba.includes('cProgrammerTools'));
   const rustConfiguratorSourceForToshiba = fs.readFileSync(path.join(__dirname, '..', 'mcu_configurator.js'), 'utf8');
   assert.strictEqual(rustConfiguratorSourceForToshiba.includes('TOSHIBA_CMSIS_DAP_PROGRAMMER_UID'), false);
   assert.strictEqual(rustConfiguratorSourceForToshiba.includes('c_toshiba_cmsis_dap_backend'), false);
@@ -2448,7 +2509,8 @@ endfunction()
   assert.ok(rustCardPackages.releaseAssetUrl('owner/repo', 'card_card-a.7z').includes('/rust-card-packages/card_card-a.7z'));
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '0.8.23');
+  assert.strictEqual(packageJson.version, '0.8.31');
+  assert.ok(!packageJson.contributes.commands.some((item) => item.command === 'mikrobusC.manageToshibaProgrammer'));
   assert.strictEqual(rustMcu.RUST_SETUP_ARTIFACT_VERSION, 2);
   assert.strictEqual(packageJson.publisher, 'IvanRuzavin');
   assert.strictEqual(packageJson.author, 'IvanRuzavin');

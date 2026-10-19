@@ -88,6 +88,7 @@ const C_BUILD_SUPPORT_VERSION = 67;
 const output = vscode.window.createOutputChannel('MikroBUS C');
 let sourceMutationQueue = Promise.resolve();
 let activeExternalDebugRuntime;
+let activeToshibaDebugRuntime;
 let cmakeVisibilityRefreshTimer;
 let cmakeVisibilityRefreshRunning = false;
 let globalCContext;
@@ -1974,21 +1975,8 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
   const coreRoot = coreSpec ? packageRoot(installed, coreSpec.kind, coreSpec.name, coreSpec.version) : undefined;
   const coreSource = locateCoreSource(coreRoot, setup.metadata.compiler.corePath, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME, resolved.adapter?.family);
   if (!coreSource || !fs.existsSync(path.join(coreSource, 'CMakeLists.txt'))) throw new Error(`Core package '${setup.metadata.corePackageName}' does not contain a usable core for ${setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME}.`);
-  let toshibaCmsisPack;
   if (setup.metadata.programmer.uid === toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID) {
-    progress.report({ message: `Resolving Toshiba CMSIS pack for ${setupMcuName(setup)}...` });
-    toshibaCmsisPack = toshibaCmsisDap.resolveCmsisPackPath(setup, {
-      coreRoot,
-      coreSource,
-      mcuName: setupMcuName(setup)
-    });
-    if (!toshibaCmsisPack) {
-      throw new Error(
-        `No Toshiba CMSIS Device Family Pack (.pack or expanded .pdsc tree) was found in Core package '${setup.metadata.corePackageName}' for ${setupMcuName(setup)}.`
-      );
-    }
-    output.appendLine(`Toshiba CMSIS pack: ${toshibaCmsisPack}`);
-    output.appendLine('pyOCD will be provisioned lazily on the first Program, Erase, or Debug action.');
+    output.appendLine('Toshiba CMSIS-DAP selected. pyOCD and the exact MCU-specific Toshiba CMSIS Device Family Pack will be downloaded automatically and cached permanently on first Program, Erase, or Debug use.');
   }
   const mikroCCoreDefinition = isMikroCFamily(resolved.adapter?.family)
     ? resolveCoreDefinitionFile(coreSource, setup.metadata.coreMcuName || setup.metadata.sdkConfig.MCU_NAME, setup.metadata?.device?.defFile)
@@ -2175,7 +2163,6 @@ async function ensureAndBuildSetup(context, setup, progress, token) {
     jcfgFile: mikroCJcfgFile,
     coreSource,
     corePackageRoot: coreRoot,
-    toshibaCmsisPack,
     xcConfigSource: xcConfiguration?.sourcePath,
     xcConfigObject: xcConfiguration?.objectPath
   };
@@ -2216,8 +2203,6 @@ function findDirectoryNamed(root, directoryName, maximumDepth = 7) {
 async function toshibaRuntime(context, setup, progress) {
   return toshibaCmsisDap.prepareRuntime(context, setup, {
     managedRoot: packages.getPackagePaths(context).root,
-    coreRoot: setup.paths?.corePackageRoot,
-    coreSource: setup.paths?.coreSource,
     mcuName: setupMcuName(setup),
     progress,
     channel: output
@@ -2565,10 +2550,7 @@ async function workspaceBuildEnvironment(context, root) {
     !setup.codegripRuntime?.serverExecutable || !fs.existsSync(setup.codegripRuntime.serverExecutable) ||
     !setup.codegripRuntime?.packsRoot || !fs.existsSync(setup.codegripRuntime.packsRoot)
   );
-  const missingToshibaPack = setup.metadata?.programmer?.uid === toshibaCmsisDap.TOSHIBA_CMSIS_DAP_PROGRAMMER_UID && (
-    !setup.paths?.toshibaCmsisPack || !fs.existsSync(setup.paths.toshibaCmsisPack)
-  );
-  if (missing || staleBuildSupport || missingCodegripRuntime || missingToshibaPack || !setup.paths?.toolchainFile || !fs.existsSync(setup.paths.toolchainFile)) {
+  if (missing || staleBuildSupport || missingCodegripRuntime || !setup.paths?.toolchainFile || !fs.existsSync(setup.paths.toolchainFile)) {
     setup = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
       title: `Restoring C setup: ${setup.name}`,
@@ -3969,6 +3951,7 @@ function codegripCppDebugConfiguration(setup, projectRoot, elf, debugPort, gener
 
 async function debugWorkspace(context, debugOptions = {}) {
   let debugRuntime;
+  let toshibaDebugRuntime;
   let entryBreakpoint;
   let debugInstanceId;
   try {
@@ -4034,8 +4017,10 @@ async function debugWorkspace(context, debugOptions = {}) {
       await optionalExtensions.installExtension(optionalExtensions.EXTENSIONS.CORTEX_DEBUG);
       const runtime = await toshibaRuntime(context, setup);
       debugInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      configuration = toshibaCmsisDap.debugConfiguration(setup, projectRoot, elf, runtime, debugInstanceId);
-      output.appendLine(`Starting Toshiba CMSIS-DAP/pyOCD debug for ${setupMcuName(setup)}.`);
+      toshibaDebugRuntime = await toshibaCmsisDap.startGdbServer(runtime, { channel: output, cwd: projectRoot });
+      activeToshibaDebugRuntime = { runtime: toshibaDebugRuntime, setupId: setup.id, generation: debugInstanceId };
+      configuration = toshibaCmsisDap.debugConfiguration(setup, projectRoot, elf, toshibaDebugRuntime, debugInstanceId);
+      output.appendLine(`Starting Cortex-Debug against external Toshiba pyOCD server at ${toshibaDebugRuntime.host}:${toshibaDebugRuntime.gdbPort}.`);
       output.appendLine(`CMSIS pack: ${runtime.cmsisPack}`);
     } else if (setup.metadata.programmer.uid === tiXds110.TI_XDS110_PROGRAMMER_UID) {
       await optionalExtensions.ensureExtensions([
@@ -4159,7 +4144,7 @@ async function debugWorkspace(context, debugOptions = {}) {
     } : undefined;
     const started = await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], configuration, startOptions);
     if (!started) throw new Error('VS Code did not start the debug session.');
-    if (debugRuntime || entryBreakpoint?.owned) {
+    if (debugRuntime || toshibaDebugRuntime || entryBreakpoint?.owned) {
       const disposable = vscode.debug.onDidTerminateDebugSession((session) => {
         if (session.configuration?.__mikrobusCDebug !== true) return;
         if (session.configuration?.__mikrobusCDebugInstance !== debugInstanceId) return;
@@ -4169,6 +4154,10 @@ async function debugWorkspace(context, debugOptions = {}) {
           if (activeExternalDebugRuntime?.runtime === debugRuntime) activeExternalDebugRuntime = undefined;
           void stopCodegripServer(debugRuntime);
         }
+        if (toshibaDebugRuntime) {
+          if (activeToshibaDebugRuntime?.runtime === toshibaDebugRuntime) activeToshibaDebugRuntime = undefined;
+          void toshibaCmsisDap.stopGdbServer(toshibaDebugRuntime);
+        }
       });
     }
   } catch (error) {
@@ -4176,6 +4165,10 @@ async function debugWorkspace(context, debugOptions = {}) {
     if (debugRuntime) {
       if (activeExternalDebugRuntime?.runtime === debugRuntime) activeExternalDebugRuntime = undefined;
       await stopCodegripServer(debugRuntime);
+    }
+    if (toshibaDebugRuntime) {
+      if (activeToshibaDebugRuntime?.runtime === toshibaDebugRuntime) activeToshibaDebugRuntime = undefined;
+      await toshibaCmsisDap.stopGdbServer(toshibaDebugRuntime);
     }
     vscode.window.showErrorMessage(`MikroBUS C debug: ${error.message || error}`);
     output.show(true);
@@ -4205,6 +4198,7 @@ function getCSetupDashboardState(context) {
     mode: setup.mode,
     applicationOutput: normalizeApplicationOutput(setup.applicationOutput),
     programmerName: setup.metadata?.programmer?.name || setup.metadata?.programmer?.uid,
+    programmerUid: setup.metadata?.programmer?.uid || setup.selection?.programmerUid,
     builtAt: setup.builtAt,
     lastElf: setup.lastElf,
     lastHex: setup.lastHex
@@ -4538,9 +4532,13 @@ function registerDebugRuntimeLifecycle(context) {
       const active = activeExternalDebugRuntime;
       activeExternalDebugRuntime = undefined;
       if (active?.runtime) void stopCodegripServer(active.runtime);
+      const activeToshiba = activeToshibaDebugRuntime;
+      activeToshibaDebugRuntime = undefined;
+      if (activeToshiba?.runtime) void toshibaCmsisDap.stopGdbServer(activeToshiba.runtime);
     }
   });
 }
+
 
 function registerCSupport(context) {
   globalCContext = context;

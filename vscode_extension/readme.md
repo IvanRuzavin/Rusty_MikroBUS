@@ -30,7 +30,7 @@ Installing **MikroBUS Embedded Tools** no longer installs every supported vendor
 - **TI XDS110**: installs **TI Embedded Debug** and **Cortex-Debug** for XDS110 setups.
 - **Microchip PICkit/ICD/EDBG/PKOB/Power Debugger**: installs the MPLAB Services, Platform and Debug Adapter extensions for those setups.
 - **Renesas RFP**: plain flash/erase does not install Renesas Debug. **Renesas Debug** is installed only when an RX/RL78 E2/E2 Lite debug path is actually used. External Renesas family support files and USB drivers are still managed through Renesas Platform.
-- **Toshiba CMSIS-DAP (C only)**: installs **Cortex-Debug** for TMPM3H/TMPM4K/TMPM4L C setups. A private pyOCD environment is prepared lazily when programming or debugging is first used; the Toshiba CMSIS pack is resolved from the selected C Core package.
+- **Toshiba CMSIS-DAP (C only)**: installs **Cortex-Debug** for Toshiba TMPM C setups. A private pyOCD environment is prepared lazily on first use. The extension resolves the selected MCU against Toshiba Device Family Pack descriptors, downloads the exact `.pack`, and keeps it in the C-runtime cache for future Program/Erase/Debug operations. For debugging, the extension starts pyOCD itself, waits until its GDB server is listening, then attaches Cortex-Debug as an external GDB client; this avoids Cortex-Debug's pyOCD server-start timeout path.
 
 The same checks run again at first use, so a setup copied to another machine can repair any missing optional extension automatically.
 
@@ -107,7 +107,13 @@ For **Microchip XC8/XC16/XC32**, MCU JSON files that expose symbolic `config_wor
 | **Microchip ICD 4** | ✅ | ✅ | Uses the official **Debug Adapter for MPLAB** and automatic connected-tool discovery. |
 | **Microchip PKOB4 / Power Debugger / EDBG / PICkit Basic mappings** | ✅ | ✅ | Exposed when the selected database row maps the tool-support package to the MCU/compiler; programming/erase/debug use the MPLAB adapter backend and connected-tool discovery. |
 | **SEGGER J-Link** | ✅ | ✅ | Uses J-Link Commander / J-Link GDB Server where supported. |
-| **Toshiba CMSIS-DAP (on-board)** | ✅ | ✅ | **C only.** Offered for the TMPM3H, TMPM4K and TMPM4L Cortex-M families. Uses pyOCD with the CMSIS pack already present in the selected C Core package and Cortex-Debug for the VS Code debug UI. |
+| **Toshiba CMSIS-DAP (on-board)** | ✅ | ✅ | **C only.** Offered for Toshiba TMPM Cortex-M devices in the database. Uses pyOCD plus an automatically resolved/downloaded Toshiba CMSIS Device Family Pack, with Cortex-Debug for the VS Code debug UI. |
+
+For Toshiba boards, Program/Erase/Debug deliberately do **not** pre-scan or pre-open the on-board TMPM CMSIS-DAP and do not pass its USB serial through `--uid`. Older TMPM067 firmware can expose NUL-padded descriptors and can leave its HID/USB interface temporarily claimed after a separate enumeration process. Program/Erase therefore launch one pyOCD operation with the exact cached `--pack`. Debug launches one persistent pyOCD GDB server, waits for its `GDB server listening` readiness message, and then starts Cortex-Debug with `servertype: external` against that port. Clicker 4 boards use a Toshiba **TMPM067FWQG** MCU as the on-board debug unit. Linux still requires suitable udev permissions for the board USB VID:PID.
+
+The Toshiba DFP is a **programmer/debugger dependency**, separate from the C Core package. The extension downloads the Arm Pack Index, inspects Toshiba `.pdsc` descriptors to find the pack containing the database MCU name, reads the latest release version from Toshiba's descriptor, downloads that exact `.pack`, and stores it under the C runtime cache. Cached packs and the managed pyOCD environment are intentionally persistent: the UI has no uninstall/clear action; they disappear only if the user manually removes the C-runtime cache.
+
+Toshiba programmer support is intentionally hands-off: there is no extra Programmer Tools button or command. pyOCD and the exact MCU-specific DFP are prepared automatically on first Program/Erase/Debug and remain cached persistently.
 | **Renesas Flash Programmer (RFP)** | ✅ | Conditional | UART programming is supported. Hardware debugging is enabled only for **E2** and **E2 Lite** profiles. |
 | **Renesas E2 / E2 Lite** | ✅ | ✅ | RL78/RX debug integration uses the Renesas tooling/support files. |
 | **Renesas UART boot / UART emulator profile** | ✅ | ❌ | Debug remains visible but disabled; use E2 or E2 Lite for hardware debugging. |
@@ -123,7 +129,7 @@ C device coverage comes from the current NECTO-compatible database and the avail
 | **Renesas** | RA/ARM devices through normal ARM toolchains, plus dedicated **RL78** and **RX** compiler/programmer/debug flows. |
 | **NXP / Freescale** | ARM/Kinetis-class devices when present in the compatibility database and selected programmer mappings. |
 | **Texas Instruments** | Supported ARM devices such as TM4C-class targets when present in the database/programmer catalog. |
-| **Toshiba** | TMPM3H/TMPM4K/TMPM4L Cortex-M devices. C setups can use the on-board CMSIS-DAP debugger through the pyOCD backend and the CMSIS device data already delivered by the C Core package. |
+| **Toshiba** | Toshiba TMPM Cortex-M devices present in the database. C setups can use the on-board CMSIS-DAP debugger through pyOCD. The programmer/debugger DFP is resolved from the MCU name, downloaded separately from Core packages, and permanently cached on first use. |
 | **GigaDevice** | GD32-class ARM devices when present in the database/programmer catalog. |
 | **Other NECTO database vendors** | Available automatically when a compatible compiler, core package and supported programmer mapping are present. |
 
